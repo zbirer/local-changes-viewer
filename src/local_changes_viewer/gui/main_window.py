@@ -14,9 +14,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from local_changes_viewer.core.domain.file_change import FileChange
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.gui import applog
+from local_changes_viewer.gui.diff_view.unified_view import UnifiedView
 from local_changes_viewer.gui.settings import AppSettings
+from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
 from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
 
@@ -30,13 +33,15 @@ class MainWindow(QMainWindow):
         self._settings = AppSettings()
         self._root_folder: str | None = None
         self._workspace: Workspace | None = None
+        self._selected_change: FileChange | None = None
         self._thread_pool = QThreadPool.globalInstance()
 
         self._tree_view = RepoTreeView(self._settings)
+        self._tree_view.file_selected.connect(self._on_file_selected)
         self._filter_box = QLineEdit()
         self._filter_box.setPlaceholderText("Filter by path…")
         self._filter_box.textChanged.connect(self._tree_view.set_filter_text)
-        self._diff_placeholder = QLabel("Select a file to view its diff")
+        self._diff_view = UnifiedView()
 
         tree_panel = QWidget()
         tree_layout = QVBoxLayout(tree_panel)
@@ -46,7 +51,7 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter()
         splitter.addWidget(tree_panel)
-        splitter.addWidget(self._diff_placeholder)
+        splitter.addWidget(self._diff_view)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
         self.setCentralWidget(splitter)
@@ -100,6 +105,25 @@ class MainWindow(QMainWindow):
     def _on_refresh(self) -> None:
         if self._root_folder:
             self._start_scan(self._root_folder)
+
+    def _on_file_selected(self, repo_path: Path, change: FileChange) -> None:
+        self._selected_change = change
+        if change.diff is not None:
+            self._diff_view.set_diff(change.diff)
+            return
+        self._diff_view.clear_diff()
+        worker = DiffWorker(repo_path, change)
+        worker.signals.diff_ready.connect(self._on_diff_ready)
+        worker.signals.error.connect(self._on_diff_error)
+        self._thread_pool.start(worker)
+
+    def _on_diff_ready(self, change: FileChange, diff) -> None:
+        change.diff = diff
+        if change is self._selected_change:
+            self._diff_view.set_diff(diff)
+
+    def _on_diff_error(self, message: str) -> None:
+        self.statusBar().showMessage(f"Diff failed: {message}", 5000)
 
     def _on_copy_app_log(self) -> None:
         text = "\n".join(applog.all_entries())

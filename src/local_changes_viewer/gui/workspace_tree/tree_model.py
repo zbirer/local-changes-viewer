@@ -16,6 +16,8 @@ _CHANGE_COLORS = {
 }
 
 NODE_KEY_ROLE = Qt.ItemDataRole.UserRole + 1
+FILE_CHANGE_ROLE = Qt.ItemDataRole.UserRole + 2
+REPO_PATH_ROLE = Qt.ItemDataRole.UserRole + 3
 
 
 class RepoTreeModel(QStandardItemModel):
@@ -70,4 +72,6 @@ class RepoTreeModel(QStandardItemModel):
             file_item = QStandardItem(file_name)
             file_item.setEditable(False)
             file_item.setForeground(QBrush(_CHANGE_COLORS[change.change_type]))
+            file_item.setData(change, FILE_CHANGE_ROLE)
+            file_item.setData(str(repo.path), REPO_PATH_ROLE)
             parent_item.appendRow(file_item)

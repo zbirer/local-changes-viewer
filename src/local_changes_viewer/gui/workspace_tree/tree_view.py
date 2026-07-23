@@ -1,12 +1,19 @@
-from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt, Signal
 from PySide6.QtWidgets import QTreeView
 
 from local_changes_viewer.gui import applog
 from local_changes_viewer.gui.settings import AppSettings
-from local_changes_viewer.gui.workspace_tree.tree_model import NODE_KEY_ROLE, RepoTreeModel
+from local_changes_viewer.gui.workspace_tree.tree_model import (
+    FILE_CHANGE_ROLE,
+    NODE_KEY_ROLE,
+    REPO_PATH_ROLE,
+    RepoTreeModel,
+)
 
 
 class RepoTreeView(QTreeView):
+    file_selected = Signal(object, object)  # repo_path: Path, change: FileChange
+
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
         self._settings = settings
@@ -20,6 +27,13 @@ class RepoTreeView(QTreeView):
         self.setHeaderHidden(True)
         self.collapsed.connect(self._on_collapsed)
         self.expanded.connect(self._on_expanded)
+        self.selectionModel().currentChanged.connect(self._on_current_changed)
+
+    def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        change = current.data(FILE_CHANGE_ROLE)
+        repo_path = current.data(REPO_PATH_ROLE)
+        if change is not None and repo_path is not None:
+            self.file_selected.emit(repo_path, change)
 
     def set_workspace(self, workspace) -> None:
         self._programmatic_change = True
