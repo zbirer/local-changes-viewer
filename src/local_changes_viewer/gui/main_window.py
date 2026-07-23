@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from local_changes_viewer.core.domain.file_change import FileChange
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.gui import applog
-from local_changes_viewer.gui.diff_view.unified_view import UnifiedView
+from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.settings import AppSettings
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
@@ -41,7 +41,7 @@ class MainWindow(QMainWindow):
         self._filter_box = QLineEdit()
         self._filter_box.setPlaceholderText("Filter by path…")
         self._filter_box.textChanged.connect(self._tree_view.set_filter_text)
-        self._diff_view = UnifiedView()
+        self._diff_view = DiffViewWidget()
 
         tree_panel = QWidget()
         tree_layout = QVBoxLayout(tree_panel)
