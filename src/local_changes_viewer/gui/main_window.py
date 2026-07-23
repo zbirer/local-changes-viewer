@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         self._filter_box.setPlaceholderText("Filter by path…")
         self._filter_box.textChanged.connect(self._tree_view.set_filter_text)
         self._diff_view = DiffViewWidget()
+        self._diff_view.refresh_requested.connect(self._on_refresh)
 
         self._aggregate_list = AggregateChangeList()
         self._aggregate_list.file_selected.connect(self._on_file_selected)

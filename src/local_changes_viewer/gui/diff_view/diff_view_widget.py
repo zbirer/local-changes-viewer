@@ -1,3 +1,4 @@
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from local_changes_viewer.core.domain.diff import DiffResult
@@ -6,6 +7,8 @@ from local_changes_viewer.gui.diff_view.unified_view import UnifiedView
 
 
 class DiffViewWidget(QWidget):
+    refresh_requested = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self._current_hunk_index = -1
@@ -25,11 +28,15 @@ class DiffViewWidget(QWidget):
         self._next_button = QPushButton("Next change")
         self._next_button.clicked.connect(self._on_next)
 
+        self._refresh_button = QPushButton("Refresh")
+        self._refresh_button.clicked.connect(self.refresh_requested.emit)
+
         toolbar_layout = QHBoxLayout()
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.addWidget(self._toggle_button)
         toolbar_layout.addWidget(self._prev_button)
         toolbar_layout.addWidget(self._next_button)
+        toolbar_layout.addWidget(self._refresh_button)
         toolbar_layout.addStretch()
 
         self._header_label = QLabel("")
