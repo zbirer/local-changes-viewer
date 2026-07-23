@@ -2,7 +2,17 @@ from pathlib import Path
 
 from PySide6.QtCore import QThreadPool
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QCheckBox, QFileDialog, QLabel, QMainWindow, QSplitter, QToolBar
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QFileDialog,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QSplitter,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.gui.settings import AppSettings
@@ -22,10 +32,19 @@ class MainWindow(QMainWindow):
         self._thread_pool = QThreadPool.globalInstance()
 
         self._tree_view = RepoTreeView()
+        self._filter_box = QLineEdit()
+        self._filter_box.setPlaceholderText("Filter by path…")
+        self._filter_box.textChanged.connect(self._tree_view.set_filter_text)
         self._diff_placeholder = QLabel("Select a file to view its diff")
 
+        tree_panel = QWidget()
+        tree_layout = QVBoxLayout(tree_panel)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.addWidget(self._filter_box)
+        tree_layout.addWidget(self._tree_view)
+
         splitter = QSplitter()
-        splitter.addWidget(self._tree_view)
+        splitter.addWidget(tree_panel)
         splitter.addWidget(self._diff_placeholder)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
