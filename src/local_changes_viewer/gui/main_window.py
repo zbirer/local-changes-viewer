@@ -2,11 +2,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QThreadPool
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QToolBar
+from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QSplitter, QToolBar
 
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.gui.settings import AppSettings
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
+from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
 
 
 class MainWindow(QMainWindow):
@@ -20,8 +21,15 @@ class MainWindow(QMainWindow):
         self._workspace: Workspace | None = None
         self._thread_pool = QThreadPool.globalInstance()
 
-        self._folder_label = QLabel("No folder open")
-        self.setCentralWidget(self._folder_label)
+        self._tree_view = RepoTreeView()
+        self._diff_placeholder = QLabel("Select a file to view its diff")
+
+        splitter = QSplitter()
+        splitter.addWidget(self._tree_view)
+        splitter.addWidget(self._diff_placeholder)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        self.setCentralWidget(splitter)
 
         toolbar = QToolBar("Main")
         self.addToolBar(toolbar)
@@ -30,7 +38,8 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._on_open_folder)
         toolbar.addAction(open_action)
 
-        self.statusBar()
+        self._folder_status_label = QLabel("No folder open")
+        self.statusBar().addPermanentWidget(self._folder_status_label)
 
         self._restore_last_folder()
 
@@ -47,7 +56,7 @@ class MainWindow(QMainWindow):
     def _set_root_folder(self, folder: str) -> None:
         self._root_folder = folder
         self._settings.set_last_root_folder(folder)
-        self._folder_label.setText(f"Folder: {folder}")
+        self._folder_status_label.setText(f"Folder: {folder}")
         self._start_scan(folder)
 
     def _start_scan(self, folder: str) -> None:
@@ -59,6 +68,7 @@ class MainWindow(QMainWindow):
 
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._workspace = workspace
+        self._tree_view.set_workspace(workspace)
         repo_count = len(workspace.repositories)
         change_count = sum(len(r.changes) for r in workspace.repositories)
         self.statusBar().showMessage(
