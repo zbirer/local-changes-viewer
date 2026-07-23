@@ -27,6 +27,7 @@ class _LineMeta:
     kind: DiffLineKind | None  # None for hunk-header/fold-marker rows
     intraline_ranges: list[tuple[int, int]] | None = None
     fold_key: tuple[int, int] | None = None
+    is_hunk_header: bool = False
 
 
 class _GutterWidget(QWidget):
@@ -82,7 +83,7 @@ class UnifiedView(QPlainTextEdit):
             lines.append(
                 f"@@ -{hunk.old_start},{hunk.old_count} +{hunk.new_start},{hunk.new_count} @@"
             )
-            meta.append(_LineMeta(None, None, None))
+            meta.append(_LineMeta(None, None, None, is_hunk_header=True))
 
             intraline_by_index: dict[int, list[tuple[int, int]]] = {}
             for removed_idx, added_idx in pair_substitution_indices(hunk.lines):
@@ -122,6 +123,18 @@ class UnifiedView(QPlainTextEdit):
         self._update_gutter_width()
         self._gutter.update()
         self._update_intraline_selections()
+
+    def hunk_count(self) -> int:
+        return sum(1 for m in self._line_meta if m.is_hunk_header)
+
+    def scroll_to_hunk(self, index: int) -> None:
+        header_blocks = [i for i, m in enumerate(self._line_meta) if m.is_hunk_header]
+        if not 0 <= index < len(header_blocks):
+            return
+        block = self.document().findBlockByNumber(header_blocks[index])
+        cursor = QTextCursor(block)
+        self.setTextCursor(cursor)
+        self.centerCursor()
 
     def mousePressEvent(self, event) -> None:
         cursor = self.cursorForPosition(event.pos())

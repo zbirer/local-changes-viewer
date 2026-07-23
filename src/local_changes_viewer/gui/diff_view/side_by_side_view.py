@@ -48,6 +48,7 @@ class SideBySideView(QWidget):
         self._diff: DiffResult | None = None
         self._file_path: str | None = None
         self._expanded_folds: set[tuple[int, int]] = set()
+        self._hunk_start_rows: list[int] = []
         self._left = _DiffPane(self._on_marker_click)
         self._right = _DiffPane(self._on_marker_click)
         self._syncing = False
@@ -93,7 +94,9 @@ class SideBySideView(QWidget):
 
         paired: list[PairedLine] = []
         fold_keys: list[tuple[int, int] | None] = []
+        hunk_start_rows: list[int] = []
         for h_idx, hunk in enumerate(diff.hunks):
+            hunk_start_rows.append(len(paired))
             for seg_idx, segment in enumerate(fold_context(hunk.lines)):
                 key = (h_idx, seg_idx)
                 if isinstance(segment, FoldedRun) and key not in self._expanded_folds:
@@ -130,11 +133,24 @@ class SideBySideView(QWidget):
 
         self._highlight(self._left, [p.left_kind for p in paired], left_ranges)
         self._highlight(self._right, [p.right_kind for p in paired], right_ranges)
+        self._hunk_start_rows = hunk_start_rows
+
+    def hunk_count(self) -> int:
+        return len(self._hunk_start_rows)
+
+    def scroll_to_hunk(self, index: int) -> None:
+        if not 0 <= index < len(self._hunk_start_rows):
+            return
+        block = self._left.document().findBlockByNumber(self._hunk_start_rows[index])
+        cursor = QTextCursor(block)
+        self._left.setTextCursor(cursor)
+        self._left.centerCursor()
 
     def clear_diff(self) -> None:
         self._diff = None
         self._file_path = None
         self._expanded_folds = set()
+        self._hunk_start_rows = []
         self._left.fold_keys = []
         self._right.fold_keys = []
         self._left.setPlainText("")
