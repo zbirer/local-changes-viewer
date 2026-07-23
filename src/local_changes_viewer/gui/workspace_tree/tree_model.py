@@ -69,6 +69,8 @@ class RepoTreeModel(QStandardItemModel):
                 parent_item = dir_item
 
             file_name = parts[-1] if parts else str(change.path)
+            if change.is_directory:
+                file_name += "/"
             file_item = QStandardItem(file_name)
             file_item.setEditable(False)
             file_item.setForeground(QBrush(_CHANGE_COLORS[change.change_type]))

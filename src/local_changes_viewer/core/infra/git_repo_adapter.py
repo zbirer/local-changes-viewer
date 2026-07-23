@@ -38,11 +38,13 @@ class GitRepoAdapter:
                 old_str, new_str = rest.split(" -> ", maxsplit=1)
                 old_path = Path(old_str.strip())
                 rest = new_str
+            rest = rest.strip()
             changes.append(
                 FileChange(
-                    path=Path(rest.strip()),
+                    path=Path(rest),
                     change_type=self._classify(xy),
                     old_path=old_path,
+                    is_directory=rest.endswith("/"),
                 )
             )
         return changes

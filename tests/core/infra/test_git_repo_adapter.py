@@ -40,10 +40,24 @@ def test_list_changes_detects_untracked_file(tmp_path: Path, repo: git.Repo):
 
     changes = GitRepoAdapter(tmp_path).list_changes()
 
-    assert any(
-        c.path == Path("new_file.txt") and c.change_type == ChangeType.UNTRACKED
-        for c in changes
-    )
+    match = next(c for c in changes if c.path == Path("new_file.txt"))
+    assert match.change_type == ChangeType.UNTRACKED
+    assert match.is_directory is False
+
+
+def test_list_changes_detects_untracked_directory_as_single_directory_entry(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "new_dir").mkdir()
+    (tmp_path / "new_dir" / "a.txt").write_text("a\n")
+    (tmp_path / "new_dir" / "b.txt").write_text("b\n")
+
+    changes = GitRepoAdapter(tmp_path).list_changes()
+
+    assert [c.path for c in changes] == [Path("new_dir")]
+    match = changes[0]
+    assert match.change_type == ChangeType.UNTRACKED
+    assert match.is_directory is True
 
 
 def test_list_changes_detects_added_staged_file(tmp_path: Path, repo: git.Repo):

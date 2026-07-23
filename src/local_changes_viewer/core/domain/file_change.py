@@ -20,3 +20,4 @@ class FileChange:
     change_type: ChangeType
     old_path: Path | None = None
     diff: DiffResult | None = None
+    is_directory: bool = False
