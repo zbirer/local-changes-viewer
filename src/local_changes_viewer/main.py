@@ -1,13 +1,8 @@
 import sys
 
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication
 
-
-class MainWindow(QMainWindow):
-    def __init__(self) -> None:
-        super().__init__()
-        self.setWindowTitle("local-changes-viewer")
-        self.resize(1200, 800)
+from local_changes_viewer.gui.main_window import MainWindow
 
 
 def main() -> int:
