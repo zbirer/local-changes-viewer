@@ -74,6 +74,10 @@ class MainWindow(QMainWindow):
         app_log_action.triggered.connect(self._on_copy_app_log)
         toolbar.addAction(app_log_action)
 
+        refresh_action = QAction("Refresh", self)
+        refresh_action.triggered.connect(self._on_refresh)
+        toolbar.addAction(refresh_action)
+
         self._folder_status_label = QLabel("No folder open")
         self.statusBar().addPermanentWidget(self._folder_status_label)
 
@@ -90,6 +94,10 @@ class MainWindow(QMainWindow):
             self._set_root_folder(folder)
 
     def _on_include_ignored_toggled(self, _checked: bool) -> None:
+        if self._root_folder:
+            self._start_scan(self._root_folder)
+
+    def _on_refresh(self) -> None:
         if self._root_folder:
             self._start_scan(self._root_folder)
 
