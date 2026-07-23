@@ -1,9 +1,9 @@
-from dataclasses import dataclass
-
-from PySide6.QtGui import QColor, QFont, QTextFormat
+from PySide6.QtGui import QColor, QFont, QTextCursor, QTextFormat
 from PySide6.QtWidgets import QHBoxLayout, QPlainTextEdit, QSplitter, QTextEdit, QWidget
 
-from local_changes_viewer.core.domain.diff import DiffLine, DiffLineKind, DiffResult
+from local_changes_viewer.core.domain.diff import DiffLineKind, DiffResult
+from local_changes_viewer.core.services.diff_pairing import PairedLine, pair_hunk_lines
+from local_changes_viewer.core.services.intraline_diff import intraline_ranges
 from local_changes_viewer.gui.diff_view.syntax_highlighter import PygmentsHighlighter
 
 _LINE_BG = {
@@ -14,47 +14,10 @@ _LINE_FG = {
     DiffLineKind.ADDED: QColor("#065F46"),
     DiffLineKind.REMOVED: QColor("#991B1B"),
 }
-
-
-@dataclass
-class _PairedLine:
-    left_text: str | None
-    left_kind: DiffLineKind | None
-    right_text: str | None
-    right_kind: DiffLineKind | None
-
-
-def pair_hunk_lines(lines: list[DiffLine]) -> list[_PairedLine]:
-    paired: list[_PairedLine] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.kind is DiffLineKind.CONTEXT:
-            paired.append(_PairedLine(line.text, None, line.text, None))
-            i += 1
-            continue
-
-        removed: list[DiffLine] = []
-        while i < len(lines) and lines[i].kind is DiffLineKind.REMOVED:
-            removed.append(lines[i])
-            i += 1
-        added: list[DiffLine] = []
-        while i < len(lines) and lines[i].kind is DiffLineKind.ADDED:
-            added.append(lines[i])
-            i += 1
-
-        for row in range(max(len(removed), len(added))):
-            left = removed[row] if row < len(removed) else None
-            right = added[row] if row < len(added) else None
-            paired.append(
-                _PairedLine(
-                    left.text if left is not None else None,
-                    DiffLineKind.REMOVED if left is not None else None,
-                    right.text if right is not None else None,
-                    DiffLineKind.ADDED if right is not None else None,
-                )
-            )
-    return paired
+_INTRALINE_BG = {
+    DiffLineKind.ADDED: QColor("#86EFAC"),
+    DiffLineKind.REMOVED: QColor("#FCA5A5"),
+}
 
 
 class _DiffPane(QPlainTextEdit):
@@ -97,7 +60,7 @@ class SideBySideView(QWidget):
         self._syncing = False
 
     def set_diff(self, diff: DiffResult, file_path: str | None = None) -> None:
-        paired: list[_PairedLine] = []
+        paired: list[PairedLine] = []
         for hunk in diff.hunks:
             paired.extend(pair_hunk_lines(hunk.lines))
 
@@ -108,17 +71,34 @@ class SideBySideView(QWidget):
         if file_path is not None:
             self._left.highlighter.set_filename(file_path)
             self._right.highlighter.set_filename(file_path)
-        self._highlight(self._left, [p.left_kind for p in paired])
-        self._highlight(self._right, [p.right_kind for p in paired])
+
+        left_ranges: list[list[tuple[int, int]]] = []
+        right_ranges: list[list[tuple[int, int]]] = []
+        for p in paired:
+            if p.left_kind is DiffLineKind.REMOVED and p.right_kind is DiffLineKind.ADDED:
+                old_ranges, new_ranges = intraline_ranges(p.left_text or "", p.right_text or "")
+                left_ranges.append(old_ranges)
+                right_ranges.append(new_ranges)
+            else:
+                left_ranges.append([])
+                right_ranges.append([])
+
+        self._highlight(self._left, [p.left_kind for p in paired], left_ranges)
+        self._highlight(self._right, [p.right_kind for p in paired], right_ranges)
 
     def clear_diff(self) -> None:
         self._left.setPlainText("")
         self._right.setPlainText("")
 
-    def _highlight(self, pane: QPlainTextEdit, kinds: list[DiffLineKind | None]) -> None:
+    def _highlight(
+        self,
+        pane: QPlainTextEdit,
+        kinds: list[DiffLineKind | None],
+        intraline: list[list[tuple[int, int]]],
+    ) -> None:
         selections = []
         block = pane.document().firstBlock()
-        for kind in kinds:
+        for kind, ranges in zip(kinds, intraline):
             bg = _LINE_BG.get(kind)
             if bg is not None and block.isValid():
                 selection = QTextEdit.ExtraSelection()
@@ -129,5 +109,15 @@ class SideBySideView(QWidget):
                 cursor.setPosition(block.position())
                 selection.cursor = cursor
                 selections.append(selection)
+
+                for start, end in ranges:
+                    sub_selection = QTextEdit.ExtraSelection()
+                    sub_selection.format.setBackground(_INTRALINE_BG[kind])
+                    sub_selection.format.setForeground(_LINE_FG[kind])
+                    sub_cursor = pane.textCursor()
+                    sub_cursor.setPosition(block.position() + start)
+                    sub_cursor.setPosition(block.position() + end, QTextCursor.MoveMode.KeepAnchor)
+                    sub_selection.cursor = sub_cursor
+                    selections.append(sub_selection)
             block = block.next()
         pane.setExtraSelections(selections)

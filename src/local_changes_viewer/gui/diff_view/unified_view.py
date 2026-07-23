@@ -1,15 +1,21 @@
 from dataclasses import dataclass
 
 from PySide6.QtCore import QRect, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
-from PySide6.QtWidgets import QPlainTextEdit, QWidget
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QTextCursor
+from PySide6.QtWidgets import QPlainTextEdit, QTextEdit, QWidget
 
 from local_changes_viewer.core.domain.diff import DiffLineKind, DiffResult
+from local_changes_viewer.core.services.diff_pairing import pair_substitution_indices
+from local_changes_viewer.core.services.intraline_diff import intraline_ranges
 from local_changes_viewer.gui.diff_view.syntax_highlighter import PygmentsHighlighter
 
 _GUTTER_BG = {
     DiffLineKind.ADDED: QColor("#DCFCE7"),
     DiffLineKind.REMOVED: QColor("#FEE2E2"),
+}
+_INTRALINE_BG = {
+    DiffLineKind.ADDED: QColor("#86EFAC"),
+    DiffLineKind.REMOVED: QColor("#FCA5A5"),
 }
 
 
@@ -18,6 +24,7 @@ class _LineMeta:
     old_lineno: int | None
     new_lineno: int | None
     kind: DiffLineKind | None  # None for hunk-header rows
+    intraline_ranges: list[tuple[int, int]] | None = None
 
 
 class _GutterWidget(QWidget):
@@ -52,21 +59,57 @@ class UnifiedView(QPlainTextEdit):
                 f"@@ -{hunk.old_start},{hunk.old_count} +{hunk.new_start},{hunk.new_count} @@"
             )
             meta.append(_LineMeta(None, None, None))
+
+            hunk_meta: list[_LineMeta] = []
             for line in hunk.lines:
                 prefix = {"ADDED": "+", "REMOVED": "-", "CONTEXT": " "}[line.kind.name]
                 lines.append(f"{prefix}{line.text}")
-                meta.append(_LineMeta(line.old_lineno, line.new_lineno, line.kind))
+                hunk_meta.append(_LineMeta(line.old_lineno, line.new_lineno, line.kind))
+
+            for removed_idx, added_idx in pair_substitution_indices(hunk.lines):
+                old_ranges, new_ranges = intraline_ranges(
+                    hunk.lines[removed_idx].text, hunk.lines[added_idx].text
+                )
+                hunk_meta[removed_idx].intraline_ranges = old_ranges
+                hunk_meta[added_idx].intraline_ranges = new_ranges
+
+            meta.extend(hunk_meta)
         self._line_meta = meta
         self.setPlainText("\n".join(lines) if lines else "(no changes)")
         if file_path is not None:
             self._highlighter.set_filename(file_path)
         self._update_gutter_width()
         self._gutter.update()
+        self._update_intraline_selections()
 
     def clear_diff(self) -> None:
         self._line_meta = []
         self.setPlainText("")
         self._update_gutter_width()
+        self.setExtraSelections([])
+
+    def _update_intraline_selections(self) -> None:
+        selections = []
+        block = self.document().firstBlock()
+        block_number = 0
+        while block.isValid():
+            if block_number < len(self._line_meta):
+                meta = self._line_meta[block_number]
+                if meta.kind is not None and meta.intraline_ranges:
+                    for start, end in meta.intraline_ranges:
+                        selection = QTextEdit.ExtraSelection()
+                        selection.format.setBackground(_INTRALINE_BG[meta.kind])
+                        cursor = QTextCursor(block)
+                        # +1 to skip the diff-marker prefix character.
+                        cursor.setPosition(block.position() + 1 + start)
+                        cursor.setPosition(
+                            block.position() + 1 + end, QTextCursor.MoveMode.KeepAnchor
+                        )
+                        selection.cursor = cursor
+                        selections.append(selection)
+            block = block.next()
+            block_number += 1
+        self.setExtraSelections(selections)
 
     def gutter_width(self) -> int:
         digits = max((len(str(m.old_lineno or 0)) for m in self._line_meta), default=1)
