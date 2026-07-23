@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from local_changes_viewer.core.domain.file_change import FileChange
 from local_changes_viewer.core.domain.workspace import Workspace
+from local_changes_viewer.core.services.diff_formatting import format_unified_diff
 from local_changes_viewer.gui import applog
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.settings import AppSettings
@@ -84,6 +85,14 @@ class MainWindow(QMainWindow):
         app_log_action.triggered.connect(self._on_copy_app_log)
         toolbar.addAction(app_log_action)
 
+        copy_diff_action = QAction("Copy Diff", self)
+        copy_diff_action.triggered.connect(self._on_copy_diff)
+        toolbar.addAction(copy_diff_action)
+
+        copy_path_action = QAction("Copy File Path", self)
+        copy_path_action.triggered.connect(self._on_copy_file_path)
+        toolbar.addAction(copy_path_action)
+
         refresh_action = QAction("Refresh", self)
         refresh_action.triggered.connect(self._on_refresh)
         toolbar.addAction(refresh_action)
@@ -148,6 +157,22 @@ class MainWindow(QMainWindow):
         text = "\n".join(applog.all_entries())
         QGuiApplication.clipboard().setText(text)
         self.statusBar().showMessage("App log copied to clipboard", 3000)
+
+    def _on_copy_diff(self) -> None:
+        if self._selected_change is None or self._selected_change.diff is None:
+            self.statusBar().showMessage("No diff to copy", 3000)
+            return
+        text = format_unified_diff(self._selected_change.diff, str(self._selected_change.path))
+        QGuiApplication.clipboard().setText(text)
+        self.statusBar().showMessage("Diff copied to clipboard", 3000)
+
+    def _on_copy_file_path(self) -> None:
+        if self._selected_change is None or self._selected_repo_path is None:
+            self.statusBar().showMessage("No file selected", 3000)
+            return
+        path = self._selected_repo_path / self._selected_change.path
+        QGuiApplication.clipboard().setText(str(path))
+        self.statusBar().showMessage("File path copied to clipboard", 3000)
 
     def _set_root_folder(self, folder: str) -> None:
         self._root_folder = folder
