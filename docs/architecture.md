@@ -148,9 +148,11 @@ next rescan replaces the object).
 No business rules — just I/O wrappers returning domain objects or raw data.
 
 - **`FileSystemScanner`**
-  - `find_git_repos(root: Path) -> list[Path]` — walks `root`, returns every directory
-    containing a `.git` entry, arbitrary depth, flat result (no nesting logic — that's a service
-    concern if any filtering is needed).
+  - `find_git_repos(root: Path) -> list[Path]` — shallow only, no recursive walk: if `root`
+    itself is a `.git` repo, returns `[root]`; otherwise checks each *immediate* child directory
+    of `root` for a `.git` entry and returns those. Does not descend further (no arbitrary-depth
+    search) — this keeps startup scan time independent of what's inside each repo (e.g.
+    `node_modules`, `.venv`, `build`), since large per-repo trees are never walked.
 
 - **`GitRepoAdapter`** (constructed per-repo, wraps a `git.Repo` from GitPython)
   - `get_branch_status() -> BranchStatus`
@@ -166,9 +168,8 @@ Business rules live here. These are the classes pytest exercises against fake/st
   - `scan(root: Path, *, include_ignored: bool) -> Workspace`
   - Uses `FileSystemScanner.find_git_repos`, then a `GitRepoAdapter` per repo path to build
     `Repository` objects via `list_changes()` + `get_branch_status()`.
-  - Owns: ignored-file filtering (feature 10), nested-repo de-duplication rules (feature 24 —
-    flat list, but if a "child" repo's own changes shouldn't also appear under the parent's
-    working-tree scan, that exclusion rule is decided here, not in infra).
+  - Owns: ignored-file filtering (feature 10). Nested-repo de-duplication no longer applies —
+    `find_git_repos` only ever returns `root` itself or its immediate children, never both.
 
 - **`DiffService`**
   - `load_diff(file_change: FileChange, repo_path: Path, *, ignore_whitespace: bool) -> DiffResult`

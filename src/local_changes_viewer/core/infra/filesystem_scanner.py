@@ -1,14 +1,17 @@
-import os
 from pathlib import Path
 
 
 class FileSystemScanner:
     def find_git_repos(self, root: Path) -> list[Path]:
+        if self._is_git_repo(root):
+            return [root]
+
         repos: list[Path] = []
-        for dirpath, dirnames, filenames in os.walk(root):
-            current = Path(dirpath)
-            if ".git" in dirnames or ".git" in filenames:
-                repos.append(current)
-            # Don't descend into .git internals looking for further repos.
-            dirnames[:] = [d for d in dirnames if d != ".git"]
+        for child in sorted(root.iterdir()):
+            if child.is_dir() and self._is_git_repo(child):
+                repos.append(child)
         return repos
+
+    @staticmethod
+    def _is_git_repo(path: Path) -> bool:
+        return (path / ".git").exists()

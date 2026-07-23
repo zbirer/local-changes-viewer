@@ -14,6 +14,8 @@ across many repos at once instead of one project at a time.
 - Side-by-side **and** unified diff views, with a toggle between them
 - Syntax-highlighted diffs (via Pygments), with word-level highlighting inside changed lines
 - Search/filter, collapse/expand, ignored-files toggle, whitespace-ignore toggle
+- "Ignore MD files" and "Hide repos without changes" toggles, plus custom folder-name filter
+  rules (contains/equals), all under the **Settings** menu
 - Background scanning and lazy diff loading — stays responsive on folders with many repos
 - Remembers your last-opened folder, window layout, and view preferences
 

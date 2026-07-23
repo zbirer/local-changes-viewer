@@ -1,5 +1,6 @@
 from PySide6.QtCore import QByteArray, QSettings
 
+from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterMode, FolderFilterRule
 from local_changes_viewer.gui import applog
 
 
@@ -42,6 +43,39 @@ class AppSettings:
 
     def set_ignore_whitespace(self, enabled: bool) -> None:
         self._settings.setValue("ignore_whitespace", enabled)
+
+    def ignore_md_files(self) -> bool:
+        value = self._settings.value("ignore_md_files", False)
+        if isinstance(value, str):
+            return value.lower() == "true"
+        return bool(value)
+
+    def set_ignore_md_files(self, enabled: bool) -> None:
+        self._settings.setValue("ignore_md_files", enabled)
+
+    def hide_repos_without_changes(self) -> bool:
+        value = self._settings.value("hide_repos_without_changes", False)
+        if isinstance(value, str):
+            return value.lower() == "true"
+        return bool(value)
+
+    def set_hide_repos_without_changes(self, enabled: bool) -> None:
+        self._settings.setValue("hide_repos_without_changes", enabled)
+
+    def folder_filter_rules(self) -> list[FolderFilterRule]:
+        raw = self._settings.value("folder_filter_rules", [])
+        if not raw:
+            return []
+        rules = []
+        for entry in raw:
+            mode_value, _, text = entry.partition(":")
+            rules.append(FolderFilterRule(text=text, mode=FolderFilterMode(mode_value)))
+        return rules
+
+    def set_folder_filter_rules(self, rules: list[FolderFilterRule]) -> None:
+        self._settings.setValue(
+            "folder_filter_rules", [f"{rule.mode.value}:{rule.text}" for rule in rules]
+        )
 
     def collapsed_node_keys(self) -> set[str]:
         value = self._settings.value("collapsed_node_keys", [])

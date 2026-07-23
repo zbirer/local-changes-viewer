@@ -16,15 +16,32 @@ def test_finds_repo_at_root(tmp_path: Path):
     assert found == [tmp_path / "repo_a"]
 
 
-def test_finds_repo_at_arbitrary_depth(tmp_path: Path):
-    _make_git_dir(tmp_path / "level1" / "level2" / "level3" / "repo_deep")
+def test_root_itself_is_a_repo(tmp_path: Path):
+    _make_git_dir(tmp_path)
 
     found = FileSystemScanner().find_git_repos(tmp_path)
 
-    assert found == [tmp_path / "level1" / "level2" / "level3" / "repo_deep"]
+    assert found == [tmp_path]
 
 
-def test_finds_nested_repo_inside_another_repo(tmp_path: Path):
+def test_does_not_descend_past_immediate_children(tmp_path: Path):
+    _make_git_dir(tmp_path / "level1" / "level2" / "repo_deep")
+
+    found = FileSystemScanner().find_git_repos(tmp_path)
+
+    assert found == []
+
+
+def test_finds_multiple_sibling_repos(tmp_path: Path):
+    _make_git_dir(tmp_path / "repo_a")
+    _make_git_dir(tmp_path / "repo_b")
+
+    found = FileSystemScanner().find_git_repos(tmp_path)
+
+    assert found == [tmp_path / "repo_a", tmp_path / "repo_b"]
+
+
+def test_does_not_look_inside_a_found_repo_for_further_repos(tmp_path: Path):
     outer = tmp_path / "outer_repo"
     inner = outer / "vendor" / "inner_repo"
     _make_git_dir(outer)
@@ -32,7 +49,7 @@ def test_finds_nested_repo_inside_another_repo(tmp_path: Path):
 
     found = FileSystemScanner().find_git_repos(tmp_path)
 
-    assert set(found) == {outer, inner}
+    assert found == [outer]
 
 
 def test_ignores_folders_without_git(tmp_path: Path):
@@ -53,17 +70,6 @@ def test_detects_git_as_file_for_submodules(tmp_path: Path):
     found = FileSystemScanner().find_git_repos(tmp_path)
 
     assert found == [submodule]
-
-
-def test_does_not_descend_into_git_internals(tmp_path: Path):
-    repo = tmp_path / "repo_a"
-    _make_git_dir(repo)
-    # Simulate a directory inside .git internals that itself looks like a repo.
-    _make_git_dir(repo / ".git" / "modules" / "fake_nested")
-
-    found = FileSystemScanner().find_git_repos(tmp_path)
-
-    assert found == [repo]
 
 
 def test_returns_empty_list_when_no_repos_found(tmp_path: Path):

@@ -3,24 +3,25 @@ from pathlib import Path
 from PySide6.QtCore import QProcess, QThreadPool, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox,
     QFileDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QSplitter,
     QTabWidget,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
+from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterRule
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.core.services.diff_formatting import format_unified_diff
 from local_changes_viewer.core.services.file_info import detect_encoding, detect_line_ending
+from local_changes_viewer.core.services.workspace_filter import filter_workspace
 from local_changes_viewer.gui import applog
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
+from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
 from local_changes_viewer.gui.settings import AppSettings
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
@@ -37,6 +38,7 @@ class MainWindow(QMainWindow):
         self._settings = AppSettings()
         self._root_folder: str | None = None
         self._workspace: Workspace | None = None
+        self._folder_filter_rules: list[FolderFilterRule] = self._settings.folder_filter_rules()
         self._selected_change: FileChange | None = None
         self._selected_repo_path: Path | None = None
         self._thread_pool = QThreadPool.globalInstance()
@@ -69,52 +71,73 @@ class MainWindow(QMainWindow):
         self._splitter.setStretchFactor(1, 2)
         self.setCentralWidget(self._splitter)
 
-        toolbar = QToolBar("Main")
-        self.addToolBar(toolbar)
+        actions_menu = self.menuBar().addMenu("Actions")
 
         open_action = QAction("Open Folder…", self)
         open_action.triggered.connect(self._on_open_folder)
-        toolbar.addAction(open_action)
+        actions_menu.addAction(open_action)
 
-        self._include_ignored_checkbox = QCheckBox("Show ignored files")
-        self._include_ignored_checkbox.toggled.connect(self._on_include_ignored_toggled)
-        toolbar.addWidget(self._include_ignored_checkbox)
+        settings_menu = self.menuBar().addMenu("Settings")
 
-        self._ignore_whitespace_checkbox = QCheckBox("Ignore whitespace")
-        self._ignore_whitespace_checkbox.toggled.connect(self._on_ignore_whitespace_toggled)
-        toolbar.addWidget(self._ignore_whitespace_checkbox)
+        self._include_ignored_action = QAction("Show ignored files", self, checkable=True)
+        self._include_ignored_action.toggled.connect(self._on_include_ignored_toggled)
+        settings_menu.addAction(self._include_ignored_action)
+
+        self._ignore_whitespace_action = QAction("Ignore whitespace", self, checkable=True)
+        self._ignore_whitespace_action.toggled.connect(self._on_ignore_whitespace_toggled)
+        settings_menu.addAction(self._ignore_whitespace_action)
+
+        self._ignore_md_action = QAction("Ignore MD files", self, checkable=True)
+        self._ignore_md_action.toggled.connect(self._on_display_filter_toggled)
+        settings_menu.addAction(self._ignore_md_action)
+
+        self._hide_empty_repos_action = QAction(
+            "Hide repos without changes", self, checkable=True
+        )
+        self._hide_empty_repos_action.toggled.connect(self._on_display_filter_toggled)
+        settings_menu.addAction(self._hide_empty_repos_action)
+
+        manage_folder_filters_action = QAction("Manage Folder Filters…", self)
+        manage_folder_filters_action.triggered.connect(self._on_manage_folder_filters)
+        settings_menu.addAction(manage_folder_filters_action)
+
+        actions_menu.addSeparator()
 
         collapse_all_action = QAction("Collapse All", self)
         collapse_all_action.triggered.connect(self._tree_view.collapse_all)
-        toolbar.addAction(collapse_all_action)
+        actions_menu.addAction(collapse_all_action)
 
         expand_all_action = QAction("Expand All", self)
         expand_all_action.triggered.connect(self._tree_view.expand_all)
-        toolbar.addAction(expand_all_action)
+        actions_menu.addAction(expand_all_action)
+
+        actions_menu.addSeparator()
 
         app_log_action = QAction("App Log", self)
         app_log_action.triggered.connect(self._on_copy_app_log)
-        toolbar.addAction(app_log_action)
+        actions_menu.addAction(app_log_action)
 
         copy_diff_action = QAction("Copy Diff", self)
         copy_diff_action.triggered.connect(self._on_copy_diff)
-        toolbar.addAction(copy_diff_action)
+        actions_menu.addAction(copy_diff_action)
 
         copy_path_action = QAction("Copy File Path", self)
         copy_path_action.triggered.connect(self._on_copy_file_path)
-        toolbar.addAction(copy_path_action)
+        actions_menu.addAction(copy_path_action)
 
         open_editor_action = QAction("Open in Default Editor", self)
         open_editor_action.triggered.connect(self._on_open_in_editor)
-        toolbar.addAction(open_editor_action)
+        actions_menu.addAction(open_editor_action)
 
         reveal_action = QAction("Reveal in Finder", self)
         reveal_action.triggered.connect(self._on_reveal_in_finder)
-        toolbar.addAction(reveal_action)
+        actions_menu.addAction(reveal_action)
+
+        actions_menu.addSeparator()
 
         refresh_action = QAction("Refresh", self)
         refresh_action.triggered.connect(self._on_refresh)
-        toolbar.addAction(refresh_action)
+        actions_menu.addAction(refresh_action)
 
         self._folder_status_label = QLabel("No folder open")
         self.statusBar().addPermanentWidget(self._folder_status_label)
@@ -144,14 +167,18 @@ class MainWindow(QMainWindow):
 
         self._diff_view.set_side_by_side(self._settings.diff_view_mode() == "side_by_side")
 
-        self._ignore_whitespace_checkbox.setChecked(self._settings.ignore_whitespace())
+        self._ignore_whitespace_action.setChecked(self._settings.ignore_whitespace())
+        self._ignore_md_action.setChecked(self._settings.ignore_md_files())
+        self._hide_empty_repos_action.setChecked(self._settings.hide_repos_without_changes())
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._settings.set_window_geometry(self.saveGeometry())
         self._settings.set_splitter_sizes(self._splitter.sizes())
         mode = "side_by_side" if self._diff_view.is_side_by_side() else "unified"
         self._settings.set_diff_view_mode(mode)
-        self._settings.set_ignore_whitespace(self._ignore_whitespace_checkbox.isChecked())
+        self._settings.set_ignore_whitespace(self._ignore_whitespace_action.isChecked())
+        self._settings.set_ignore_md_files(self._ignore_md_action.isChecked())
+        self._settings.set_hide_repos_without_changes(self._hide_empty_repos_action.isChecked())
         super().closeEvent(event)
 
     def _on_open_folder(self) -> None:
@@ -192,7 +219,7 @@ class MainWindow(QMainWindow):
     def _load_diff(self, repo_path: Path, change: FileChange) -> None:
         self._diff_view.clear_diff()
         worker = DiffWorker(
-            repo_path, change, ignore_whitespace=self._ignore_whitespace_checkbox.isChecked()
+            repo_path, change, ignore_whitespace=self._ignore_whitespace_action.isChecked()
         )
         worker.signals.diff_ready.connect(self._on_diff_ready)
         worker.signals.error.connect(self._on_diff_error)
@@ -213,6 +240,19 @@ class MainWindow(QMainWindow):
                     change.diff = None
         if self._selected_change is not None and self._selected_repo_path is not None:
             self._load_diff(self._selected_repo_path, self._selected_change)
+
+    def _on_display_filter_toggled(self, _checked: bool) -> None:
+        self._refresh_display()
+
+    def _on_manage_folder_filters(self) -> None:
+        dialog = FolderFilterDialog(self._folder_filter_rules, self)
+        dialog.rules_changed.connect(self._on_folder_filter_rules_changed)
+        dialog.exec()
+
+    def _on_folder_filter_rules_changed(self, rules: list[FolderFilterRule]) -> None:
+        self._folder_filter_rules = rules
+        self._settings.set_folder_filter_rules(rules)
+        self._refresh_display()
 
     def _on_copy_app_log(self) -> None:
         text = "\n".join(applog.all_entries())
@@ -258,7 +298,7 @@ class MainWindow(QMainWindow):
     def _start_scan(self, folder: str) -> None:
         self.statusBar().showMessage("Scanning...")
         worker = ScanWorker(
-            Path(folder), include_ignored=self._include_ignored_checkbox.isChecked()
+            Path(folder), include_ignored=self._include_ignored_action.isChecked()
         )
         worker.signals.workspace_ready.connect(self._on_workspace_ready)
         worker.signals.error.connect(self._on_scan_error)
@@ -266,13 +306,25 @@ class MainWindow(QMainWindow):
 
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._workspace = workspace
-        self._tree_view.set_workspace(workspace)
-        self._aggregate_list.set_workspace(workspace)
+        self._refresh_display()
         repo_count = len(workspace.repositories)
         change_count = sum(len(r.changes) for r in workspace.repositories)
         self.statusBar().showMessage(
             f"Done — {repo_count} repositories, {change_count} changed files", 5000
         )
+
+    def _refresh_display(self) -> None:
+        if self._workspace is None:
+            return
+        display_workspace = filter_workspace(
+            self._workspace,
+            ignore_md_files=self._ignore_md_action.isChecked(),
+            hide_repos_without_changes=self._hide_empty_repos_action.isChecked(),
+            folder_filter_rules=self._folder_filter_rules,
+        )
+        self._tree_view.set_workspace(display_workspace)
+        self._aggregate_list.set_workspace(display_workspace)
+        change_count = sum(len(r.changes) for r in display_workspace.repositories)
         self._summary_label.setText(f"Total changed files: {change_count}")
 
     def _on_scan_error(self, message: str) -> None:

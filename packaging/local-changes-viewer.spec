@@ -59,8 +59,8 @@ app = BUNDLE(
     icon=None,
     bundle_identifier="us.canopycare.local-changes-viewer",
     info_plist={
-        "CFBundleName": "local-changes-viewer",
-        "CFBundleDisplayName": "local-changes-viewer",
+        "CFBundleName": "GitChanges",
+        "CFBundleDisplayName": "GitChanges",
         "CFBundleShortVersionString": "0.1.0",
         "NSHighResolutionCapable": True,
     },

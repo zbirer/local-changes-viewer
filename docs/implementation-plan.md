@@ -29,10 +29,12 @@ Feature numbers refer to `docs/spec.md` §5.
 - **Verify**: `pytest tests/core/domain` green — construction/equality tests only.
 
 ### Step 3 — Filesystem scanning
-- **Build**: `FileSystemScanner.find_git_repos(root)`. *(Feature 1)*
-- **Verify**: pytest against a `tmp_path` fixture with nested fake `.git` dirs at varying depths,
-  including a nested-repo case (repo inside a repo) to confirm both are found *(Feature 24
-  groundwork)*.
+- **Build**: `FileSystemScanner.find_git_repos(root)`. Shallow only: `root` itself, or its
+  immediate child directories — never an arbitrary-depth walk, so scan time doesn't depend on
+  what's inside each repo (`node_modules`, `.venv`, `build`, etc.). *(Feature 1)*
+- **Verify**: pytest against a `tmp_path` fixture confirming root-as-repo, sibling repos as
+  immediate children, and that repos nested deeper than one level (or inside another found repo)
+  are *not* found.
 
 ### Step 4 — Git status/branch reading
 - **Build**: `GitRepoAdapter.list_changes()` and `get_branch_status()` using GitPython.
