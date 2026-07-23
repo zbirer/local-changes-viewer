@@ -1,7 +1,10 @@
+from collections.abc import Callable
+
 from PySide6.QtGui import QColor, QFont, QTextCursor, QTextFormat
 from PySide6.QtWidgets import QHBoxLayout, QPlainTextEdit, QSplitter, QTextEdit, QWidget
 
 from local_changes_viewer.core.domain.diff import DiffLineKind, DiffResult
+from local_changes_viewer.core.services.context_folding import FoldedRun, fold_context
 from local_changes_viewer.core.services.diff_pairing import PairedLine, pair_hunk_lines
 from local_changes_viewer.core.services.intraline_diff import intraline_ranges
 from local_changes_viewer.gui.diff_view.syntax_highlighter import PygmentsHighlighter
@@ -21,18 +24,32 @@ _INTRALINE_BG = {
 
 
 class _DiffPane(QPlainTextEdit):
-    def __init__(self) -> None:
+    def __init__(self, on_marker_click: Callable[[tuple[int, int]], None]) -> None:
         super().__init__()
         self.setReadOnly(True)
         self.setFont(QFont("Menlo", 12))
         self.highlighter = PygmentsHighlighter(self.document())
+        self.fold_keys: list[tuple[int, int] | None] = []
+        self._on_marker_click = on_marker_click
+
+    def mousePressEvent(self, event) -> None:
+        block_number = self.cursorForPosition(event.pos()).blockNumber()
+        if block_number < len(self.fold_keys):
+            fold_key = self.fold_keys[block_number]
+            if fold_key is not None:
+                self._on_marker_click(fold_key)
+                return
+        super().mousePressEvent(event)
 
 
 class SideBySideView(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self._left = _DiffPane()
-        self._right = _DiffPane()
+        self._diff: DiffResult | None = None
+        self._file_path: str | None = None
+        self._expanded_folds: set[tuple[int, int]] = set()
+        self._left = _DiffPane(self._on_marker_click)
+        self._right = _DiffPane(self._on_marker_click)
         self._syncing = False
         self._left.verticalScrollBar().valueChanged.connect(self._sync_from_left)
         self._right.verticalScrollBar().valueChanged.connect(self._sync_from_right)
@@ -59,18 +76,46 @@ class SideBySideView(QWidget):
         self._left.verticalScrollBar().setValue(value)
         self._syncing = False
 
+    def _on_marker_click(self, fold_key: tuple[int, int]) -> None:
+        self._expanded_folds.add(fold_key)
+        self._rebuild()
+
     def set_diff(self, diff: DiffResult, file_path: str | None = None) -> None:
+        self._diff = diff
+        self._file_path = file_path
+        self._expanded_folds = set()
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        diff = self._diff
+        if diff is None:
+            return
+
         paired: list[PairedLine] = []
-        for hunk in diff.hunks:
-            paired.extend(pair_hunk_lines(hunk.lines))
+        fold_keys: list[tuple[int, int] | None] = []
+        for h_idx, hunk in enumerate(diff.hunks):
+            for seg_idx, segment in enumerate(fold_context(hunk.lines)):
+                key = (h_idx, seg_idx)
+                if isinstance(segment, FoldedRun) and key not in self._expanded_folds:
+                    count = len(segment.lines)
+                    marker = f"⋯ {count} unchanged lines — click to expand ⋯"
+                    paired.append(PairedLine(marker, None, marker, None))
+                    fold_keys.append(key)
+                    continue
+
+                for p in pair_hunk_lines(segment.lines):
+                    paired.append(p)
+                    fold_keys.append(None)
 
         left_lines = [p.left_text if p.left_text is not None else "" for p in paired]
         right_lines = [p.right_text if p.right_text is not None else "" for p in paired]
         self._left.setPlainText("\n".join(left_lines) if left_lines else "(no changes)")
         self._right.setPlainText("\n".join(right_lines) if right_lines else "(no changes)")
-        if file_path is not None:
-            self._left.highlighter.set_filename(file_path)
-            self._right.highlighter.set_filename(file_path)
+        self._left.fold_keys = fold_keys
+        self._right.fold_keys = fold_keys
+        if self._file_path is not None:
+            self._left.highlighter.set_filename(self._file_path)
+            self._right.highlighter.set_filename(self._file_path)
 
         left_ranges: list[list[tuple[int, int]]] = []
         right_ranges: list[list[tuple[int, int]]] = []
@@ -87,6 +132,11 @@ class SideBySideView(QWidget):
         self._highlight(self._right, [p.right_kind for p in paired], right_ranges)
 
     def clear_diff(self) -> None:
+        self._diff = None
+        self._file_path = None
+        self._expanded_folds = set()
+        self._left.fold_keys = []
+        self._right.fold_keys = []
         self._left.setPlainText("")
         self._right.setPlainText("")
 

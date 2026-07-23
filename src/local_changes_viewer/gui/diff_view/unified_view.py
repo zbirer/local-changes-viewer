@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit, QTextEdit, QWidget
 
 from local_changes_viewer.core.domain.diff import DiffLineKind, DiffResult
+from local_changes_viewer.core.services.context_folding import FoldedRun, fold_context
 from local_changes_viewer.core.services.diff_pairing import pair_substitution_indices
 from local_changes_viewer.core.services.intraline_diff import intraline_ranges
 from local_changes_viewer.gui.diff_view.syntax_highlighter import PygmentsHighlighter
@@ -23,8 +24,9 @@ _INTRALINE_BG = {
 class _LineMeta:
     old_lineno: int | None
     new_lineno: int | None
-    kind: DiffLineKind | None  # None for hunk-header rows
+    kind: DiffLineKind | None  # None for hunk-header/fold-marker rows
     intraline_ranges: list[tuple[int, int]] | None = None
+    fold_key: tuple[int, int] | None = None
 
 
 class _GutterWidget(QWidget):
@@ -45,6 +47,9 @@ class UnifiedView(QPlainTextEdit):
         self.setReadOnly(True)
         self.setFont(QFont("Menlo", 12))
         self._line_meta: list[_LineMeta] = []
+        self._diff: DiffResult | None = None
+        self._file_path: str | None = None
+        self._expanded_folds: set[tuple[int, int]] = set()
         self._gutter = _GutterWidget(self)
         self._highlighter = PygmentsHighlighter(self.document(), prefix_len=1)
         self.blockCountChanged.connect(self._update_gutter_width)
@@ -52,41 +57,82 @@ class UnifiedView(QPlainTextEdit):
         self._update_gutter_width()
 
     def set_diff(self, diff: DiffResult, file_path: str | None = None) -> None:
+        self._diff = diff
+        self._file_path = file_path
+        self._expanded_folds = set()
+        self._rebuild()
+
+    def clear_diff(self) -> None:
+        self._diff = None
+        self._file_path = None
+        self._expanded_folds = set()
+        self._line_meta = []
+        self.setPlainText("")
+        self._update_gutter_width()
+        self.setExtraSelections([])
+
+    def _rebuild(self) -> None:
+        diff = self._diff
+        if diff is None:
+            return
+
         lines: list[str] = []
         meta: list[_LineMeta] = []
-        for hunk in diff.hunks:
+        for h_idx, hunk in enumerate(diff.hunks):
             lines.append(
                 f"@@ -{hunk.old_start},{hunk.old_count} +{hunk.new_start},{hunk.new_count} @@"
             )
             meta.append(_LineMeta(None, None, None))
 
-            hunk_meta: list[_LineMeta] = []
-            for line in hunk.lines:
-                prefix = {"ADDED": "+", "REMOVED": "-", "CONTEXT": " "}[line.kind.name]
-                lines.append(f"{prefix}{line.text}")
-                hunk_meta.append(_LineMeta(line.old_lineno, line.new_lineno, line.kind))
-
+            intraline_by_index: dict[int, list[tuple[int, int]]] = {}
             for removed_idx, added_idx in pair_substitution_indices(hunk.lines):
                 old_ranges, new_ranges = intraline_ranges(
                     hunk.lines[removed_idx].text, hunk.lines[added_idx].text
                 )
-                hunk_meta[removed_idx].intraline_ranges = old_ranges
-                hunk_meta[added_idx].intraline_ranges = new_ranges
+                intraline_by_index[removed_idx] = old_ranges
+                intraline_by_index[added_idx] = new_ranges
 
-            meta.extend(hunk_meta)
+            orig_idx = 0
+            for seg_idx, segment in enumerate(fold_context(hunk.lines)):
+                key = (h_idx, seg_idx)
+                if isinstance(segment, FoldedRun) and key not in self._expanded_folds:
+                    count = len(segment.lines)
+                    lines.append(f"⋯ {count} unchanged lines — click to expand ⋯")
+                    meta.append(_LineMeta(None, None, None, fold_key=key))
+                    orig_idx += count
+                    continue
+
+                for line in segment.lines:
+                    prefix = {"ADDED": "+", "REMOVED": "-", "CONTEXT": " "}[line.kind.name]
+                    lines.append(f"{prefix}{line.text}")
+                    meta.append(
+                        _LineMeta(
+                            line.old_lineno,
+                            line.new_lineno,
+                            line.kind,
+                            intraline_ranges=intraline_by_index.get(orig_idx),
+                        )
+                    )
+                    orig_idx += 1
+
         self._line_meta = meta
         self.setPlainText("\n".join(lines) if lines else "(no changes)")
-        if file_path is not None:
-            self._highlighter.set_filename(file_path)
+        if self._file_path is not None:
+            self._highlighter.set_filename(self._file_path)
         self._update_gutter_width()
         self._gutter.update()
         self._update_intraline_selections()
 
-    def clear_diff(self) -> None:
-        self._line_meta = []
-        self.setPlainText("")
-        self._update_gutter_width()
-        self.setExtraSelections([])
+    def mousePressEvent(self, event) -> None:
+        cursor = self.cursorForPosition(event.pos())
+        block_number = cursor.blockNumber()
+        if block_number < len(self._line_meta):
+            fold_key = self._line_meta[block_number].fold_key
+            if fold_key is not None:
+                self._expanded_folds.add(fold_key)
+                self._rebuild()
+                return
+        super().mousePressEvent(event)
 
     def _update_intraline_selections(self) -> None:
         selections = []

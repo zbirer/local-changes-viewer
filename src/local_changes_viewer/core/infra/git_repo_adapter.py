@@ -73,7 +73,7 @@ class GitRepoAdapter:
         if change.change_type == ChangeType.UNTRACKED:
             return self._diff_untracked(change.path)
 
-        args = ["--no-color", "-M", "-U3"]
+        args = ["--no-color", "-M", "--unified=100000"]
         if ignore_whitespace:
             args.append("--ignore-all-space")
         args.append("HEAD")
