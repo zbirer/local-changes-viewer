@@ -1,12 +1,13 @@
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QThreadPool, QTimer, QUrl
+from PySide6.QtCore import QProcess, Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -27,6 +28,7 @@ from local_changes_viewer.gui.settings import AppSettings
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
 from local_changes_viewer.gui.workspace_tree.aggregate_list import AggregateChangeList
+from local_changes_viewer.gui.workspace_tree.tree_model import FILE_CHANGE_ROLE
 from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
 
 
@@ -49,6 +51,8 @@ class MainWindow(QMainWindow):
 
         self._tree_view = RepoTreeView(self._settings)
         self._tree_view.file_selected.connect(self._on_file_selected)
+        self._tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree_view.customContextMenuRequested.connect(self._on_tree_context_menu)
         self._filter_box = QLineEdit()
         self._filter_box.setPlaceholderText("Filter by path…")
         self._filter_box.textChanged.connect(self._tree_view.set_filter_text)
@@ -128,6 +132,10 @@ class MainWindow(QMainWindow):
         copy_path_action = QAction("Copy File Path", self)
         copy_path_action.triggered.connect(self._on_copy_file_path)
         actions_menu.addAction(copy_path_action)
+
+        copy_name_action = QAction("Copy File Name", self)
+        copy_name_action.triggered.connect(self._on_copy_file_name)
+        actions_menu.addAction(copy_name_action)
 
         open_editor_action = QAction("Open in Default Editor", self)
         open_editor_action.triggered.connect(self._on_open_in_editor)
@@ -278,6 +286,24 @@ class MainWindow(QMainWindow):
         path = self._selected_repo_path / self._selected_change.path
         QGuiApplication.clipboard().setText(str(path))
         self.statusBar().showMessage("File path copied to clipboard", 3000)
+
+    def _on_copy_file_name(self) -> None:
+        if self._selected_change is None:
+            self.statusBar().showMessage("No file selected", 3000)
+            return
+        QGuiApplication.clipboard().setText(self._selected_change.path.name)
+        self.statusBar().showMessage("File name copied to clipboard", 3000)
+
+    def _on_tree_context_menu(self, pos) -> None:
+        index = self._tree_view.indexAt(pos)
+        if not index.isValid() or index.data(FILE_CHANGE_ROLE) is None:
+            return
+        self._tree_view.setCurrentIndex(index)
+
+        menu = QMenu(self._tree_view)
+        menu.addAction("Copy Path", self._on_copy_file_path)
+        menu.addAction("Copy Name", self._on_copy_file_name)
+        menu.exec(self._tree_view.viewport().mapToGlobal(pos))
 
     def _on_open_in_editor(self) -> None:
         if self._selected_change is None or self._selected_repo_path is None:
