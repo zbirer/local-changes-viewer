@@ -57,6 +57,9 @@ class DiffViewWidget(QWidget):
     def set_side_by_side(self, enabled: bool) -> None:
         self._toggle_button.setChecked(enabled)
 
+    def set_sync_scroll(self, enabled: bool) -> None:
+        self._side_by_side.set_sync_scroll(enabled)
+
     def _on_toggled(self, checked: bool) -> None:
         self._stack.setCurrentIndex(1 if checked else 0)
         self._toggle_button.setText("Unified" if checked else "Side-by-side")

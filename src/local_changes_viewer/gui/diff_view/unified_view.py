@@ -47,6 +47,7 @@ class UnifiedView(QPlainTextEdit):
         super().__init__()
         self.setReadOnly(True)
         self.setFont(QFont("Menlo", 12))
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._line_meta: list[_LineMeta] = []
         self._diff: DiffResult | None = None
         self._file_path: str | None = None
@@ -158,6 +159,7 @@ class UnifiedView(QPlainTextEdit):
                     for start, end in meta.intraline_ranges:
                         selection = QTextEdit.ExtraSelection()
                         selection.format.setBackground(_INTRALINE_BG[meta.kind])
+                        selection.format.setForeground(QColor("#000000"))
                         cursor = QTextCursor(block)
                         # +1 to skip the diff-marker prefix character.
                         cursor.setPosition(block.position() + 1 + start)

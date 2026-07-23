@@ -28,6 +28,7 @@ class _DiffPane(QPlainTextEdit):
         super().__init__()
         self.setReadOnly(True)
         self.setFont(QFont("Menlo", 12))
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.highlighter = PygmentsHighlighter(self.document())
         self.fold_keys: list[tuple[int, int] | None] = []
         self._on_marker_click = on_marker_click
@@ -52,8 +53,11 @@ class SideBySideView(QWidget):
         self._left = _DiffPane(self._on_marker_click)
         self._right = _DiffPane(self._on_marker_click)
         self._syncing = False
-        self._left.verticalScrollBar().valueChanged.connect(self._sync_from_left)
-        self._right.verticalScrollBar().valueChanged.connect(self._sync_from_right)
+        self._sync_scroll_enabled = True
+        self._left.verticalScrollBar().valueChanged.connect(self._sync_vertical_from_left)
+        self._right.verticalScrollBar().valueChanged.connect(self._sync_vertical_from_right)
+        self._left.horizontalScrollBar().valueChanged.connect(self._sync_horizontal_from_left)
+        self._right.horizontalScrollBar().valueChanged.connect(self._sync_horizontal_from_right)
 
         splitter = QSplitter()
         splitter.addWidget(self._left)
@@ -63,18 +67,35 @@ class SideBySideView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
 
-    def _sync_from_left(self, value: int) -> None:
-        if self._syncing:
+    def set_sync_scroll(self, enabled: bool) -> None:
+        self._sync_scroll_enabled = enabled
+
+    def _sync_vertical_from_left(self, value: int) -> None:
+        if self._syncing or not self._sync_scroll_enabled:
             return
         self._syncing = True
         self._right.verticalScrollBar().setValue(value)
         self._syncing = False
 
-    def _sync_from_right(self, value: int) -> None:
-        if self._syncing:
+    def _sync_vertical_from_right(self, value: int) -> None:
+        if self._syncing or not self._sync_scroll_enabled:
             return
         self._syncing = True
         self._left.verticalScrollBar().setValue(value)
+        self._syncing = False
+
+    def _sync_horizontal_from_left(self, value: int) -> None:
+        if self._syncing or not self._sync_scroll_enabled:
+            return
+        self._syncing = True
+        self._right.horizontalScrollBar().setValue(value)
+        self._syncing = False
+
+    def _sync_horizontal_from_right(self, value: int) -> None:
+        if self._syncing or not self._sync_scroll_enabled:
+            return
+        self._syncing = True
+        self._left.horizontalScrollBar().setValue(value)
         self._syncing = False
 
     def _on_marker_click(self, fold_key: tuple[int, int]) -> None:

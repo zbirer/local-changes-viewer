@@ -110,6 +110,12 @@ class MainWindow(QMainWindow):
         manage_folder_filters_action.triggered.connect(self._on_manage_folder_filters)
         settings_menu.addAction(manage_folder_filters_action)
 
+        self._sync_scroll_action = QAction(
+            "Sync side-by-side scroll", self, checkable=True
+        )
+        self._sync_scroll_action.toggled.connect(self._on_sync_scroll_toggled)
+        settings_menu.addAction(self._sync_scroll_action)
+
         actions_menu.addSeparator()
 
         collapse_all_action = QAction("Collapse All", self)
@@ -183,6 +189,8 @@ class MainWindow(QMainWindow):
         self._ignore_whitespace_action.setChecked(self._settings.ignore_whitespace())
         self._ignore_md_action.setChecked(self._settings.ignore_md_files())
         self._hide_empty_repos_action.setChecked(self._settings.hide_repos_without_changes())
+        self._sync_scroll_action.setChecked(self._settings.sync_side_by_side_scroll())
+        self._diff_view.set_sync_scroll(self._sync_scroll_action.isChecked())
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._settings.set_window_geometry(self.saveGeometry())
@@ -192,6 +200,7 @@ class MainWindow(QMainWindow):
         self._settings.set_ignore_whitespace(self._ignore_whitespace_action.isChecked())
         self._settings.set_ignore_md_files(self._ignore_md_action.isChecked())
         self._settings.set_hide_repos_without_changes(self._hide_empty_repos_action.isChecked())
+        self._settings.set_sync_side_by_side_scroll(self._sync_scroll_action.isChecked())
         super().closeEvent(event)
 
     def _on_open_folder(self) -> None:
@@ -256,6 +265,9 @@ class MainWindow(QMainWindow):
 
     def _on_display_filter_toggled(self, _checked: bool) -> None:
         self._refresh_display()
+
+    def _on_sync_scroll_toggled(self, checked: bool) -> None:
+        self._diff_view.set_sync_scroll(checked)
 
     def _on_manage_folder_filters(self) -> None:
         dialog = FolderFilterDialog(self._folder_filter_rules, self)

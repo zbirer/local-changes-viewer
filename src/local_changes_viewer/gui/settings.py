@@ -77,6 +77,15 @@ class AppSettings:
             "folder_filter_rules", [f"{rule.mode.value}:{rule.text}" for rule in rules]
         )
 
+    def sync_side_by_side_scroll(self) -> bool:
+        value = self._settings.value("sync_side_by_side_scroll", True)
+        if isinstance(value, str):
+            return value.lower() == "true"
+        return bool(value)
+
+    def set_sync_side_by_side_scroll(self, enabled: bool) -> None:
+        self._settings.setValue("sync_side_by_side_scroll", enabled)
+
     def collapsed_node_keys(self) -> set[str]:
         value = self._settings.value("collapsed_node_keys", [])
         applog.log(f"collapsed_node_keys() raw QSettings value: {value!r} (type={type(value)})")
