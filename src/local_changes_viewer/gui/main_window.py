@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QSplitter,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -22,6 +23,7 @@ from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.settings import AppSettings
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
+from local_changes_viewer.gui.workspace_tree.aggregate_list import AggregateChangeList
 from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
 
 
@@ -45,11 +47,19 @@ class MainWindow(QMainWindow):
         self._filter_box.textChanged.connect(self._tree_view.set_filter_text)
         self._diff_view = DiffViewWidget()
 
+        self._aggregate_list = AggregateChangeList()
+        self._aggregate_list.file_selected.connect(self._on_file_selected)
+        self._tree_view.scope_changed.connect(self._aggregate_list.set_scope)
+
+        left_tabs = QTabWidget()
+        left_tabs.addTab(self._tree_view, "Folder Tree")
+        left_tabs.addTab(self._aggregate_list, "All Changes")
+
         tree_panel = QWidget()
         tree_layout = QVBoxLayout(tree_panel)
         tree_layout.setContentsMargins(0, 0, 0, 0)
         tree_layout.addWidget(self._filter_box)
-        tree_layout.addWidget(self._tree_view)
+        tree_layout.addWidget(left_tabs)
 
         splitter = QSplitter()
         splitter.addWidget(tree_panel)
@@ -99,6 +109,9 @@ class MainWindow(QMainWindow):
 
         self._folder_status_label = QLabel("No folder open")
         self.statusBar().addPermanentWidget(self._folder_status_label)
+
+        self._summary_label = QLabel("")
+        self.statusBar().addPermanentWidget(self._summary_label)
 
         self._restore_last_folder()
 
@@ -192,11 +205,13 @@ class MainWindow(QMainWindow):
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._workspace = workspace
         self._tree_view.set_workspace(workspace)
+        self._aggregate_list.set_workspace(workspace)
         repo_count = len(workspace.repositories)
         change_count = sum(len(r.changes) for r in workspace.repositories)
         self.statusBar().showMessage(
             f"Done — {repo_count} repositories, {change_count} changed files", 5000
         )
+        self._summary_label.setText(f"Total changed files: {change_count}")
 
     def _on_scan_error(self, message: str) -> None:
         self.statusBar().showMessage(f"Scan failed: {message}", 5000)
