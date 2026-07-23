@@ -3,7 +3,8 @@ from pathlib import Path
 import git
 import pytest
 
-from local_changes_viewer.core.domain.file_change import ChangeType
+from local_changes_viewer.core.domain.diff import DiffLineKind
+from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
 
 
@@ -138,3 +139,71 @@ def test_branch_status_ahead_and_behind(tmp_path: Path):
     assert status.branch_name == "main"
     assert status.ahead == 1
     assert status.behind == 1
+
+
+def test_compute_diff_for_modified_file(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "committed.txt").write_text("original CONTENT\n")
+    change = FileChange(path=Path("committed.txt"), change_type=ChangeType.MODIFIED)
+
+    result = GitRepoAdapter(tmp_path).compute_diff(change)
+
+    assert len(result.hunks) == 1
+    lines = result.hunks[0].lines
+    assert [line.kind for line in lines] == [DiffLineKind.REMOVED, DiffLineKind.ADDED]
+    assert lines[0].text == "original content"
+    assert lines[1].text == "original CONTENT"
+
+
+def test_compute_diff_for_deleted_file(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "committed.txt").unlink()
+    change = FileChange(path=Path("committed.txt"), change_type=ChangeType.DELETED)
+
+    result = GitRepoAdapter(tmp_path).compute_diff(change)
+
+    assert len(result.hunks) == 1
+    lines = result.hunks[0].lines
+    assert all(line.kind == DiffLineKind.REMOVED for line in lines)
+    assert lines[0].text == "original content"
+
+
+def test_compute_diff_for_untracked_file(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "new_file.txt").write_text("line one\nline two\n")
+    change = FileChange(path=Path("new_file.txt"), change_type=ChangeType.UNTRACKED)
+
+    result = GitRepoAdapter(tmp_path).compute_diff(change)
+
+    assert len(result.hunks) == 1
+    lines = result.hunks[0].lines
+    assert [line.text for line in lines] == ["line one", "line two"]
+    assert all(line.kind == DiffLineKind.ADDED for line in lines)
+    assert [line.new_lineno for line in lines] == [1, 2]
+
+
+def test_compute_diff_for_renamed_file(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "wide.txt").write_text("a\nb\nc\nd\ne\n")
+    repo.index.add(["wide.txt"])
+    repo.index.commit("add wide.txt")
+
+    (tmp_path / "wide.txt").rename(tmp_path / "renamed.txt")
+    (tmp_path / "renamed.txt").write_text("a\nB\nc\nd\ne\n")
+    repo.index.remove(["wide.txt"])
+    repo.index.add(["renamed.txt"])
+    change = FileChange(
+        path=Path("renamed.txt"), change_type=ChangeType.RENAMED, old_path=Path("wide.txt")
+    )
+
+    result = GitRepoAdapter(tmp_path).compute_diff(change)
+
+    assert len(result.hunks) == 1
+    lines = result.hunks[0].lines
+    assert any(line.kind == DiffLineKind.REMOVED and line.text == "b" for line in lines)
+    assert any(line.kind == DiffLineKind.ADDED and line.text == "B" for line in lines)
+
+
+def test_compute_diff_ignore_whitespace(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "committed.txt").write_text("original    content\n")
+    change = FileChange(path=Path("committed.txt"), change_type=ChangeType.MODIFIED)
+
+    result = GitRepoAdapter(tmp_path).compute_diff(change, ignore_whitespace=True)
+
+    assert result.hunks == []
