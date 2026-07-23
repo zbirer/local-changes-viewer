@@ -34,6 +34,7 @@ class MainWindow(QMainWindow):
         self._root_folder: str | None = None
         self._workspace: Workspace | None = None
         self._selected_change: FileChange | None = None
+        self._selected_repo_path: Path | None = None
         self._thread_pool = QThreadPool.globalInstance()
 
         self._tree_view = RepoTreeView(self._settings)
@@ -66,6 +67,10 @@ class MainWindow(QMainWindow):
         self._include_ignored_checkbox = QCheckBox("Show ignored files")
         self._include_ignored_checkbox.toggled.connect(self._on_include_ignored_toggled)
         toolbar.addWidget(self._include_ignored_checkbox)
+
+        self._ignore_whitespace_checkbox = QCheckBox("Ignore whitespace")
+        self._ignore_whitespace_checkbox.toggled.connect(self._on_ignore_whitespace_toggled)
+        toolbar.addWidget(self._ignore_whitespace_checkbox)
 
         collapse_all_action = QAction("Collapse All", self)
         collapse_all_action.triggered.connect(self._tree_view.collapse_all)
@@ -108,11 +113,17 @@ class MainWindow(QMainWindow):
 
     def _on_file_selected(self, repo_path: Path, change: FileChange) -> None:
         self._selected_change = change
+        self._selected_repo_path = repo_path
         if change.diff is not None:
             self._diff_view.set_diff(change.diff, str(change.path))
             return
+        self._load_diff(repo_path, change)
+
+    def _load_diff(self, repo_path: Path, change: FileChange) -> None:
         self._diff_view.clear_diff()
-        worker = DiffWorker(repo_path, change)
+        worker = DiffWorker(
+            repo_path, change, ignore_whitespace=self._ignore_whitespace_checkbox.isChecked()
+        )
         worker.signals.diff_ready.connect(self._on_diff_ready)
         worker.signals.error.connect(self._on_diff_error)
         self._thread_pool.start(worker)
@@ -124,6 +135,14 @@ class MainWindow(QMainWindow):
 
     def _on_diff_error(self, message: str) -> None:
         self.statusBar().showMessage(f"Diff failed: {message}", 5000)
+
+    def _on_ignore_whitespace_toggled(self, _checked: bool) -> None:
+        if self._workspace is not None:
+            for repo in self._workspace.repositories:
+                for change in repo.changes:
+                    change.diff = None
+        if self._selected_change is not None and self._selected_repo_path is not None:
+            self._load_diff(self._selected_repo_path, self._selected_change)
 
     def _on_copy_app_log(self) -> None:
         text = "\n".join(applog.all_entries())
