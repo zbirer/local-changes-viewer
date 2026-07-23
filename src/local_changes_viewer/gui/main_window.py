@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QThreadPool, QUrl
+from PySide6.QtCore import QProcess, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -43,6 +43,9 @@ class MainWindow(QMainWindow):
         self._selected_change: FileChange | None = None
         self._selected_repo_path: Path | None = None
         self._thread_pool = QThreadPool.globalInstance()
+        self._scan_refresh_timer = QTimer(self)
+        self._scan_refresh_timer.setInterval(150)
+        self._scan_refresh_timer.timeout.connect(self._refresh_display)
 
         self._tree_view = RepoTreeView(self._settings)
         self._tree_view.file_selected.connect(self._on_file_selected)
@@ -308,6 +311,7 @@ class MainWindow(QMainWindow):
         worker.signals.repo_ready.connect(self._on_repo_ready)
         worker.signals.workspace_ready.connect(self._on_workspace_ready)
         worker.signals.error.connect(self._on_scan_error)
+        self._scan_refresh_timer.start()
         self._thread_pool.start(worker)
 
     def _on_scan_progress(self, message: str) -> None:
@@ -315,11 +319,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def _on_repo_ready(self, repo: Repository) -> None:
+        # Rebuilding the tree (expandAll + restore-collapsed-state) is O(current
+        # repo count), so appending it here without refreshing keeps repo arrival
+        # cheap; the periodic timer coalesces the actual tree rebuilds instead of
+        # doing one per repo.
         if self._workspace is not None:
             self._workspace.repositories.append(repo)
-            self._refresh_display()
 
     def _on_workspace_ready(self, workspace: Workspace) -> None:
+        self._scan_refresh_timer.stop()
         self._workspace = workspace
         self._refresh_display()
         repo_count = len(workspace.repositories)
@@ -343,5 +351,6 @@ class MainWindow(QMainWindow):
         self._summary_label.setText(f"Total changed files: {change_count}")
 
     def _on_scan_error(self, message: str) -> None:
+        self._scan_refresh_timer.stop()
         applog.log(f"Scan failed: {message}")
         self.statusBar().showMessage(f"Scan failed: {message}", 5000)
