@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QThreadPool, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -62,12 +62,12 @@ class MainWindow(QMainWindow):
         tree_layout.addWidget(self._filter_box)
         tree_layout.addWidget(left_tabs)
 
-        splitter = QSplitter()
-        splitter.addWidget(tree_panel)
-        splitter.addWidget(self._diff_view)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-        self.setCentralWidget(splitter)
+        self._splitter = QSplitter()
+        self._splitter.addWidget(tree_panel)
+        self._splitter.addWidget(self._diff_view)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 2)
+        self.setCentralWidget(self._splitter)
 
         toolbar = QToolBar("Main")
         self.addToolBar(toolbar)
@@ -126,11 +126,33 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._file_info_label)
 
         self._restore_last_folder()
+        self._restore_window_state()
 
     def _restore_last_folder(self) -> None:
         last_folder = self._settings.last_root_folder()
         if last_folder:
             self._set_root_folder(last_folder)
+
+    def _restore_window_state(self) -> None:
+        geometry = self._settings.window_geometry()
+        if geometry:
+            self.restoreGeometry(geometry)
+
+        sizes = self._settings.splitter_sizes()
+        if sizes:
+            self._splitter.setSizes(sizes)
+
+        self._diff_view.set_side_by_side(self._settings.diff_view_mode() == "side_by_side")
+
+        self._ignore_whitespace_checkbox.setChecked(self._settings.ignore_whitespace())
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._settings.set_window_geometry(self.saveGeometry())
+        self._settings.set_splitter_sizes(self._splitter.sizes())
+        mode = "side_by_side" if self._diff_view.is_side_by_side() else "unified"
+        self._settings.set_diff_view_mode(mode)
+        self._settings.set_ignore_whitespace(self._ignore_whitespace_checkbox.isChecked())
+        super().closeEvent(event)
 
     def _on_open_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Open Folder")
