@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from local_changes_viewer.core.domain.diff import DiffResult
 from local_changes_viewer.gui.diff_view.side_by_side_view import SideBySideView
@@ -32,9 +32,13 @@ class DiffViewWidget(QWidget):
         toolbar_layout.addWidget(self._next_button)
         toolbar_layout.addStretch()
 
+        self._header_label = QLabel("")
+        self._header_label.setStyleSheet("color: #6B7280;")
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(toolbar_layout)
+        layout.addWidget(self._header_label)
         layout.addWidget(self._stack)
 
     def _active_view(self) -> UnifiedView | SideBySideView:
@@ -63,8 +67,15 @@ class DiffViewWidget(QWidget):
         self._current_hunk_index = -1
         self._unified.set_diff(diff, file_path)
         self._side_by_side.set_diff(diff, file_path)
+        if diff.old_blob_id and diff.new_blob_id:
+            self._header_label.setText(
+                f"index {diff.old_blob_id}..{diff.new_blob_id}  ({diff.old_ref} → {diff.new_ref})"
+            )
+        else:
+            self._header_label.setText(f"{diff.old_ref} → {diff.new_ref}")
 
     def clear_diff(self) -> None:
         self._current_hunk_index = -1
         self._unified.clear_diff()
         self._side_by_side.clear_diff()
+        self._header_label.setText("")

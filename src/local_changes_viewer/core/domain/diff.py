@@ -30,3 +30,5 @@ class DiffResult:
     old_ref: str
     new_ref: str
     hunks: list[DiffHunk] = field(default_factory=list)
+    old_blob_id: str | None = None
+    new_blob_id: str | None = None

@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from PySide6.QtCore import QThreadPool
-from PySide6.QtGui import QAction, QGuiApplication
+from PySide6.QtCore import QProcess, QThreadPool, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -15,9 +15,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from local_changes_viewer.core.domain.file_change import FileChange
+from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.core.services.diff_formatting import format_unified_diff
+from local_changes_viewer.core.services.file_info import detect_encoding, detect_line_ending
 from local_changes_viewer.gui import applog
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.settings import AppSettings
@@ -103,6 +104,14 @@ class MainWindow(QMainWindow):
         copy_path_action.triggered.connect(self._on_copy_file_path)
         toolbar.addAction(copy_path_action)
 
+        open_editor_action = QAction("Open in Default Editor", self)
+        open_editor_action.triggered.connect(self._on_open_in_editor)
+        toolbar.addAction(open_editor_action)
+
+        reveal_action = QAction("Reveal in Finder", self)
+        reveal_action.triggered.connect(self._on_reveal_in_finder)
+        toolbar.addAction(reveal_action)
+
         refresh_action = QAction("Refresh", self)
         refresh_action.triggered.connect(self._on_refresh)
         toolbar.addAction(refresh_action)
@@ -112,6 +121,9 @@ class MainWindow(QMainWindow):
 
         self._summary_label = QLabel("")
         self.statusBar().addPermanentWidget(self._summary_label)
+
+        self._file_info_label = QLabel("")
+        self.statusBar().addPermanentWidget(self._file_info_label)
 
         self._restore_last_folder()
 
@@ -136,10 +148,24 @@ class MainWindow(QMainWindow):
     def _on_file_selected(self, repo_path: Path, change: FileChange) -> None:
         self._selected_change = change
         self._selected_repo_path = repo_path
+        self._update_file_info_label(repo_path, change)
         if change.diff is not None:
             self._diff_view.set_diff(change.diff, str(change.path))
             return
         self._load_diff(repo_path, change)
+
+    def _update_file_info_label(self, repo_path: Path, change: FileChange) -> None:
+        if change.change_type == ChangeType.DELETED:
+            self._file_info_label.setText("Deleted")
+            return
+        try:
+            content = (repo_path / change.path).read_bytes()
+        except OSError:
+            self._file_info_label.setText("")
+            return
+        encoding = detect_encoding(content)
+        line_ending = detect_line_ending(content)
+        self._file_info_label.setText(f"{encoding} · {line_ending}")
 
     def _load_diff(self, repo_path: Path, change: FileChange) -> None:
         self._diff_view.clear_diff()
@@ -186,6 +212,20 @@ class MainWindow(QMainWindow):
         path = self._selected_repo_path / self._selected_change.path
         QGuiApplication.clipboard().setText(str(path))
         self.statusBar().showMessage("File path copied to clipboard", 3000)
+
+    def _on_open_in_editor(self) -> None:
+        if self._selected_change is None or self._selected_repo_path is None:
+            self.statusBar().showMessage("No file selected", 3000)
+            return
+        path = self._selected_repo_path / self._selected_change.path
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _on_reveal_in_finder(self) -> None:
+        if self._selected_change is None or self._selected_repo_path is None:
+            self.statusBar().showMessage("No file selected", 3000)
+            return
+        path = self._selected_repo_path / self._selected_change.path
+        QProcess.startDetached("open", ["-R", str(path)])
 
     def _set_root_folder(self, folder: str) -> None:
         self._root_folder = folder

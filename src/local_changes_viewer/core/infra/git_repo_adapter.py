@@ -12,6 +12,7 @@ _BRANCH_LINE_RE = re.compile(
 )
 _AHEAD_BEHIND_RE = re.compile(r"(ahead|behind) (\d+)")
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_INDEX_LINE_RE = re.compile(r"^index (\w+)\.\.(\w+)")
 
 _STATUS_CODE_TO_CHANGE_TYPE = {
     "??": ChangeType.UNTRACKED,
@@ -104,8 +105,15 @@ class GitRepoAdapter:
         hunks: list[DiffHunk] = []
         current_hunk: DiffHunk | None = None
         old_lineno = new_lineno = 0
+        old_blob_id: str | None = None
+        new_blob_id: str | None = None
 
         for line in raw.splitlines():
+            index_match = _INDEX_LINE_RE.match(line)
+            if index_match:
+                old_blob_id, new_blob_id = index_match.group(1), index_match.group(2)
+                continue
+
             match = _HUNK_HEADER_RE.match(line)
             if match:
                 old_start = int(match.group(1))
@@ -142,7 +150,13 @@ class GitRepoAdapter:
                 old_lineno += 1
                 new_lineno += 1
 
-        return DiffResult(old_ref=old_ref, new_ref=new_ref, hunks=hunks)
+        return DiffResult(
+            old_ref=old_ref,
+            new_ref=new_ref,
+            hunks=hunks,
+            old_blob_id=old_blob_id,
+            new_blob_id=new_blob_id,
+        )
 
     @staticmethod
     def _classify(xy: str) -> ChangeType:
