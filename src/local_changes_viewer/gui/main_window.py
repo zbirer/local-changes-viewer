@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterRule
+from local_changes_viewer.core.domain.repository import Repository
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.core.services.diff_formatting import format_unified_diff
 from local_changes_viewer.core.services.file_info import detect_encoding, detect_line_ending
@@ -296,22 +297,36 @@ class MainWindow(QMainWindow):
         self._start_scan(folder)
 
     def _start_scan(self, folder: str) -> None:
-        self.statusBar().showMessage("Scanning...")
+        applog.log(f"Starting scan of {folder}")
+        self.statusBar().showMessage("Starting scan…")
+        self._workspace = Workspace(root_path=Path(folder), repositories=[])
+        self._refresh_display()
         worker = ScanWorker(
             Path(folder), include_ignored=self._include_ignored_action.isChecked()
         )
+        worker.signals.progress.connect(self._on_scan_progress)
+        worker.signals.repo_ready.connect(self._on_repo_ready)
         worker.signals.workspace_ready.connect(self._on_workspace_ready)
         worker.signals.error.connect(self._on_scan_error)
         self._thread_pool.start(worker)
+
+    def _on_scan_progress(self, message: str) -> None:
+        applog.log(message)
+        self.statusBar().showMessage(message)
+
+    def _on_repo_ready(self, repo: Repository) -> None:
+        if self._workspace is not None:
+            self._workspace.repositories.append(repo)
+            self._refresh_display()
 
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._workspace = workspace
         self._refresh_display()
         repo_count = len(workspace.repositories)
         change_count = sum(len(r.changes) for r in workspace.repositories)
-        self.statusBar().showMessage(
-            f"Done — {repo_count} repositories, {change_count} changed files", 5000
-        )
+        message = f"Done — {repo_count} repositories, {change_count} changed files"
+        applog.log(message)
+        self.statusBar().showMessage(message, 5000)
 
     def _refresh_display(self) -> None:
         if self._workspace is None:
@@ -328,4 +343,5 @@ class MainWindow(QMainWindow):
         self._summary_label.setText(f"Total changed files: {change_count}")
 
     def _on_scan_error(self, message: str) -> None:
+        applog.log(f"Scan failed: {message}")
         self.statusBar().showMessage(f"Scan failed: {message}", 5000)

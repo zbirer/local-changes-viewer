@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -135,3 +136,88 @@ def test_scan_returns_empty_workspace_when_no_repos_found(tmp_path: Path):
     workspace = service.scan(tmp_path)
 
     assert workspace.repositories == []
+
+
+def test_scan_reports_progress_for_discovery_and_each_repo(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    repo_b = tmp_path / "repo_b"
+    fixtures = {
+        repo_a: FakeGitRepoAdapter(repo_a, [], _branch()),
+        repo_b: FakeGitRepoAdapter(repo_b, [], _branch()),
+    }
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a, repo_b]),
+        adapter_factory=lambda path: fixtures[path],
+    )
+
+    messages: list[str] = []
+    service.scan(tmp_path, on_progress=messages.append)
+
+    assert len(messages) == 5
+    assert messages[0] == "Discovering git repositories…"
+    assert re.fullmatch(
+        r"Found 2 repositories in \d+\.\d{2}s — scanning \(up to 2 in parallel\)…",
+        messages[1],
+    )
+    assert re.fullmatch(r"Scanned 1/2: repo_a… \(\d+\.\d{2}s\)", messages[2])
+    assert re.fullmatch(r"Scanned 2/2: repo_b… \(\d+\.\d{2}s\)", messages[3])
+    assert re.fullmatch(
+        r"Scan finished in \d+\.\d{2}s — 2/2 repos scanned", messages[4]
+    )
+
+
+def test_scan_reports_progress_for_empty_workspace(tmp_path: Path):
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([]),
+        adapter_factory=lambda path: pytest.fail("should not be called"),
+    )
+
+    messages: list[str] = []
+    service.scan(tmp_path, on_progress=messages.append)
+
+    assert len(messages) == 2
+    assert messages[0] == "Discovering git repositories…"
+    assert re.fullmatch(r"No git repositories found \(\d+\.\d{2}s\)", messages[1])
+
+
+def test_scan_calls_on_repo_ready_for_each_successful_repo_in_order(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    repo_b = tmp_path / "repo_b"
+    fixtures = {
+        repo_a: FakeGitRepoAdapter(repo_a, [], _branch()),
+        repo_b: FakeGitRepoAdapter(repo_b, [], _branch()),
+    }
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a, repo_b]),
+        adapter_factory=lambda path: fixtures[path],
+    )
+
+    ready_names: list[str] = []
+    service.scan(tmp_path, on_repo_ready=lambda repo: ready_names.append(repo.name))
+
+    assert ready_names == ["repo_a", "repo_b"]
+
+
+def test_scan_does_not_call_on_repo_ready_for_broken_repo(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    repo_broken = tmp_path / "repo_broken"
+
+    class BrokenAdapter:
+        def list_changes(self):
+            raise RuntimeError("corrupt repo")
+
+        def get_branch_status(self):
+            raise RuntimeError("corrupt repo")
+
+    good_adapter = FakeGitRepoAdapter(repo_a, [], _branch())
+    factory = {repo_a: good_adapter, repo_broken: BrokenAdapter()}
+
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a, repo_broken]),
+        adapter_factory=lambda path: factory[path],
+    )
+
+    ready_names: list[str] = []
+    service.scan(tmp_path, on_repo_ready=lambda repo: ready_names.append(repo.name))
+
+    assert ready_names == ["repo_a"]
