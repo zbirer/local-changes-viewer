@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThreadPool
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QSplitter, QToolBar
+from PySide6.QtWidgets import QCheckBox, QFileDialog, QLabel, QMainWindow, QSplitter, QToolBar
 
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.gui.settings import AppSettings
@@ -38,6 +38,10 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._on_open_folder)
         toolbar.addAction(open_action)
 
+        self._include_ignored_checkbox = QCheckBox("Show ignored files")
+        self._include_ignored_checkbox.toggled.connect(self._on_include_ignored_toggled)
+        toolbar.addWidget(self._include_ignored_checkbox)
+
         self._folder_status_label = QLabel("No folder open")
         self.statusBar().addPermanentWidget(self._folder_status_label)
 
@@ -53,6 +57,10 @@ class MainWindow(QMainWindow):
         if folder:
             self._set_root_folder(folder)
 
+    def _on_include_ignored_toggled(self, _checked: bool) -> None:
+        if self._root_folder:
+            self._start_scan(self._root_folder)
+
     def _set_root_folder(self, folder: str) -> None:
         self._root_folder = folder
         self._settings.set_last_root_folder(folder)
@@ -61,7 +69,9 @@ class MainWindow(QMainWindow):
 
     def _start_scan(self, folder: str) -> None:
         self.statusBar().showMessage("Scanning...")
-        worker = ScanWorker(Path(folder))
+        worker = ScanWorker(
+            Path(folder), include_ignored=self._include_ignored_checkbox.isChecked()
+        )
         worker.signals.workspace_ready.connect(self._on_workspace_ready)
         worker.signals.error.connect(self._on_scan_error)
         self._thread_pool.start(worker)
