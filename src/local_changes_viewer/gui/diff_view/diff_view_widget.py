@@ -28,9 +28,9 @@ class DiffViewWidget(QWidget):
         self._stack.setCurrentIndex(1 if checked else 0)
         self._toggle_button.setText("Unified" if checked else "Side-by-side")
 
-    def set_diff(self, diff: DiffResult) -> None:
-        self._unified.set_diff(diff)
-        self._side_by_side.set_diff(diff)
+    def set_diff(self, diff: DiffResult, file_path: str | None = None) -> None:
+        self._unified.set_diff(diff, file_path)
+        self._side_by_side.set_diff(diff, file_path)
 
     def clear_diff(self) -> None:
         self._unified.clear_diff()

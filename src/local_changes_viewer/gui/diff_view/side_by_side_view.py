@@ -4,6 +4,7 @@ from PySide6.QtGui import QColor, QFont, QTextFormat
 from PySide6.QtWidgets import QHBoxLayout, QPlainTextEdit, QSplitter, QTextEdit, QWidget
 
 from local_changes_viewer.core.domain.diff import DiffLine, DiffLineKind, DiffResult
+from local_changes_viewer.gui.diff_view.syntax_highlighter import PygmentsHighlighter
 
 _LINE_BG = {
     DiffLineKind.ADDED: QColor("#DCFCE7"),
@@ -61,6 +62,7 @@ class _DiffPane(QPlainTextEdit):
         super().__init__()
         self.setReadOnly(True)
         self.setFont(QFont("Menlo", 12))
+        self.highlighter = PygmentsHighlighter(self.document())
 
 
 class SideBySideView(QWidget):
@@ -94,7 +96,7 @@ class SideBySideView(QWidget):
         self._left.verticalScrollBar().setValue(value)
         self._syncing = False
 
-    def set_diff(self, diff: DiffResult) -> None:
+    def set_diff(self, diff: DiffResult, file_path: str | None = None) -> None:
         paired: list[_PairedLine] = []
         for hunk in diff.hunks:
             paired.extend(pair_hunk_lines(hunk.lines))
@@ -103,6 +105,9 @@ class SideBySideView(QWidget):
         right_lines = [p.right_text if p.right_text is not None else "" for p in paired]
         self._left.setPlainText("\n".join(left_lines) if left_lines else "(no changes)")
         self._right.setPlainText("\n".join(right_lines) if right_lines else "(no changes)")
+        if file_path is not None:
+            self._left.highlighter.set_filename(file_path)
+            self._right.highlighter.set_filename(file_path)
         self._highlight(self._left, [p.left_kind for p in paired])
         self._highlight(self._right, [p.right_kind for p in paired])
 

@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import QPlainTextEdit, QWidget
 
 from local_changes_viewer.core.domain.diff import DiffLineKind, DiffResult
+from local_changes_viewer.gui.diff_view.syntax_highlighter import PygmentsHighlighter
 
 _GUTTER_BG = {
     DiffLineKind.ADDED: QColor("#DCFCE7"),
@@ -38,11 +39,12 @@ class UnifiedView(QPlainTextEdit):
         self.setFont(QFont("Menlo", 12))
         self._line_meta: list[_LineMeta] = []
         self._gutter = _GutterWidget(self)
+        self._highlighter = PygmentsHighlighter(self.document(), prefix_len=1)
         self.blockCountChanged.connect(self._update_gutter_width)
         self.updateRequest.connect(self._update_gutter_area)
         self._update_gutter_width()
 
-    def set_diff(self, diff: DiffResult) -> None:
+    def set_diff(self, diff: DiffResult, file_path: str | None = None) -> None:
         lines: list[str] = []
         meta: list[_LineMeta] = []
         for hunk in diff.hunks:
@@ -56,6 +58,8 @@ class UnifiedView(QPlainTextEdit):
                 meta.append(_LineMeta(line.old_lineno, line.new_lineno, line.kind))
         self._line_meta = meta
         self.setPlainText("\n".join(lines) if lines else "(no changes)")
+        if file_path is not None:
+            self._highlighter.set_filename(file_path)
         self._update_gutter_width()
         self._gutter.update()
 

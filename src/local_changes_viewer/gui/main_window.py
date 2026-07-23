@@ -109,7 +109,7 @@ class MainWindow(QMainWindow):
     def _on_file_selected(self, repo_path: Path, change: FileChange) -> None:
         self._selected_change = change
         if change.diff is not None:
-            self._diff_view.set_diff(change.diff)
+            self._diff_view.set_diff(change.diff, str(change.path))
             return
         self._diff_view.clear_diff()
         worker = DiffWorker(repo_path, change)
@@ -120,7 +120,7 @@ class MainWindow(QMainWindow):
     def _on_diff_ready(self, change: FileChange, diff) -> None:
         change.diff = diff
         if change is self._selected_change:
-            self._diff_view.set_diff(diff)
+            self._diff_view.set_diff(diff, str(change.path))
 
     def _on_diff_error(self, message: str) -> None:
         self.statusBar().showMessage(f"Diff failed: {message}", 5000)
