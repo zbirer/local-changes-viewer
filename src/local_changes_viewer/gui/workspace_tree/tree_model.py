@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QStandardItem, QStandardItemModel
 
 from local_changes_viewer.core.domain.file_change import ChangeType
@@ -13,6 +14,8 @@ _CHANGE_COLORS = {
     ChangeType.UNTRACKED: QColor("#6B7280"),
     ChangeType.IGNORED: QColor("#9CA3AF"),
 }
+
+NODE_KEY_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
 class RepoTreeModel(QStandardItemModel):
@@ -32,11 +35,13 @@ class RepoTreeModel(QStandardItemModel):
             )
             repo_item = QStandardItem(label)
             repo_item.setEditable(False)
+            repo_item.setData(str(repo.path), NODE_KEY_ROLE)
             root.appendRow(repo_item)
-            self._add_changes(repo_item, repo.changes)
+            self._add_changes(repo_item, repo)
 
     @staticmethod
-    def _add_changes(repo_item: QStandardItem, changes) -> None:
+    def _add_changes(repo_item: QStandardItem, repo) -> None:
+        changes = repo.changes
         dir_items: dict[Path, QStandardItem] = {}
         dir_counts: dict[Path, int] = {}
         for change in changes:
@@ -56,6 +61,7 @@ class RepoTreeModel(QStandardItemModel):
                 if dir_item is None:
                     dir_item = QStandardItem(f"{part}  ({dir_counts[accumulated]})")
                     dir_item.setEditable(False)
+                    dir_item.setData(f"{repo.path}::{accumulated}", NODE_KEY_ROLE)
                     parent_item.appendRow(dir_item)
                     dir_items[accumulated] = dir_item
                 parent_item = dir_item

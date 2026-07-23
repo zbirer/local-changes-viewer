@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from local_changes_viewer.core.domain.workspace import Workspace
+from local_changes_viewer.gui import applog
 from local_changes_viewer.gui.settings import AppSettings
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
 from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
@@ -31,7 +32,7 @@ class MainWindow(QMainWindow):
         self._workspace: Workspace | None = None
         self._thread_pool = QThreadPool.globalInstance()
 
-        self._tree_view = RepoTreeView()
+        self._tree_view = RepoTreeView(self._settings)
         self._filter_box = QLineEdit()
         self._filter_box.setPlaceholderText("Filter by path…")
         self._filter_box.textChanged.connect(self._tree_view.set_filter_text)
@@ -61,6 +62,18 @@ class MainWindow(QMainWindow):
         self._include_ignored_checkbox.toggled.connect(self._on_include_ignored_toggled)
         toolbar.addWidget(self._include_ignored_checkbox)
 
+        collapse_all_action = QAction("Collapse All", self)
+        collapse_all_action.triggered.connect(self._tree_view.collapse_all)
+        toolbar.addAction(collapse_all_action)
+
+        expand_all_action = QAction("Expand All", self)
+        expand_all_action.triggered.connect(self._tree_view.expand_all)
+        toolbar.addAction(expand_all_action)
+
+        app_log_action = QAction("App Log", self)
+        app_log_action.triggered.connect(self._on_copy_app_log)
+        toolbar.addAction(app_log_action)
+
         self._folder_status_label = QLabel("No folder open")
         self.statusBar().addPermanentWidget(self._folder_status_label)
 
@@ -79,6 +92,11 @@ class MainWindow(QMainWindow):
     def _on_include_ignored_toggled(self, _checked: bool) -> None:
         if self._root_folder:
             self._start_scan(self._root_folder)
+
+    def _on_copy_app_log(self) -> None:
+        text = "\n".join(applog.all_entries())
+        QGuiApplication.clipboard().setText(text)
+        self.statusBar().showMessage("App log copied to clipboard", 3000)
 
     def _set_root_folder(self, folder: str) -> None:
         self._root_folder = folder
