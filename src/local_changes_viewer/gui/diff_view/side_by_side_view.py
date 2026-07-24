@@ -42,6 +42,11 @@ class _DiffPane(QPlainTextEdit):
                 return
         super().mousePressEvent(event)
 
+    def set_font_point_size(self, size: int) -> None:
+        font = self.font()
+        font.setPointSize(size)
+        self.setFont(font)
+
 
 class SideBySideView(QWidget):
     def __init__(self) -> None:
@@ -69,6 +74,10 @@ class SideBySideView(QWidget):
 
     def set_sync_scroll(self, enabled: bool) -> None:
         self._sync_scroll_enabled = enabled
+
+    def set_font_point_size(self, size: int) -> None:
+        self._left.set_font_point_size(size)
+        self._right.set_font_point_size(size)
 
     def _sync_vertical_from_left(self, value: int) -> None:
         if self._syncing or not self._sync_scroll_enabled:

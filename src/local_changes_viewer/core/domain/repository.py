@@ -9,6 +9,8 @@ class BranchStatus:
     branch_name: str
     ahead: int
     behind: int
+    parent_branch: str | None = None
+    default_branch: str | None = None
 
 
 @dataclass

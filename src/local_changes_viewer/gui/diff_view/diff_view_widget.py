@@ -1,5 +1,13 @@
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSlider,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from local_changes_viewer.core.domain.diff import DiffResult
 from local_changes_viewer.gui.diff_view.side_by_side_view import SideBySideView
@@ -8,10 +16,17 @@ from local_changes_viewer.gui.diff_view.unified_view import UnifiedView
 
 class DiffViewWidget(QWidget):
     refresh_requested = Signal()
+    time_filter_minutes_changed = Signal(int)
+
+    _MAX_TIME_FILTER_MINUTES = 180
+
+    _MIN_FONT_POINT_SIZE = 6
+    _MAX_FONT_POINT_SIZE = 36
 
     def __init__(self) -> None:
         super().__init__()
         self._current_hunk_index = -1
+        self._font_point_size = 12
         self._unified = UnifiedView()
         self._side_by_side = SideBySideView()
 
@@ -31,12 +46,22 @@ class DiffViewWidget(QWidget):
         self._refresh_button = QPushButton("Refresh")
         self._refresh_button.clicked.connect(self.refresh_requested.emit)
 
+        self._time_filter_slider = QSlider(Qt.Orientation.Horizontal)
+        self._time_filter_slider.setRange(0, self._MAX_TIME_FILTER_MINUTES)
+        self._time_filter_slider.setValue(0)
+        self._time_filter_slider.setFixedWidth(150)
+        self._time_filter_slider.valueChanged.connect(self._on_time_filter_changed)
+
+        self._time_filter_label = QLabel("All changes")
+
         toolbar_layout = QHBoxLayout()
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.addWidget(self._toggle_button)
         toolbar_layout.addWidget(self._prev_button)
         toolbar_layout.addWidget(self._next_button)
         toolbar_layout.addWidget(self._refresh_button)
+        toolbar_layout.addWidget(self._time_filter_slider)
+        toolbar_layout.addWidget(self._time_filter_label)
         toolbar_layout.addStretch()
 
         self._header_label = QLabel("")
@@ -59,6 +84,22 @@ class DiffViewWidget(QWidget):
 
     def set_sync_scroll(self, enabled: bool) -> None:
         self._side_by_side.set_sync_scroll(enabled)
+
+    def increase_font_size(self) -> None:
+        self._set_font_point_size(self._font_point_size + 1)
+
+    def decrease_font_size(self) -> None:
+        self._set_font_point_size(self._font_point_size - 1)
+
+    def _set_font_point_size(self, size: int) -> None:
+        size = max(self._MIN_FONT_POINT_SIZE, min(self._MAX_FONT_POINT_SIZE, size))
+        self._font_point_size = size
+        self._unified.set_font_point_size(size)
+        self._side_by_side.set_font_point_size(size)
+
+    def _on_time_filter_changed(self, minutes: int) -> None:
+        self._time_filter_label.setText("All changes" if minutes == 0 else f"Last {minutes} min")
+        self.time_filter_minutes_changed.emit(minutes)
 
     def _on_toggled(self, checked: bool) -> None:
         self._stack.setCurrentIndex(1 if checked else 0)

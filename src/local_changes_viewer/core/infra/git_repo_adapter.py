@@ -70,7 +70,52 @@ class GitRepoAdapter:
                 else:
                     behind = int(count)
 
-        return BranchStatus(branch_name=match.group("branch"), ahead=ahead, behind=behind)
+        branch_name = match.group("branch")
+        return BranchStatus(
+            branch_name=branch_name,
+            ahead=ahead,
+            behind=behind,
+            parent_branch=self._find_local_parent_branch(branch_name),
+            default_branch=self._find_default_branch(),
+        )
+
+    def _find_default_branch(self) -> str | None:
+        try:
+            output = self._repo.git.ls_remote("--symref", "origin", "HEAD")
+            for line in output.splitlines():
+                if line.startswith("ref:"):
+                    ref = line.split()[1]
+                    return ref.removeprefix("refs/heads/")
+        except git.GitCommandError:
+            pass
+        try:
+            return self._repo.git.config("init.defaultBranch")
+        except git.GitCommandError:
+            return None
+
+    def _find_local_parent_branch(self, branch_name: str) -> str | None:
+        try:
+            current = self._repo.heads[branch_name]
+        except (IndexError, KeyError):
+            return None
+
+        best_branch: str | None = None
+        best_commit_time = -1
+        for head in self._repo.heads:
+            if head.name == branch_name:
+                continue
+            try:
+                merge_bases = self._repo.merge_base(current, head)
+            except git.GitCommandError:
+                continue
+            if not merge_bases:
+                continue
+            commit_time = merge_bases[0].committed_date
+            if commit_time > best_commit_time:
+                best_commit_time = commit_time
+                best_branch = head.name
+
+        return best_branch
 
     def compute_diff(self, change: FileChange, ignore_whitespace: bool = False) -> DiffResult:
         if change.change_type == ChangeType.UNTRACKED:

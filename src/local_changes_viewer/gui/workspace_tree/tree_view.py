@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt, Signal
-from PySide6.QtWidgets import QTreeView
+from PySide6.QtCore import QEvent, QModelIndex, QSortFilterProxyModel, Qt, Signal
+from PySide6.QtWidgets import QToolTip, QTreeView
 
 from local_changes_viewer.gui import applog
 from local_changes_viewer.gui.settings import AppSettings
@@ -31,6 +31,18 @@ class RepoTreeView(QTreeView):
         self.collapsed.connect(self._on_collapsed)
         self.expanded.connect(self._on_expanded)
         self.selectionModel().currentChanged.connect(self._on_current_changed)
+
+    def viewportEvent(self, event) -> bool:
+        if event.type() == QEvent.Type.ToolTip:
+            index = self.indexAt(event.pos())
+            tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
+            if tooltip:
+                rect = self.visualRect(index)
+                QToolTip.showText(self.viewport().mapToGlobal(rect.bottomLeft()), tooltip, self, rect)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().viewportEvent(event)
 
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         change = current.data(FILE_CHANGE_ROLE)

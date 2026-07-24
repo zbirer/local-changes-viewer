@@ -1,3 +1,5 @@
+import os
+import time
 from pathlib import Path
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
@@ -122,3 +124,42 @@ def test_does_not_mutate_original_repository_changes() -> None:
     filter_workspace(workspace, ignore_md_files=True)
 
     assert len(original_repo.changes) == 2
+
+
+def test_max_age_minutes_zero_shows_all_changes() -> None:
+    changes = [FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)]
+    workspace = Workspace(root_path=Path("/root"), repositories=[_repo("repo_a", changes)])
+
+    result = filter_workspace(workspace, max_age_minutes=0)
+
+    assert result.repositories[0].changes == changes
+
+
+def test_max_age_minutes_filters_out_old_files(tmp_path: Path) -> None:
+    recent_file = tmp_path / "recent.py"
+    recent_file.write_text("recent")
+    old_file = tmp_path / "old.py"
+    old_file.write_text("old")
+    old_mtime = time.time() - 3600
+    os.utime(old_file, (old_mtime, old_mtime))
+
+    changes = [
+        FileChange(path=Path("recent.py"), change_type=ChangeType.MODIFIED),
+        FileChange(path=Path("old.py"), change_type=ChangeType.MODIFIED),
+    ]
+    repo = Repository(path=tmp_path, name="repo_a", branch_status=_BRANCH, changes=changes)
+    workspace = Workspace(root_path=tmp_path, repositories=[repo])
+
+    result = filter_workspace(workspace, max_age_minutes=5)
+
+    assert [c.path for c in result.repositories[0].changes] == [Path("recent.py")]
+
+
+def test_max_age_minutes_includes_change_when_file_missing(tmp_path: Path) -> None:
+    changes = [FileChange(path=Path("deleted.py"), change_type=ChangeType.DELETED)]
+    repo = Repository(path=tmp_path, name="repo_a", branch_status=_BRANCH, changes=changes)
+    workspace = Workspace(root_path=tmp_path, repositories=[repo])
+
+    result = filter_workspace(workspace, max_age_minutes=5)
+
+    assert [c.path for c in result.repositories[0].changes] == [Path("deleted.py")]

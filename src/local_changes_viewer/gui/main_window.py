@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, Qt, QThreadPool, QTimer, QUrl
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QGuiApplication
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QDesktopServices,
+    QGuiApplication,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
@@ -56,8 +62,10 @@ class MainWindow(QMainWindow):
         self._filter_box = QLineEdit()
         self._filter_box.setPlaceholderText("Filter by path…")
         self._filter_box.textChanged.connect(self._tree_view.set_filter_text)
+        self._time_filter_minutes = 0
         self._diff_view = DiffViewWidget()
         self._diff_view.refresh_requested.connect(self._on_refresh)
+        self._diff_view.time_filter_minutes_changed.connect(self._on_time_filter_changed)
 
         self._aggregate_list = AggregateChangeList()
         self._aggregate_list.file_selected.connect(self._on_file_selected)
@@ -125,6 +133,18 @@ class MainWindow(QMainWindow):
         expand_all_action = QAction("Expand All", self)
         expand_all_action.triggered.connect(self._tree_view.expand_all)
         actions_menu.addAction(expand_all_action)
+
+        actions_menu.addSeparator()
+
+        increase_font_action = QAction("Increase Font Size", self)
+        increase_font_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
+        increase_font_action.triggered.connect(self._diff_view.increase_font_size)
+        actions_menu.addAction(increase_font_action)
+
+        decrease_font_action = QAction("Decrease Font Size", self)
+        decrease_font_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
+        decrease_font_action.triggered.connect(self._diff_view.decrease_font_size)
+        actions_menu.addAction(decrease_font_action)
 
         actions_menu.addSeparator()
 
@@ -266,6 +286,10 @@ class MainWindow(QMainWindow):
     def _on_display_filter_toggled(self, _checked: bool) -> None:
         self._refresh_display()
 
+    def _on_time_filter_changed(self, minutes: int) -> None:
+        self._time_filter_minutes = minutes
+        self._refresh_display()
+
     def _on_sync_scroll_toggled(self, checked: bool) -> None:
         self._diff_view.set_sync_scroll(checked)
 
@@ -383,6 +407,7 @@ class MainWindow(QMainWindow):
             ignore_md_files=self._ignore_md_action.isChecked(),
             hide_repos_without_changes=self._hide_empty_repos_action.isChecked(),
             folder_filter_rules=self._folder_filter_rules,
+            max_age_minutes=self._time_filter_minutes,
         )
         self._tree_view.set_workspace(display_workspace)
         self._aggregate_list.set_workspace(display_workspace)

@@ -64,6 +64,13 @@ class UnifiedView(QPlainTextEdit):
         self._expanded_folds = set()
         self._rebuild()
 
+    def set_font_point_size(self, size: int) -> None:
+        font = self.font()
+        font.setPointSize(size)
+        self.setFont(font)
+        self._update_gutter_width()
+        self._gutter.update()
+
     def clear_diff(self) -> None:
         self._diff = None
         self._file_path = None

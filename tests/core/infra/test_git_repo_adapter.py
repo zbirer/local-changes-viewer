@@ -221,3 +221,48 @@ def test_compute_diff_ignore_whitespace(tmp_path: Path, repo: git.Repo):
     result = GitRepoAdapter(tmp_path).compute_diff(change, ignore_whitespace=True)
 
     assert result.hunks == []
+
+
+def test_branch_status_finds_local_parent_branch(tmp_path: Path, repo: git.Repo):
+    repo.git.branch("main-line")
+
+    repo.git.checkout("-b", "feature")
+    (tmp_path / "feature_file.txt").write_text("feature work\n")
+    repo.index.add(["feature_file.txt"])
+    repo.index.commit("feature commit")
+
+    status = GitRepoAdapter(tmp_path).get_branch_status()
+
+    assert status.branch_name == "feature"
+    assert status.parent_branch in ("main", "main-line")
+
+
+def test_branch_status_parent_branch_none_when_no_other_branches(tmp_path: Path, repo: git.Repo):
+    status = GitRepoAdapter(tmp_path).get_branch_status()
+
+    assert status.parent_branch is None
+
+
+def test_branch_status_default_branch_falls_back_to_init_default_branch_config(
+    tmp_path: Path, repo: git.Repo
+):
+    repo.git.config("init.defaultBranch", "main")
+
+    status = GitRepoAdapter(tmp_path).get_branch_status()
+
+    assert status.default_branch == "main"
+
+
+def test_branch_status_default_branch_queried_live_from_remote(tmp_path: Path):
+    remote_bare = tmp_path / "remote.git"
+    git.Repo.init(remote_bare, bare=True)
+
+    local_path = tmp_path / "local_repo"
+    repo = _init_repo_with_commit(local_path)
+    repo.create_remote("origin", str(remote_bare))
+    repo.git.push("--set-upstream", "origin", "main")
+    repo.git.remote("set-head", "origin", "main")
+
+    status = GitRepoAdapter(local_path).get_branch_status()
+
+    assert status.default_branch == "main"

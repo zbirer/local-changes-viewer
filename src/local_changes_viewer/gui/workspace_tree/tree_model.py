@@ -38,8 +38,21 @@ class RepoTreeModel(QStandardItemModel):
             repo_item = QStandardItem(label)
             repo_item.setEditable(False)
             repo_item.setData(str(repo.path), NODE_KEY_ROLE)
+            repo_item.setToolTip(self._repo_tooltip(repo))
             root.appendRow(repo_item)
             self._add_changes(repo_item, repo)
+
+    @staticmethod
+    def _repo_tooltip(repo) -> str:
+        branch = repo.branch_status
+        status = f"{len(repo.changes)} changed file(s), ahead {branch.ahead} / behind {branch.behind}"
+        return (
+            f"Name: {repo.name}\n"
+            f"Status: {status}\n"
+            f"Branch: {branch.branch_name}\n"
+            f"Parent of branch: {branch.parent_branch or '(none)'}\n"
+            f"Default branch: {branch.default_branch or '(none)'}"
+        )
 
     @staticmethod
     def _add_changes(repo_item: QStandardItem, repo) -> None:
