@@ -253,6 +253,16 @@ def test_branch_status_default_branch_falls_back_to_init_default_branch_config(
     assert status.default_branch == "main"
 
 
+def test_get_remote_url_returns_none_when_no_remote(tmp_path: Path, repo: git.Repo):
+    assert GitRepoAdapter(tmp_path).get_remote_url() is None
+
+
+def test_get_remote_url_returns_origin_url(tmp_path: Path, repo: git.Repo):
+    repo.create_remote("origin", "https://github.com/owner/repo.git")
+
+    assert GitRepoAdapter(tmp_path).get_remote_url() == "https://github.com/owner/repo.git"
+
+
 def test_branch_status_default_branch_queried_live_from_remote(tmp_path: Path):
     remote_bare = tmp_path / "remote.git"
     git.Repo.init(remote_bare, bare=True)

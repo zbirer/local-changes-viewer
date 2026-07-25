@@ -5,6 +5,7 @@ import pytest
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.repository import BranchStatus
+from local_changes_viewer.core.infra.github_client import GitHubError
 from local_changes_viewer.core.services.workspace_scanner_service import (
     WorkspaceScannerService,
 )
@@ -19,16 +20,31 @@ class FakeFileSystemScanner:
 
 
 class FakeGitRepoAdapter:
-    def __init__(self, repo_path: Path, changes: list[FileChange], branch_status: BranchStatus) -> None:
+    def __init__(
+        self,
+        repo_path: Path,
+        changes: list[FileChange],
+        branch_status: BranchStatus,
+        remote_url: str | None = None,
+    ) -> None:
         self.repo_path = repo_path
         self._changes = changes
         self._branch_status = branch_status
+        self._remote_url = remote_url
 
     def list_changes(self) -> list[FileChange]:
         return self._changes
 
     def get_branch_status(self) -> BranchStatus:
         return self._branch_status
+
+    def get_remote_url(self, name: str = "origin") -> str | None:
+        return self._remote_url
+
+
+class FakeGitHubClient:
+    def find_pull_request(self, owner: str, repo: str, branch: str):
+        raise GitHubError("GitHub API error 404: Not Found")
 
 
 def _branch(name="main", ahead=0, behind=0) -> BranchStatus:
@@ -221,3 +237,22 @@ def test_scan_does_not_call_on_repo_ready_for_broken_repo(tmp_path: Path):
     service.scan(tmp_path, on_repo_ready=lambda repo: ready_names.append(repo.name))
 
     assert ready_names == ["repo_a"]
+
+
+def test_scan_routes_github_pr_fetch_error_through_on_log_not_an_exception(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a, [], _branch(), remote_url="git@github.com:getexpain/repo_a.git"
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+
+    messages: list[str] = []
+    workspace = service.scan(
+        tmp_path, github_client=FakeGitHubClient(), on_log=messages.append
+    )
+
+    assert workspace.repositories[0].pull_request is None
+    assert any("Failed to fetch GitHub PR status for getexpain/repo_a" in m for m in messages)

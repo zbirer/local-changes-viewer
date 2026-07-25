@@ -79,6 +79,12 @@ class GitRepoAdapter:
             default_branch=self._find_default_branch(),
         )
 
+    def get_remote_url(self, name: str = "origin") -> str | None:
+        try:
+            return self._repo.remotes[name].url
+        except (IndexError, KeyError):
+            return None
+
     def _find_default_branch(self) -> str | None:
         try:
             output = self._repo.git.ls_remote("--symref", "origin", "HEAD")

@@ -68,6 +68,11 @@ class RepoTreeView(QTreeView):
         self._restore_collapsed_state()
         self._programmatic_change = False
 
+    def update_workspace(self, workspace) -> None:
+        self._programmatic_change = True
+        self._model.update_workspace(workspace)
+        self._programmatic_change = False
+
     def set_filter_text(self, text: str) -> None:
         self._proxy.setFilterFixedString(text)
         if text:
@@ -76,12 +81,14 @@ class RepoTreeView(QTreeView):
             self._programmatic_change = False
 
     def collapse_all(self) -> None:
+        applog.log("Collapse All", level=applog.LogLevel.INFO)
         self._programmatic_change = True
         self.collapseAll()
         self._programmatic_change = False
         self._settings.set_collapsed_node_keys(self._collect_all_keys(QModelIndex()))
 
     def expand_all(self) -> None:
+        applog.log("Expand All", level=applog.LogLevel.INFO)
         self._programmatic_change = True
         self.expandAll()
         self._programmatic_change = False
@@ -99,11 +106,17 @@ class RepoTreeView(QTreeView):
 
     def _restore_collapsed_state(self) -> None:
         collapsed_keys = self._settings.collapsed_node_keys()
-        applog.log(f"_restore_collapsed_state: collapsed_keys={collapsed_keys!r}")
+        applog.log(
+            f"_restore_collapsed_state: collapsed_keys={collapsed_keys!r}",
+            level=applog.LogLevel.DEBUG,
+        )
         if not collapsed_keys:
             return
         all_keys = self._collect_all_keys(QModelIndex())
-        applog.log(f"_restore_collapsed_state: current tree node keys={all_keys!r}")
+        applog.log(
+            f"_restore_collapsed_state: current tree node keys={all_keys!r}",
+            level=applog.LogLevel.DEBUG,
+        )
         self._for_each_index(QModelIndex(), collapsed_keys)
 
     def _for_each_index(self, parent: QModelIndex, collapsed_keys: set[str]) -> None:
@@ -111,24 +124,24 @@ class RepoTreeView(QTreeView):
             index = self._proxy.index(row, 0, parent)
             key = index.data(NODE_KEY_ROLE)
             if key is not None and key in collapsed_keys:
-                applog.log(f"_for_each_index: collapsing key={key!r}")
+                applog.log(f"_for_each_index: collapsing key={key!r}", level=applog.LogLevel.DEBUG)
                 self.collapse(index)
             self._for_each_index(index, collapsed_keys)
 
     def _on_collapsed(self, index: QModelIndex) -> None:
         key = index.data(NODE_KEY_ROLE)
-        applog.log(f"_on_collapsed: key={key!r} programmatic={self._programmatic_change}")
         if key is None or self._programmatic_change:
             return
+        applog.log(f"Collapsed folder: {key}", level=applog.LogLevel.INFO)
         keys = self._settings.collapsed_node_keys()
         keys.add(key)
         self._settings.set_collapsed_node_keys(keys)
 
     def _on_expanded(self, index: QModelIndex) -> None:
         key = index.data(NODE_KEY_ROLE)
-        applog.log(f"_on_expanded: key={key!r} programmatic={self._programmatic_change}")
         if key is None or self._programmatic_change:
             return
+        applog.log(f"Expanded folder: {key}", level=applog.LogLevel.INFO)
         keys = self._settings.collapsed_node_keys()
         keys.discard(key)
         self._settings.set_collapsed_node_keys(keys)

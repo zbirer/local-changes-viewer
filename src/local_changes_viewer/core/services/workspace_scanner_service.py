@@ -1,5 +1,5 @@
-import logging
 import time
+import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -9,8 +9,11 @@ from local_changes_viewer.core.domain.repository import Repository
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.core.infra.filesystem_scanner import FileSystemScanner
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
-
-logger = logging.getLogger(__name__)
+from local_changes_viewer.core.infra.github_client import (
+    GitHubClient,
+    GitHubError,
+    parse_github_owner_repo,
+)
 
 _MAX_PARALLEL_REPO_SCANS = 8
 
@@ -30,9 +33,12 @@ class WorkspaceScannerService:
         include_ignored: bool = False,
         on_progress: Callable[[str], None] | None = None,
         on_repo_ready: Callable[[Repository], None] | None = None,
+        github_client: GitHubClient | None = None,
+        on_log: Callable[[str], None] | None = None,
     ) -> Workspace:
         on_progress = on_progress or (lambda _message: None)
         on_repo_ready = on_repo_ready or (lambda _repo: None)
+        on_log = on_log or (lambda _message: None)
 
         scan_started_at = time.monotonic()
         on_progress("Discovering git repositories…")
@@ -56,7 +62,10 @@ class WorkspaceScannerService:
         # order, keeping progress messages and results deterministic.
         with ThreadPoolExecutor(max_workers=min(_MAX_PARALLEL_REPO_SCANS, total)) as executor:
             results = executor.map(
-                lambda repo_path: self._scan_repo(repo_path, include_ignored), repo_paths
+                lambda repo_path: self._scan_repo(
+                    repo_path, include_ignored, github_client, on_log
+                ),
+                repo_paths,
             )
             for index, (repo_path, timed_repo) in enumerate(zip(repo_paths, results), start=1):
                 repo, repo_seconds = timed_repo
@@ -75,24 +84,56 @@ class WorkspaceScannerService:
         return Workspace(root_path=root, repositories=repositories)
 
     def _scan_repo(
-        self, repo_path: Path, include_ignored: bool
+        self,
+        repo_path: Path,
+        include_ignored: bool,
+        github_client: GitHubClient | None = None,
+        on_log: Callable[[str], None] | None = None,
     ) -> tuple[Repository | None, float]:
+        on_log = on_log or (lambda _message: None)
         started_at = time.monotonic()
         try:
             adapter = self._adapter_factory(repo_path)
             changes = adapter.list_changes()
             branch_status = adapter.get_branch_status()
-        except Exception:
-            logger.warning("Skipping repo %s: failed to read git state", repo_path, exc_info=True)
+        except Exception as exc:
+            on_log(f"Skipping repo {repo_path}: failed to read git state: {exc}\n{traceback.format_exc()}")
             return None, time.monotonic() - started_at
 
         if not include_ignored:
             changes = [c for c in changes if c.change_type != ChangeType.IGNORED]
+
+        pull_request = None
+        if github_client is not None:
+            pull_request = self._fetch_pull_request(
+                adapter, branch_status.branch_name, github_client, on_log
+            )
 
         repo = Repository(
             path=repo_path,
             name=repo_path.name,
             branch_status=branch_status,
             changes=changes,
+            pull_request=pull_request,
         )
         return repo, time.monotonic() - started_at
+
+    @staticmethod
+    def _fetch_pull_request(
+        adapter: GitRepoAdapter,
+        branch_name: str,
+        github_client: GitHubClient,
+        on_log: Callable[[str], None],
+    ):
+        remote_url = adapter.get_remote_url("origin")
+        if remote_url is None:
+            return None
+        owner_repo = parse_github_owner_repo(remote_url)
+        if owner_repo is None:
+            return None
+        owner, repo_name = owner_repo
+        try:
+            return github_client.find_pull_request(owner, repo_name, branch_name)
+        except GitHubError as exc:
+            on_log(f"Failed to fetch GitHub PR status for {owner}/{repo_name}: {exc}")
+            return None

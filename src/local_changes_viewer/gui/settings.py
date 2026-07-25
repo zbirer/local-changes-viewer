@@ -77,6 +77,31 @@ class AppSettings:
             "folder_filter_rules", [f"{rule.mode.value}:{rule.text}" for rule in rules]
         )
 
+    def auto_refresh_minutes(self) -> int:
+        value = self._settings.value("auto_refresh_minutes", 0)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def set_auto_refresh_minutes(self, minutes: int) -> None:
+        self._settings.setValue("auto_refresh_minutes", minutes)
+
+    def log_level(self) -> str:
+        return str(self._settings.value("log_level", "INFO"))
+
+    def set_log_level(self, level_name: str) -> None:
+        self._settings.setValue("log_level", level_name)
+
+    def github_username(self) -> str | None:
+        return self._settings.value("github_username", None)
+
+    def set_github_username(self, username: str) -> None:
+        self._settings.setValue("github_username", username)
+
+    def clear_github_username(self) -> None:
+        self._settings.remove("github_username")
+
     def sync_side_by_side_scroll(self) -> bool:
         value = self._settings.value("sync_side_by_side_scroll", True)
         if isinstance(value, str):
@@ -88,17 +113,20 @@ class AppSettings:
 
     def collapsed_node_keys(self) -> set[str]:
         value = self._settings.value("collapsed_node_keys", [])
-        applog.log(f"collapsed_node_keys() raw QSettings value: {value!r} (type={type(value)})")
+        applog.log(
+            f"collapsed_node_keys() raw QSettings value: {value!r} (type={type(value)})",
+            level=applog.LogLevel.DEBUG,
+        )
         if not value:
             return set()
         # QSettings on some platforms collapses a single-item list back into a bare string.
         if isinstance(value, str):
             value = [value]
         result = set(value)
-        applog.log(f"collapsed_node_keys() -> {result!r}")
+        applog.log(f"collapsed_node_keys() -> {result!r}", level=applog.LogLevel.DEBUG)
         return result
 
     def set_collapsed_node_keys(self, keys: set[str]) -> None:
-        applog.log(f"set_collapsed_node_keys({sorted(keys)!r})")
+        applog.log(f"set_collapsed_node_keys({sorted(keys)!r})", level=applog.LogLevel.DEBUG)
         self._settings.setValue("collapsed_node_keys", sorted(keys))
         self._settings.sync()

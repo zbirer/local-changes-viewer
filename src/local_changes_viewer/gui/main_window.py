@@ -10,10 +10,12 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QFileDialog,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -24,14 +26,23 @@ from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterRule
 from local_changes_viewer.core.domain.repository import Repository
 from local_changes_viewer.core.domain.workspace import Workspace
+from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
+from local_changes_viewer.core.infra.github_client import (
+    GitHubClient,
+    GitHubError,
+    parse_github_owner_repo,
+)
 from local_changes_viewer.core.services.diff_formatting import format_unified_diff
 from local_changes_viewer.core.services.file_info import detect_encoding, detect_line_ending
 from local_changes_viewer.core.services.workspace_filter import filter_workspace
-from local_changes_viewer.gui import applog
+from local_changes_viewer.gui import applog, github_auth
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
+from local_changes_viewer.gui.github_connect_dialog import GitHubConnectDialog
+from local_changes_viewer.gui.my_pull_requests_dialog import MyPullRequestsDialog
 from local_changes_viewer.gui.settings import AppSettings
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
+from local_changes_viewer.gui.workers.my_pull_requests_worker import MyPullRequestsWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
 from local_changes_viewer.gui.workspace_tree.aggregate_list import AggregateChangeList
 from local_changes_viewer.gui.workspace_tree.tree_model import FILE_CHANGE_ROLE
@@ -45,6 +56,7 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
 
         self._settings = AppSettings()
+        applog.set_level(applog.level_from_name(self._settings.log_level()))
         self._root_folder: str | None = None
         self._workspace: Workspace | None = None
         self._folder_filter_rules: list[FolderFilterRule] = self._settings.folder_filter_rules()
@@ -54,6 +66,9 @@ class MainWindow(QMainWindow):
         self._scan_refresh_timer = QTimer(self)
         self._scan_refresh_timer.setInterval(150)
         self._scan_refresh_timer.timeout.connect(self._refresh_display)
+        self._auto_refresh_scan = False
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
 
         self._tree_view = RepoTreeView(self._settings)
         self._tree_view.file_selected.connect(self._on_file_selected)
@@ -94,6 +109,10 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._on_open_folder)
         actions_menu.addAction(open_action)
 
+        my_pull_requests_action = QAction("My Open Pull Requests…", self)
+        my_pull_requests_action.triggered.connect(self._on_show_my_pull_requests)
+        actions_menu.addAction(my_pull_requests_action)
+
         settings_menu = self.menuBar().addMenu("Settings")
 
         self._include_ignored_action = QAction("Show ignored files", self, checkable=True)
@@ -123,6 +142,22 @@ class MainWindow(QMainWindow):
         )
         self._sync_scroll_action.toggled.connect(self._on_sync_scroll_toggled)
         settings_menu.addAction(self._sync_scroll_action)
+
+        auto_refresh_action = QAction("Auto Refresh…", self)
+        auto_refresh_action.triggered.connect(self._on_configure_auto_refresh)
+        settings_menu.addAction(auto_refresh_action)
+
+        log_level_action = QAction("Log Level…", self)
+        log_level_action.triggered.connect(self._on_configure_log_level)
+        settings_menu.addAction(log_level_action)
+
+        connect_github_action = QAction("Connect to GitHub…", self)
+        connect_github_action.triggered.connect(self._on_connect_github)
+        settings_menu.addAction(connect_github_action)
+
+        self._disconnect_github_action = QAction("Disconnect GitHub", self)
+        self._disconnect_github_action.triggered.connect(self._on_disconnect_github)
+        settings_menu.addAction(self._disconnect_github_action)
 
         actions_menu.addSeparator()
 
@@ -189,6 +224,7 @@ class MainWindow(QMainWindow):
 
         self._restore_last_folder()
         self._restore_window_state()
+        self._auto_connect_github()
 
     def _restore_last_folder(self) -> None:
         last_folder = self._settings.last_root_folder()
@@ -211,6 +247,8 @@ class MainWindow(QMainWindow):
         self._hide_empty_repos_action.setChecked(self._settings.hide_repos_without_changes())
         self._sync_scroll_action.setChecked(self._settings.sync_side_by_side_scroll())
         self._diff_view.set_sync_scroll(self._sync_scroll_action.isChecked())
+        self._apply_auto_refresh_interval(self._settings.auto_refresh_minutes())
+        self._disconnect_github_action.setEnabled(self._settings.github_username() is not None)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._settings.set_window_geometry(self.saveGeometry())
@@ -226,13 +264,16 @@ class MainWindow(QMainWindow):
     def _on_open_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Open Folder")
         if folder:
+            applog.log(f"Open Folder: {folder}", level=applog.LogLevel.INFO)
             self._set_root_folder(folder)
 
-    def _on_include_ignored_toggled(self, _checked: bool) -> None:
+    def _on_include_ignored_toggled(self, checked: bool) -> None:
+        applog.log(f"Show ignored files: {checked}", level=applog.LogLevel.INFO)
         if self._root_folder:
             self._start_scan(self._root_folder)
 
     def _on_refresh(self) -> None:
+        applog.log("Refresh", level=applog.LogLevel.INFO)
         if self._root_folder:
             self._start_scan(self._root_folder)
 
@@ -273,9 +314,11 @@ class MainWindow(QMainWindow):
             self._diff_view.set_diff(diff, str(change.path))
 
     def _on_diff_error(self, message: str) -> None:
+        applog.log(f"Diff failed: {message}", level=applog.LogLevel.ERROR)
         self.statusBar().showMessage(f"Diff failed: {message}", 5000)
 
-    def _on_ignore_whitespace_toggled(self, _checked: bool) -> None:
+    def _on_ignore_whitespace_toggled(self, checked: bool) -> None:
+        applog.log(f"Ignore whitespace: {checked}", level=applog.LogLevel.INFO)
         if self._workspace is not None:
             for repo in self._workspace.repositories:
                 for change in repo.changes:
@@ -283,15 +326,185 @@ class MainWindow(QMainWindow):
         if self._selected_change is not None and self._selected_repo_path is not None:
             self._load_diff(self._selected_repo_path, self._selected_change)
 
-    def _on_display_filter_toggled(self, _checked: bool) -> None:
+    def _on_display_filter_toggled(self, checked: bool) -> None:
+        action = self.sender()
+        name = action.text() if action is not None else "display filter"
+        applog.log(f"{name}: {checked}", level=applog.LogLevel.INFO)
         self._refresh_display()
 
     def _on_time_filter_changed(self, minutes: int) -> None:
+        applog.log(f"Time filter changed: {minutes} minute(s)", level=applog.LogLevel.INFO)
         self._time_filter_minutes = minutes
         self._refresh_display()
 
     def _on_sync_scroll_toggled(self, checked: bool) -> None:
+        applog.log(f"Sync side-by-side scroll: {checked}", level=applog.LogLevel.INFO)
         self._diff_view.set_sync_scroll(checked)
+
+    def _on_configure_auto_refresh(self) -> None:
+        current = self._settings.auto_refresh_minutes()
+        minutes, ok = QInputDialog.getInt(
+            self,
+            "Auto Refresh",
+            "Refresh interval in minutes (0 = disabled):",
+            current,
+            0,
+            1440,
+        )
+        if not ok:
+            return
+        applog.log(f"Set auto refresh interval: {minutes} minute(s)", level=applog.LogLevel.INFO)
+        self._settings.set_auto_refresh_minutes(minutes)
+        self._apply_auto_refresh_interval(minutes)
+
+    def _apply_auto_refresh_interval(self, minutes: int) -> None:
+        self._auto_refresh_timer.stop()
+        if minutes > 0:
+            self._auto_refresh_timer.start(minutes * 60 * 1000)
+
+    def _on_auto_refresh_timeout(self) -> None:
+        if self._root_folder:
+            self._start_scan(self._root_folder, auto_refresh=True)
+
+    def _on_configure_log_level(self) -> None:
+        levels = [level.name for level in applog.LogLevel]
+        current = self._settings.log_level()
+        current_index = levels.index(current) if current in levels else levels.index("INFO")
+        level_name, ok = QInputDialog.getItem(
+            self,
+            "Log Level",
+            "Log level:",
+            levels,
+            current_index,
+            editable=False,
+        )
+        if not ok:
+            return
+        applog.log(f"Set log level: {level_name}", level=applog.LogLevel.INFO)
+        self._settings.set_log_level(level_name)
+        applog.set_level(applog.level_from_name(level_name))
+
+    def _github_log(self, message: str) -> None:
+        applog.log(f"GitHub: {message}", level=applog.LogLevel.INFO)
+
+    def _auto_connect_github(self) -> None:
+        username = self._settings.github_username()
+        if username is None:
+            applog.log("GitHub auto-connect skipped: no stored account", level=applog.LogLevel.DEBUG)
+            return
+        token = github_auth.get_token(username)
+        if token is None:
+            applog.log(
+                f"GitHub auto-connect skipped: no stored token for {username}",
+                level=applog.LogLevel.WARNING,
+            )
+            return
+        applog.log(f"Connected to GitHub as {username}", level=applog.LogLevel.INFO)
+        self.statusBar().showMessage(f"Connected to GitHub as {username}", 5000)
+
+    def _on_connect_github(self) -> None:
+        dialog = GitHubConnectDialog(self._settings.github_username() or "", self)
+        if dialog.exec() != GitHubConnectDialog.DialogCode.Accepted:
+            return
+        username = dialog.username()
+        token = dialog.token()
+        if not username or not token:
+            QMessageBox.warning(self, "Connect to GitHub", "Username and token are required.")
+            return
+
+        try:
+            authenticated_login = GitHubClient(token, on_log=self._github_log).get_authenticated_login()
+        except GitHubError as exc:
+            applog.log(f"GitHub connection failed: {exc}", level=applog.LogLevel.ERROR)
+            QMessageBox.warning(self, "Connect to GitHub", f"Could not authenticate: {exc}")
+            return
+
+        if authenticated_login.lower() != username.lower():
+            QMessageBox.warning(
+                self,
+                "Connect to GitHub",
+                f"This token belongs to '{authenticated_login}', not '{username}'.",
+            )
+            return
+
+        self._settings.set_github_username(authenticated_login)
+        github_auth.set_token(authenticated_login, token)
+        self._disconnect_github_action.setEnabled(True)
+        applog.log(f"Connected to GitHub as {authenticated_login}", level=applog.LogLevel.INFO)
+        self.statusBar().showMessage(f"Connected to GitHub as {authenticated_login}", 5000)
+
+    def _on_disconnect_github(self) -> None:
+        username = self._settings.github_username()
+        if username is None:
+            return
+        github_auth.delete_token(username)
+        self._settings.clear_github_username()
+        self._disconnect_github_action.setEnabled(False)
+        applog.log(f"Disconnected from GitHub ({username})", level=applog.LogLevel.INFO)
+        self.statusBar().showMessage("Disconnected from GitHub", 5000)
+
+    def _github_client(self) -> GitHubClient | None:
+        username = self._settings.github_username()
+        if username is None:
+            return None
+        token = github_auth.get_token(username)
+        if token is None:
+            return None
+        return GitHubClient(token, on_log=self._github_log)
+
+    def _on_show_my_pull_requests(self) -> None:
+        username = self._settings.github_username()
+        github_client = self._github_client()
+        if username is None or github_client is None:
+            QMessageBox.information(
+                self, "My Open Pull Requests", "Connect to GitHub first (Settings menu)."
+            )
+            return
+        if self._workspace is None or not self._workspace.repositories:
+            QMessageBox.information(self, "My Open Pull Requests", "No repositories loaded.")
+            return
+
+        owner_repo_pairs = []
+        for repo in self._workspace.repositories:
+            remote_url = GitRepoAdapter(repo.path).get_remote_url("origin")
+            if remote_url is None:
+                applog.log(f"GitHub: {repo.name} has no 'origin' remote, skipping", level=applog.LogLevel.DEBUG)
+                continue
+            owner_repo = parse_github_owner_repo(remote_url)
+            if owner_repo is not None:
+                owner_repo_pairs.append(owner_repo)
+            else:
+                applog.log(
+                    f"GitHub: {repo.name} remote '{remote_url}' is not a recognized GitHub URL, skipping",
+                    level=applog.LogLevel.DEBUG,
+                )
+
+        applog.log(
+            f"GitHub: resolved {len(owner_repo_pairs)} GitHub repo(s) from tree: {owner_repo_pairs}",
+            level=applog.LogLevel.INFO,
+        )
+
+        if not owner_repo_pairs:
+            QMessageBox.information(
+                self, "My Open Pull Requests", "No GitHub repositories found in the tree."
+            )
+            return
+
+        applog.log("My Open Pull Requests", level=applog.LogLevel.INFO)
+        self.statusBar().showMessage("Fetching your open pull requests…")
+        worker = MyPullRequestsWorker(github_client, username, owner_repo_pairs)
+        worker.signals.finished.connect(self._on_my_pull_requests_ready)
+        worker.signals.error.connect(self._on_my_pull_requests_error)
+        self._thread_pool.start(worker)
+
+    def _on_my_pull_requests_ready(self, pull_requests: list) -> None:
+        self.statusBar().clearMessage()
+        MyPullRequestsDialog(pull_requests, self).exec()
+
+    def _on_my_pull_requests_error(self, message: str) -> None:
+        applog.log(f"Failed to fetch open pull requests: {message}", level=applog.LogLevel.ERROR)
+        self.statusBar().clearMessage()
+        QMessageBox.warning(self, "My Open Pull Requests", f"Failed to fetch: {message}")
 
     def _on_manage_folder_filters(self) -> None:
         dialog = FolderFilterDialog(self._folder_filter_rules, self)
@@ -362,44 +575,60 @@ class MainWindow(QMainWindow):
         self._folder_status_label.setText(f"Folder: {folder}")
         self._start_scan(folder)
 
-    def _start_scan(self, folder: str) -> None:
-        applog.log(f"Starting scan of {folder}")
-        self.statusBar().showMessage("Starting scan…")
-        self._workspace = Workspace(root_path=Path(folder), repositories=[])
-        self._refresh_display()
+    def _start_scan(self, folder: str, *, auto_refresh: bool = False) -> None:
+        applog.log(
+            f"Starting scan of {folder}" + (" (auto-refresh)" if auto_refresh else ""),
+            level=applog.LogLevel.INFO,
+        )
+        self._auto_refresh_scan = auto_refresh
+        if not auto_refresh:
+            self.statusBar().showMessage("Starting scan…")
+            self._workspace = Workspace(root_path=Path(folder), repositories=[])
+            self._refresh_display()
+            self._scan_refresh_timer.start()
         worker = ScanWorker(
-            Path(folder), include_ignored=self._include_ignored_action.isChecked()
+            Path(folder),
+            include_ignored=self._include_ignored_action.isChecked(),
+            github_client=self._github_client(),
         )
         worker.signals.progress.connect(self._on_scan_progress)
         worker.signals.repo_ready.connect(self._on_repo_ready)
         worker.signals.workspace_ready.connect(self._on_workspace_ready)
         worker.signals.error.connect(self._on_scan_error)
-        self._scan_refresh_timer.start()
+        worker.signals.log_message.connect(self._on_scan_log_message)
         self._thread_pool.start(worker)
 
     def _on_scan_progress(self, message: str) -> None:
-        applog.log(message)
+        applog.log(message, level=applog.LogLevel.DEBUG)
         self.statusBar().showMessage(message)
+
+    def _on_scan_log_message(self, message: str) -> None:
+        applog.log(message, level=applog.LogLevel.WARNING)
 
     def _on_repo_ready(self, repo: Repository) -> None:
         # Rebuilding the tree (expandAll + restore-collapsed-state) is O(current
         # repo count), so appending it here without refreshing keeps repo arrival
         # cheap; the periodic timer coalesces the actual tree rebuilds instead of
         # doing one per repo.
+        # Auto-refresh scans leave self._workspace (and the displayed tree) untouched
+        # until the full result is ready, so nothing to accumulate here.
+        if self._auto_refresh_scan:
+            return
         if self._workspace is not None:
             self._workspace.repositories.append(repo)
 
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._scan_refresh_timer.stop()
         self._workspace = workspace
-        self._refresh_display()
+        self._refresh_display(preserve_tree=self._auto_refresh_scan)
+        self._auto_refresh_scan = False
         repo_count = len(workspace.repositories)
         change_count = sum(len(r.changes) for r in workspace.repositories)
         message = f"Done — {repo_count} repositories, {change_count} changed files"
-        applog.log(message)
+        applog.log(message, level=applog.LogLevel.INFO)
         self.statusBar().showMessage(message, 5000)
 
-    def _refresh_display(self) -> None:
+    def _refresh_display(self, *, preserve_tree: bool = False) -> None:
         if self._workspace is None:
             return
         display_workspace = filter_workspace(
@@ -409,12 +638,15 @@ class MainWindow(QMainWindow):
             folder_filter_rules=self._folder_filter_rules,
             max_age_minutes=self._time_filter_minutes,
         )
-        self._tree_view.set_workspace(display_workspace)
+        if preserve_tree:
+            self._tree_view.update_workspace(display_workspace)
+        else:
+            self._tree_view.set_workspace(display_workspace)
         self._aggregate_list.set_workspace(display_workspace)
         change_count = sum(len(r.changes) for r in display_workspace.repositories)
         self._summary_label.setText(f"Total changed files: {change_count}")
 
     def _on_scan_error(self, message: str) -> None:
         self._scan_refresh_timer.stop()
-        applog.log(f"Scan failed: {message}")
+        applog.log(f"Scan failed: {message}", level=applog.LogLevel.ERROR)
         self.statusBar().showMessage(f"Scan failed: {message}", 5000)

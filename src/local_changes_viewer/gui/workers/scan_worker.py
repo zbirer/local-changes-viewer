@@ -2,6 +2,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from local_changes_viewer.core.infra.github_client import GitHubClient
 from local_changes_viewer.core.services.workspace_scanner_service import (
     WorkspaceScannerService,
 )
@@ -12,13 +13,20 @@ class ScanWorkerSignals(QObject):
     repo_ready = Signal(object)  # Repository
     error = Signal(str)
     progress = Signal(str)
+    log_message = Signal(str)
 
 
 class ScanWorker(QRunnable):
-    def __init__(self, root: Path, include_ignored: bool = False) -> None:
+    def __init__(
+        self,
+        root: Path,
+        include_ignored: bool = False,
+        github_client: GitHubClient | None = None,
+    ) -> None:
         super().__init__()
         self._root = root
         self._include_ignored = include_ignored
+        self._github_client = github_client
         self._service = WorkspaceScannerService()
         self.signals = ScanWorkerSignals()
 
@@ -29,6 +37,8 @@ class ScanWorker(QRunnable):
                 include_ignored=self._include_ignored,
                 on_progress=self.signals.progress.emit,
                 on_repo_ready=self.signals.repo_ready.emit,
+                github_client=self._github_client,
+                on_log=self.signals.log_message.emit,
             )
         except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
             self.signals.error.emit(str(exc))
