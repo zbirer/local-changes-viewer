@@ -67,6 +67,7 @@ class MainWindow(QMainWindow):
         self._scan_refresh_timer.setInterval(150)
         self._scan_refresh_timer.timeout.connect(self._refresh_display)
         self._auto_refresh_scan = False
+        self._auto_refresh_minutes = 0
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
 
@@ -226,6 +227,9 @@ class MainWindow(QMainWindow):
         self._file_info_label = QLabel("")
         self.statusBar().addPermanentWidget(self._file_info_label)
 
+        self._status_extra_label = QLabel("")
+        self.statusBar().addPermanentWidget(self._status_extra_label)
+
         self._restore_last_folder()
         self._restore_window_state()
         self._auto_connect_github()
@@ -339,6 +343,7 @@ class MainWindow(QMainWindow):
     def _on_time_filter_changed(self, minutes: int) -> None:
         applog.log(f"Time filter changed: {minutes} minute(s)", level=applog.LogLevel.INFO)
         self._time_filter_minutes = minutes
+        self._update_status_extra_label()
         self._refresh_display()
 
     def _on_sync_scroll_toggled(self, checked: bool) -> None:
@@ -362,9 +367,19 @@ class MainWindow(QMainWindow):
         self._apply_auto_refresh_interval(minutes)
 
     def _apply_auto_refresh_interval(self, minutes: int) -> None:
+        self._auto_refresh_minutes = minutes
+        self._update_status_extra_label()
         self._auto_refresh_timer.stop()
         if minutes > 0:
             self._auto_refresh_timer.start(minutes * 60 * 1000)
+
+    def _update_status_extra_label(self) -> None:
+        parts = []
+        if self._auto_refresh_minutes:
+            parts.append(f"Auto refresh: {self._auto_refresh_minutes} min")
+        if self._time_filter_minutes:
+            parts.append(f"Last commit: {self._time_filter_minutes} min")
+        self._status_extra_label.setText("  |  ".join(parts))
 
     def _on_auto_refresh_timeout(self) -> None:
         if self._root_folder:
