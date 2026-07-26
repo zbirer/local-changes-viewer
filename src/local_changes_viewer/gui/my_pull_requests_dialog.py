@@ -74,12 +74,13 @@ class MyPullRequestsDialog(QDialog):
             self._tree.addTopLevelItem(empty_item)
 
         header = self._tree.header()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self._tree.setColumnWidth(0, 275)
         self._tree.setColumnWidth(1, 70)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
