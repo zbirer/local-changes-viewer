@@ -215,6 +215,7 @@ class MainWindow(QMainWindow):
         actions_menu.addSeparator()
 
         refresh_action = QAction("Refresh", self)
+        refresh_action.setShortcut(QKeySequence("Ctrl+R"))
         refresh_action.triggered.connect(self._on_refresh)
         actions_menu.addAction(refresh_action)
 
