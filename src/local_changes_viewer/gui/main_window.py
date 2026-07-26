@@ -66,7 +66,7 @@ class MainWindow(QMainWindow):
         self._scan_refresh_timer = QTimer(self)
         self._scan_refresh_timer.setInterval(150)
         self._scan_refresh_timer.timeout.connect(self._refresh_display)
-        self._auto_refresh_scan = False
+        self._incremental_scan = False
         self._auto_refresh_minutes = 0
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
@@ -289,7 +289,7 @@ class MainWindow(QMainWindow):
     def _on_refresh(self) -> None:
         applog.log("Refresh", level=applog.LogLevel.INFO)
         if self._root_folder:
-            self._start_scan(self._root_folder)
+            self._start_scan(self._root_folder, rebuild=self._workspace is None)
 
     def _on_file_selected(self, repo_path: Path, change: FileChange) -> None:
         self._selected_change = change
@@ -603,13 +603,13 @@ class MainWindow(QMainWindow):
         self._folder_status_label.setText(f"Folder: {folder}")
         self._start_scan(folder)
 
-    def _start_scan(self, folder: str, *, auto_refresh: bool = False) -> None:
+    def _start_scan(self, folder: str, *, auto_refresh: bool = False, rebuild: bool = True) -> None:
         applog.log(
             f"Starting scan of {folder}" + (" (auto-refresh)" if auto_refresh else ""),
             level=applog.LogLevel.INFO,
         )
-        self._auto_refresh_scan = auto_refresh
-        if not auto_refresh:
+        self._incremental_scan = auto_refresh or not rebuild
+        if not self._incremental_scan:
             self.statusBar().showMessage("Starting scan…")
             self._workspace = Workspace(root_path=Path(folder), repositories=[])
             self._refresh_display()
@@ -638,9 +638,10 @@ class MainWindow(QMainWindow):
         # repo count), so appending it here without refreshing keeps repo arrival
         # cheap; the periodic timer coalesces the actual tree rebuilds instead of
         # doing one per repo.
-        # Auto-refresh scans leave self._workspace (and the displayed tree) untouched
-        # until the full result is ready, so nothing to accumulate here.
-        if self._auto_refresh_scan:
+        # Incremental scans (auto-refresh, or manual refresh with an already-loaded
+        # workspace) leave self._workspace (and the displayed tree) untouched until
+        # the full result is ready, so nothing to accumulate here.
+        if self._incremental_scan:
             return
         if self._workspace is not None:
             self._workspace.repositories.append(repo)
@@ -648,8 +649,8 @@ class MainWindow(QMainWindow):
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._scan_refresh_timer.stop()
         self._workspace = workspace
-        self._refresh_display(preserve_tree=self._auto_refresh_scan)
-        self._auto_refresh_scan = False
+        self._refresh_display(preserve_tree=self._incremental_scan)
+        self._incremental_scan = False
         repo_count = len(workspace.repositories)
         change_count = sum(len(r.changes) for r in workspace.repositories)
         message = f"Done — {repo_count} repositories, {change_count} changed files"
