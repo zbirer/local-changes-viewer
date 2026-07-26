@@ -219,6 +219,11 @@ class MainWindow(QMainWindow):
         refresh_action.triggered.connect(self._on_refresh)
         actions_menu.addAction(refresh_action)
 
+        toggle_time_filter_action = QAction("Toggle Last Commit Time Filter", self)
+        toggle_time_filter_action.setShortcut(QKeySequence("Ctrl+D"))
+        toggle_time_filter_action.triggered.connect(self._on_toggle_time_filter)
+        actions_menu.addAction(toggle_time_filter_action)
+
         self._folder_status_label = QLabel("No folder open")
         self.statusBar().addPermanentWidget(self._folder_status_label)
 
@@ -340,6 +345,9 @@ class MainWindow(QMainWindow):
         name = action.text() if action is not None else "display filter"
         applog.log(f"{name}: {checked}", level=applog.LogLevel.INFO)
         self._refresh_display()
+
+    def _on_toggle_time_filter(self) -> None:
+        self._diff_view.set_time_filter_minutes(0 if self._time_filter_minutes else 30)
 
     def _on_time_filter_changed(self, minutes: int) -> None:
         applog.log(f"Time filter changed: {minutes} minute(s)", level=applog.LogLevel.INFO)

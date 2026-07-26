@@ -91,6 +91,9 @@ class DiffViewWidget(QWidget):
     def decrease_font_size(self) -> None:
         self._set_font_point_size(self._font_point_size - 1)
 
+    def set_time_filter_minutes(self, minutes: int) -> None:
+        self._time_filter_slider.setValue(minutes)
+
     def _set_font_point_size(self, size: int) -> None:
         size = max(self._MIN_FONT_POINT_SIZE, min(self._MAX_FONT_POINT_SIZE, size))
         self._font_point_size = size
