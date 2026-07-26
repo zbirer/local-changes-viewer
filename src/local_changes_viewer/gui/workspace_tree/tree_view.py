@@ -12,6 +12,50 @@ from local_changes_viewer.gui.workspace_tree.tree_model import (
     RepoTreeModel,
 )
 
+_PATH_SEPARATORS = ("/", "\\")
+
+
+class _WorkspaceFilterProxyModel(QSortFilterProxyModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self._repo_query = ""
+        self._file_query = ""
+        self._split_mode = False
+
+    def set_filter_parts(self, repo_query: str, file_query: str, split_mode: bool) -> None:
+        self._repo_query = repo_query.lower()
+        self._file_query = file_query.lower()
+        self._split_mode = split_mode
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
+        if not self._split_mode:
+            return super().filterAcceptsRow(source_row, source_parent)
+
+        index = self.sourceModel().index(source_row, 0, source_parent)
+        if not source_parent.isValid():
+            return self._repo_query in self._repo_name(index).lower()
+
+        if self._repo_query not in self._repo_name(self._top_level_ancestor(index)).lower():
+            return False
+        if not self._file_query:
+            return True
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        return self._file_query in text.lower()
+
+    @staticmethod
+    def _repo_name(index: QModelIndex) -> str:
+        key = index.data(NODE_KEY_ROLE) or ""
+        return Path(key).name if key else ""
+
+    @staticmethod
+    def _top_level_ancestor(index: QModelIndex) -> QModelIndex:
+        parent = index.parent()
+        while parent.isValid():
+            index = parent
+            parent = index.parent()
+        return index
+
 
 class RepoTreeView(QTreeView):
     file_selected = Signal(object, object)  # repo_path: Path, change: FileChange
@@ -22,7 +66,7 @@ class RepoTreeView(QTreeView):
         self._settings = settings
         self._programmatic_change = False
         self._model = RepoTreeModel()
-        self._proxy = QSortFilterProxyModel()
+        self._proxy = _WorkspaceFilterProxyModel()
         self._proxy.setSourceModel(self._model)
         self._proxy.setRecursiveFilteringEnabled(True)
         self._proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -74,7 +118,13 @@ class RepoTreeView(QTreeView):
         self._programmatic_change = False
 
     def set_filter_text(self, text: str) -> None:
-        self._proxy.setFilterFixedString(text)
+        sep_positions = [text.index(sep) for sep in _PATH_SEPARATORS if sep in text]
+        if sep_positions:
+            sep_index = min(sep_positions)
+            self._proxy.set_filter_parts(text[:sep_index], text[sep_index + 1 :], True)
+        else:
+            self._proxy.set_filter_parts("", "", False)
+            self._proxy.setFilterFixedString(text)
         if text:
             self._programmatic_change = True
             self.expandAll()
