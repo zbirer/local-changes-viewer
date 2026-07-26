@@ -109,10 +109,6 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._on_open_folder)
         actions_menu.addAction(open_action)
 
-        my_pull_requests_action = QAction("My Open Pull Requests…", self)
-        my_pull_requests_action.triggered.connect(self._on_show_my_pull_requests)
-        actions_menu.addAction(my_pull_requests_action)
-
         settings_menu = self.menuBar().addMenu("Settings")
 
         self._include_ignored_action = QAction("Show ignored files", self, checkable=True)
@@ -151,13 +147,21 @@ class MainWindow(QMainWindow):
         log_level_action.triggered.connect(self._on_configure_log_level)
         settings_menu.addAction(log_level_action)
 
+        github_menu = self.menuBar().addMenu("GitHub")
+
+        my_pull_requests_action = QAction("My Open Pull Requests…", self)
+        my_pull_requests_action.triggered.connect(self._on_show_my_pull_requests)
+        github_menu.addAction(my_pull_requests_action)
+
+        github_menu.addSeparator()
+
         connect_github_action = QAction("Connect to GitHub…", self)
         connect_github_action.triggered.connect(self._on_connect_github)
-        settings_menu.addAction(connect_github_action)
+        github_menu.addAction(connect_github_action)
 
         self._disconnect_github_action = QAction("Disconnect GitHub", self)
         self._disconnect_github_action.triggered.connect(self._on_disconnect_github)
-        settings_menu.addAction(self._disconnect_github_action)
+        github_menu.addAction(self._disconnect_github_action)
 
         actions_menu.addSeparator()
 
