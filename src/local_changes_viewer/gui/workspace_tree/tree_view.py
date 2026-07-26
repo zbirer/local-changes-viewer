@@ -117,6 +117,12 @@ class RepoTreeView(QTreeView):
         self._model.update_workspace(workspace)
         self._programmatic_change = False
 
+    def highlight_repo(self, repo_path: Path) -> None:
+        self._model.set_repo_highlighted(repo_path, True)
+
+    def clear_repo_highlights(self) -> None:
+        self._model.clear_all_highlights()
+
     def set_filter_text(self, text: str) -> None:
         sep_positions = [text.index(sep) for sep in _PATH_SEPARATORS if sep in text]
         if sep_positions:

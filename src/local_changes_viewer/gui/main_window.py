@@ -642,6 +642,7 @@ class MainWindow(QMainWindow):
         # workspace) leave self._workspace (and the displayed tree) untouched until
         # the full result is ready, so nothing to accumulate here.
         if self._incremental_scan:
+            self._tree_view.highlight_repo(repo.path)
             return
         if self._workspace is not None:
             self._workspace.repositories.append(repo)
@@ -651,6 +652,7 @@ class MainWindow(QMainWindow):
         self._workspace = workspace
         self._refresh_display(preserve_tree=self._incremental_scan)
         self._incremental_scan = False
+        self._tree_view.clear_repo_highlights()
         repo_count = len(workspace.repositories)
         change_count = sum(len(r.changes) for r in workspace.repositories)
         message = f"Done — {repo_count} repositories, {change_count} changed files"

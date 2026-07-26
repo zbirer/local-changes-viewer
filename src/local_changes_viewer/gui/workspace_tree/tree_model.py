@@ -20,6 +20,9 @@ FILE_CHANGE_ROLE = Qt.ItemDataRole.UserRole + 2
 REPO_PATH_ROLE = Qt.ItemDataRole.UserRole + 3
 _CHANGE_SIGNATURE_ROLE = Qt.ItemDataRole.UserRole + 4
 
+_REFRESH_HIGHLIGHT_COLOR = QColor("#FEF3C7")
+_REFRESH_HIGHLIGHT_TEXT_COLOR = QColor("#1F2937")
+
 
 class RepoTreeModel(QStandardItemModel):
     def __init__(self) -> None:
@@ -67,6 +70,25 @@ class RepoTreeModel(QStandardItemModel):
                 existing_item.removeRows(0, existing_item.rowCount())
                 self._add_changes(existing_item, repo)
                 existing_item.setData(signature, _CHANGE_SIGNATURE_ROLE)
+
+    def set_repo_highlighted(self, repo_path: Path, highlighted: bool) -> None:
+        root = self.invisibleRootItem()
+        key = str(repo_path)
+        for row in range(root.rowCount()):
+            item = root.child(row)
+            if item.data(NODE_KEY_ROLE) == key:
+                self._set_item_highlighted(item, highlighted)
+                return
+
+    def clear_all_highlights(self) -> None:
+        root = self.invisibleRootItem()
+        for row in range(root.rowCount()):
+            self._set_item_highlighted(root.child(row), False)
+
+    @staticmethod
+    def _set_item_highlighted(item: QStandardItem, highlighted: bool) -> None:
+        item.setBackground(QBrush(_REFRESH_HIGHLIGHT_COLOR) if highlighted else QBrush())
+        item.setForeground(QBrush(_REFRESH_HIGHLIGHT_TEXT_COLOR) if highlighted else QBrush())
 
     def _build_repo_item(self, repo) -> QStandardItem:
         repo_item = QStandardItem("")
