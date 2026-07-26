@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 
 from local_changes_viewer.core.domain.pull_request import PullRequestInfo
 
-_COLUMNS = ["PR ID", "Link", "Title", "Status", "Approved", "Unresolved", "Last Reviewer"]
+_COLUMNS = ["PR ID", "Link", "Title", "Approved", "Unresolved", "Last Reviewer"]
 _URL_ROLE = Qt.ItemDataRole.UserRole
 
 
@@ -54,7 +54,6 @@ class MyPullRequestsDialog(QDialog):
                             f"#{pr.number}",
                             "",
                             pr.title,
-                            pr.state,
                             _approved_text(pr.approved),
                             str(pr.unresolved_review_thread_count),
                             pr.last_reviewer or "-",
@@ -81,7 +80,6 @@ class MyPullRequestsDialog(QDialog):
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         self._tree.setColumnWidth(1, 70)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
