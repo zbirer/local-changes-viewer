@@ -9,6 +9,8 @@ class PairedLine:
     left_kind: DiffLineKind | None
     right_text: str | None
     right_kind: DiffLineKind | None
+    left_lineno: int | None = None
+    right_lineno: int | None = None
 
 
 def pair_hunk_lines(lines: list[DiffLine]) -> list[PairedLine]:
@@ -17,7 +19,9 @@ def pair_hunk_lines(lines: list[DiffLine]) -> list[PairedLine]:
     while i < len(lines):
         line = lines[i]
         if line.kind is DiffLineKind.CONTEXT:
-            paired.append(PairedLine(line.text, None, line.text, None))
+            paired.append(
+                PairedLine(line.text, None, line.text, None, line.old_lineno, line.new_lineno)
+            )
             i += 1
             continue
 
@@ -39,6 +43,8 @@ def pair_hunk_lines(lines: list[DiffLine]) -> list[PairedLine]:
                     DiffLineKind.REMOVED if left is not None else None,
                     right.text if right is not None else None,
                     DiffLineKind.ADDED if right is not None else None,
+                    left.old_lineno if left is not None else None,
+                    right.new_lineno if right is not None else None,
                 )
             )
     return paired

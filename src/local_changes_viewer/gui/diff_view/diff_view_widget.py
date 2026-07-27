@@ -1,7 +1,10 @@
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSlider,
     QStackedWidget,
@@ -17,6 +20,7 @@ from local_changes_viewer.gui.diff_view.unified_view import UnifiedView
 class DiffViewWidget(QWidget):
     refresh_requested = Signal()
     time_filter_minutes_changed = Signal(int)
+    file_saved = Signal(str)
 
     _MAX_TIME_FILTER_MINUTES = 180
 
@@ -46,6 +50,21 @@ class DiffViewWidget(QWidget):
         self._refresh_button = QPushButton("Refresh")
         self._refresh_button.clicked.connect(self.refresh_requested.emit)
 
+        self._edit_button = QPushButton("Edit")
+        self._edit_button.setCheckable(True)
+        self._edit_button.setEnabled(False)
+        self._edit_button.toggled.connect(self._on_edit_toggled)
+
+        self._save_button = QPushButton("Save")
+        self._save_button.setEnabled(False)
+        self._save_button.clicked.connect(self._on_save_clicked)
+
+        self._line_numbers_button = QPushButton("Line Numbers")
+        self._line_numbers_button.setCheckable(True)
+        self._line_numbers_button.setChecked(False)
+        self._line_numbers_button.toggled.connect(self._on_line_numbers_toggled)
+        self._on_line_numbers_toggled(False)
+
         self._time_filter_slider = QSlider(Qt.Orientation.Horizontal)
         self._time_filter_slider.setRange(0, self._MAX_TIME_FILTER_MINUTES)
         self._time_filter_slider.setValue(0)
@@ -60,6 +79,9 @@ class DiffViewWidget(QWidget):
         toolbar_layout.addWidget(self._prev_button)
         toolbar_layout.addWidget(self._next_button)
         toolbar_layout.addWidget(self._refresh_button)
+        toolbar_layout.addWidget(self._edit_button)
+        toolbar_layout.addWidget(self._save_button)
+        toolbar_layout.addWidget(self._line_numbers_button)
         toolbar_layout.addWidget(self._time_filter_slider)
         toolbar_layout.addWidget(self._time_filter_label)
         toolbar_layout.addStretch()
@@ -123,10 +145,19 @@ class DiffViewWidget(QWidget):
         self._current_hunk_index = min(self._current_hunk_index + 1, count - 1)
         view.scroll_to_hunk(self._current_hunk_index)
 
-    def set_diff(self, diff: DiffResult, file_path: str | None = None) -> None:
+    def set_diff(
+        self,
+        diff: DiffResult,
+        file_path: str | None = None,
+        abs_file_path: Path | None = None,
+    ) -> None:
         self._current_hunk_index = -1
         self._unified.set_diff(diff, file_path)
         self._side_by_side.set_diff(diff, file_path)
+        self._side_by_side.set_file_target(abs_file_path)
+        self._edit_button.setChecked(False)
+        self._edit_button.setEnabled(abs_file_path is not None)
+        self._save_button.setEnabled(False)
         if diff.old_blob_id and diff.new_blob_id:
             self._header_label.setText(
                 f"index {diff.old_blob_id}..{diff.new_blob_id}  ({diff.old_ref} → {diff.new_ref})"
@@ -138,4 +169,48 @@ class DiffViewWidget(QWidget):
         self._current_hunk_index = -1
         self._unified.clear_diff()
         self._side_by_side.clear_diff()
+        self._edit_button.setChecked(False)
+        self._edit_button.setEnabled(False)
+        self._save_button.setEnabled(False)
         self._header_label.setText("")
+
+    def has_unsaved_edits(self) -> bool:
+        return self._side_by_side.has_unsaved_edits()
+
+    def discard_edits_if_any(self) -> bool:
+        """Silently exits edit mode, discarding unsaved edits. Returns True if anything was discarded."""
+        had_unsaved = self._side_by_side.has_unsaved_edits()
+        if self._side_by_side.is_editing():
+            self._side_by_side.exit_edit_mode()
+            self._edit_button.setChecked(False)
+            self._save_button.setEnabled(False)
+        return had_unsaved
+
+    def _on_edit_toggled(self, checked: bool) -> None:
+        if checked:
+            self.set_side_by_side(True)
+            if not self._side_by_side.enter_edit_mode():
+                self._edit_button.setChecked(False)
+                return
+            self._save_button.setEnabled(True)
+            return
+
+        if self._side_by_side.has_unsaved_edits():
+            reply = QMessageBox.question(
+                self,
+                "Discard edits?",
+                "You have unsaved edits to this file. Discard them?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self._edit_button.setChecked(True)
+                return
+        self._side_by_side.exit_edit_mode()
+        self._save_button.setEnabled(False)
+
+    def _on_save_clicked(self) -> None:
+        if self._side_by_side.save_edits():
+            self.file_saved.emit(str(self._side_by_side.file_target()))
+
+    def _on_line_numbers_toggled(self, checked: bool) -> None:
+        self._unified.set_line_numbers_visible(checked)
+        self._side_by_side.set_line_numbers_visible(checked)

@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         self._diff_view = DiffViewWidget()
         self._diff_view.refresh_requested.connect(self._on_refresh)
         self._diff_view.time_filter_minutes_changed.connect(self._on_time_filter_changed)
+        self._diff_view.file_saved.connect(self._on_file_saved)
 
         self._aggregate_list = AggregateChangeList()
         self._aggregate_list.file_selected.connect(self._on_file_selected)
@@ -265,6 +266,15 @@ class MainWindow(QMainWindow):
         self._disconnect_github_action.setEnabled(self._settings.github_username() is not None)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._diff_view.has_unsaved_edits():
+            reply = QMessageBox.question(
+                self,
+                "Discard edits?",
+                "You have unsaved edits to a file. Discard them and close?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
         self._settings.set_window_geometry(self.saveGeometry())
         self._settings.set_splitter_sizes(self._splitter.sizes())
         mode = "side_by_side" if self._diff_view.is_side_by_side() else "unified"
@@ -292,13 +302,20 @@ class MainWindow(QMainWindow):
             self._start_scan(self._root_folder, rebuild=self._workspace is None)
 
     def _on_file_selected(self, repo_path: Path, change: FileChange) -> None:
+        if self._diff_view.discard_edits_if_any():
+            self.statusBar().showMessage("Discarded unsaved edits", 5000)
         self._selected_change = change
         self._selected_repo_path = repo_path
         self._update_file_info_label(repo_path, change)
         if change.diff is not None:
-            self._diff_view.set_diff(change.diff, str(change.path))
+            self._diff_view.set_diff(change.diff, str(change.path), self._editable_path(repo_path, change))
             return
         self._load_diff(repo_path, change)
+
+    def _editable_path(self, repo_path: Path, change: FileChange) -> Path | None:
+        if change.change_type == ChangeType.DELETED or change.is_directory:
+            return None
+        return repo_path / change.path
 
     def _update_file_info_label(self, repo_path: Path, change: FileChange) -> None:
         if change.change_type == ChangeType.DELETED:
@@ -324,12 +341,18 @@ class MainWindow(QMainWindow):
 
     def _on_diff_ready(self, change: FileChange, diff) -> None:
         change.diff = diff
-        if change is self._selected_change:
-            self._diff_view.set_diff(diff, str(change.path))
+        if change is self._selected_change and self._selected_repo_path is not None:
+            abs_path = self._editable_path(self._selected_repo_path, change)
+            self._diff_view.set_diff(diff, str(change.path), abs_path)
 
     def _on_diff_error(self, message: str) -> None:
         applog.log(f"Diff failed: {message}", level=applog.LogLevel.ERROR)
         self.statusBar().showMessage(f"Diff failed: {message}", 5000)
+
+    def _on_file_saved(self, file_path: str) -> None:
+        applog.log(f"Saved edits to {file_path}", level=applog.LogLevel.INFO)
+        self.statusBar().showMessage(f"Saved {file_path}", 5000)
+        self._on_refresh()
 
     def _on_ignore_whitespace_toggled(self, checked: bool) -> None:
         applog.log(f"Ignore whitespace: {checked}", level=applog.LogLevel.INFO)

@@ -52,6 +52,7 @@ class UnifiedView(QPlainTextEdit):
         self._diff: DiffResult | None = None
         self._file_path: str | None = None
         self._expanded_folds: set[tuple[int, int]] = set()
+        self._line_numbers_visible = True
         self._gutter = _GutterWidget(self)
         self._highlighter = PygmentsHighlighter(self.document(), prefix_len=1)
         self.blockCountChanged.connect(self._update_gutter_width)
@@ -70,6 +71,11 @@ class UnifiedView(QPlainTextEdit):
         self.setFont(font)
         self._update_gutter_width()
         self._gutter.update()
+
+    def set_line_numbers_visible(self, visible: bool) -> None:
+        self._line_numbers_visible = visible
+        self._gutter.setVisible(visible)
+        self._update_gutter_width()
 
     def clear_diff(self) -> None:
         self._diff = None
@@ -180,6 +186,8 @@ class UnifiedView(QPlainTextEdit):
         self.setExtraSelections(selections)
 
     def gutter_width(self) -> int:
+        if not self._line_numbers_visible:
+            return 0
         digits = max((len(str(m.old_lineno or 0)) for m in self._line_meta), default=1)
         digits = max(
             digits, max((len(str(m.new_lineno or 0)) for m in self._line_meta), default=1)

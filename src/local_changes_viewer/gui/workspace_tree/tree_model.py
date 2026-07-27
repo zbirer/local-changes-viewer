@@ -23,6 +23,9 @@ _CHANGE_SIGNATURE_ROLE = Qt.ItemDataRole.UserRole + 4
 _REFRESH_HIGHLIGHT_COLOR = QColor("#FEF3C7")
 _REFRESH_HIGHLIGHT_TEXT_COLOR = QColor("#1F2937")
 
+_REPO_BG_COLOR = QColor("#334155")
+_REPO_TEXT_COLOR = QColor("#F9FAFB")
+
 
 class RepoTreeModel(QStandardItemModel):
     def __init__(self) -> None:
@@ -87,14 +90,20 @@ class RepoTreeModel(QStandardItemModel):
 
     @staticmethod
     def _set_item_highlighted(item: QStandardItem, highlighted: bool) -> None:
-        item.setBackground(QBrush(_REFRESH_HIGHLIGHT_COLOR) if highlighted else QBrush())
-        item.setForeground(QBrush(_REFRESH_HIGHLIGHT_TEXT_COLOR) if highlighted else QBrush())
+        item.setBackground(
+            QBrush(_REFRESH_HIGHLIGHT_COLOR) if highlighted else QBrush(_REPO_BG_COLOR)
+        )
+        item.setForeground(
+            QBrush(_REFRESH_HIGHLIGHT_TEXT_COLOR) if highlighted else QBrush(_REPO_TEXT_COLOR)
+        )
 
     def _build_repo_item(self, repo) -> QStandardItem:
         repo_item = QStandardItem("")
         repo_item.setEditable(False)
         repo_item.setData(str(repo.path), NODE_KEY_ROLE)
         repo_item.setData(self._change_signature(repo), _CHANGE_SIGNATURE_ROLE)
+        repo_item.setBackground(QBrush(_REPO_BG_COLOR))
+        repo_item.setForeground(QBrush(_REPO_TEXT_COLOR))
         self._update_repo_item(repo_item, repo)
         return repo_item
 
