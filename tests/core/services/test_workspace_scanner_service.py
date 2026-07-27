@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
+from local_changes_viewer.core.domain.pull_request import PullRequestInfo
 from local_changes_viewer.core.domain.repository import BranchStatus
 from local_changes_viewer.core.infra.github_client import GitHubError
 from local_changes_viewer.core.services.workspace_scanner_service import (
@@ -256,3 +257,115 @@ def test_scan_routes_github_pr_fetch_error_through_on_log_not_an_exception(tmp_p
 
     assert workspace.repositories[0].pull_request is None
     assert any("Failed to fetch GitHub PR status for getexpain/repo_a" in m for m in messages)
+
+
+class RecordingGitHubClient:
+    def __init__(self, pull_request: PullRequestInfo | None = None) -> None:
+        self.pull_request = pull_request
+        self.calls: list[tuple[str, str, str]] = []
+
+    def find_pull_request(self, owner: str, repo: str, branch: str):
+        self.calls.append((owner, repo, branch))
+        return self.pull_request
+
+
+def _pr(state: str, repository: str = "getexpain/repo_a") -> PullRequestInfo:
+    return PullRequestInfo(
+        number=1,
+        title="Some PR",
+        state=state,
+        url="https://github.com/getexpain/repo_a/pull/1",
+        comment_count=0,
+        review_comment_count=0,
+        repository=repository,
+    )
+
+
+def test_scan_reuses_cached_pr_for_terminal_state_and_unchanged_branch(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a, [], _branch("main"), remote_url="git@github.com:getexpain/repo_a.git"
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+    github_client = RecordingGitHubClient()
+    cached_pr = _pr("merged")
+
+    workspace = service.scan(
+        tmp_path,
+        github_client=github_client,
+        previous_pull_requests={repo_a: (cached_pr, "main")},
+    )
+
+    assert github_client.calls == []
+    assert workspace.repositories[0].pull_request is cached_pr
+
+
+def test_scan_still_fetches_when_previous_pr_is_open(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a, [], _branch("main"), remote_url="git@github.com:getexpain/repo_a.git"
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+    fresh_pr = _pr("open")
+    github_client = RecordingGitHubClient(pull_request=fresh_pr)
+    previous_open_pr = _pr("open")
+
+    workspace = service.scan(
+        tmp_path,
+        github_client=github_client,
+        previous_pull_requests={repo_a: (previous_open_pr, "main")},
+    )
+
+    assert github_client.calls == [("getexpain", "repo_a", "main")]
+    assert workspace.repositories[0].pull_request is fresh_pr
+
+
+def test_scan_still_fetches_when_branch_changed(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a, [], _branch("feature-2"), remote_url="git@github.com:getexpain/repo_a.git"
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+    fresh_pr = _pr("open")
+    github_client = RecordingGitHubClient(pull_request=fresh_pr)
+    cached_pr = _pr("merged")
+
+    workspace = service.scan(
+        tmp_path,
+        github_client=github_client,
+        previous_pull_requests={repo_a: (cached_pr, "feature-1")},
+    )
+
+    assert github_client.calls == [("getexpain", "repo_a", "feature-2")]
+    assert workspace.repositories[0].pull_request is fresh_pr
+
+
+def test_scan_always_fetches_when_no_previous_pull_requests_given(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a, [], _branch("main"), remote_url="git@github.com:getexpain/repo_a.git"
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+    fresh_pr = _pr("merged")
+    github_client = RecordingGitHubClient(pull_request=fresh_pr)
+
+    workspace = service.scan(
+        tmp_path,
+        github_client=github_client,
+        previous_pull_requests=None,
+    )
+
+    assert github_client.calls == [("getexpain", "repo_a", "main")]
+    assert workspace.repositories[0].pull_request is fresh_pr

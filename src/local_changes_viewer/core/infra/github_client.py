@@ -1,5 +1,6 @@
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -17,6 +18,29 @@ _REMOTE_URL_RE = re.compile(
 
 class GitHubError(Exception):
     pass
+
+
+_FIND_PR_QUERY = """
+query($owner: String!, $repo: String!, $branch: String!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequests(
+      headRefName: $branch
+      states: [OPEN, CLOSED, MERGED]
+      first: 1
+      orderBy: {field: CREATED_AT, direction: DESC}
+    ) {
+      nodes {
+        number
+        title
+        state
+        url
+        comments { totalCount }
+        reviewComments { totalCount }
+      }
+    }
+  }
+}
+"""
 
 
 def parse_github_owner_repo(remote_url: str) -> tuple[str, str] | None:
@@ -41,6 +65,7 @@ class GitHubClient:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
+        start = time.monotonic()
         try:
             with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
                 body = response.read()
@@ -53,9 +78,10 @@ class GitHubClient:
         except urllib.error.URLError as exc:
             self._on_log(f"GitHub API request failed: GET {path} -> {exc.reason}")
             raise GitHubError(f"GitHub API request failed: {exc.reason}") from exc
+        elapsed_ms = (time.monotonic() - start) * 1000
         data = json.loads(body)
         count = len(data) if isinstance(data, list) else 1
-        self._on_log(f"GitHub API response: GET {path} -> {count} item(s)")
+        self._on_log(f"GitHub API response: GET {path} -> {count} item(s) ({elapsed_ms:.0f}ms)")
         return data
 
     def _graphql(self, query: str, variables: dict) -> dict:
@@ -72,6 +98,7 @@ class GitHubClient:
             },
             method="POST",
         )
+        start = time.monotonic()
         try:
             with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
                 body_bytes = response.read()
@@ -82,10 +109,12 @@ class GitHubClient:
         except urllib.error.URLError as exc:
             self._on_log(f"GitHub API request failed: POST /graphql -> {exc.reason}")
             raise GitHubError(f"GitHub API request failed: {exc.reason}") from exc
+        elapsed_ms = (time.monotonic() - start) * 1000
         payload = json.loads(body_bytes)
         if payload.get("errors"):
             self._on_log(f"GitHub API error: POST /graphql -> {payload['errors']}")
             raise GitHubError(f"GitHub GraphQL error: {payload['errors']}")
+        self._on_log(f"GitHub API response: POST /graphql -> ok ({elapsed_ms:.0f}ms)")
         return payload["data"]
 
     def get_authenticated_login(self) -> str:
@@ -125,22 +154,18 @@ class GitHubClient:
         return approved, unresolved_count, last_reviewer
 
     def find_pull_request(self, owner: str, repo: str, branch: str) -> PullRequestInfo | None:
-        results = self._get(f"/repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all")
-        if not results:
+        data = self._graphql(_FIND_PR_QUERY, {"owner": owner, "repo": repo, "branch": branch})
+        nodes = data["repository"]["pullRequests"]["nodes"]
+        if not nodes:
             return None
-        pr = results[0]
-        state = "merged" if pr.get("merged_at") else pr["state"]
-        review_comments = self._get(
-            f"/repos/{owner}/{repo}/pulls/{pr['number']}/comments"
-        )
-        review_comment_count = len(review_comments) if isinstance(review_comments, list) else 0
+        pr = nodes[0]
         return PullRequestInfo(
             number=pr["number"],
             title=pr["title"],
-            state=state,
-            url=pr["html_url"],
-            comment_count=pr.get("comments", 0),
-            review_comment_count=review_comment_count,
+            state=pr["state"].lower(),
+            url=pr["url"],
+            comment_count=pr["comments"]["totalCount"],
+            review_comment_count=pr["reviewComments"]["totalCount"],
             repository=f"{owner}/{repo}",
         )
 

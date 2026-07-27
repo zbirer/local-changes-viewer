@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterRule
+from local_changes_viewer.core.domain.pull_request import PullRequestInfo
 from local_changes_viewer.core.domain.repository import Repository
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
@@ -637,10 +638,18 @@ class MainWindow(QMainWindow):
             self._workspace = Workspace(root_path=Path(folder), repositories=[])
             self._refresh_display()
             self._scan_refresh_timer.start()
+        previous_pull_requests: dict[Path, tuple[PullRequestInfo, str]] | None = None
+        if auto_refresh and self._workspace is not None:
+            previous_pull_requests = {
+                repo.path: (repo.pull_request, repo.branch_status.branch_name)
+                for repo in self._workspace.repositories
+                if repo.pull_request is not None
+            }
         worker = ScanWorker(
             Path(folder),
             include_ignored=self._include_ignored_action.isChecked(),
             github_client=self._github_client(),
+            previous_pull_requests=previous_pull_requests,
         )
         worker.signals.progress.connect(self._on_scan_progress)
         worker.signals.repo_ready.connect(self._on_repo_ready)

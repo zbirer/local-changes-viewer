@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from local_changes_viewer.core.domain.file_change import ChangeType
+from local_changes_viewer.core.domain.pull_request import PullRequestInfo
 from local_changes_viewer.core.domain.repository import Repository
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.core.infra.filesystem_scanner import FileSystemScanner
@@ -35,6 +36,7 @@ class WorkspaceScannerService:
         on_repo_ready: Callable[[Repository], None] | None = None,
         github_client: GitHubClient | None = None,
         on_log: Callable[[str], None] | None = None,
+        previous_pull_requests: dict[Path, tuple[PullRequestInfo, str]] | None = None,
     ) -> Workspace:
         on_progress = on_progress or (lambda _message: None)
         on_repo_ready = on_repo_ready or (lambda _repo: None)
@@ -63,7 +65,11 @@ class WorkspaceScannerService:
         with ThreadPoolExecutor(max_workers=min(_MAX_PARALLEL_REPO_SCANS, total)) as executor:
             results = executor.map(
                 lambda repo_path: self._scan_repo(
-                    repo_path, include_ignored, github_client, on_log
+                    repo_path,
+                    include_ignored,
+                    github_client,
+                    on_log,
+                    (previous_pull_requests or {}).get(repo_path),
                 ),
                 repo_paths,
             )
@@ -89,6 +95,7 @@ class WorkspaceScannerService:
         include_ignored: bool,
         github_client: GitHubClient | None = None,
         on_log: Callable[[str], None] | None = None,
+        previous_pull_request: tuple[PullRequestInfo, str] | None = None,
     ) -> tuple[Repository | None, float]:
         on_log = on_log or (lambda _message: None)
         started_at = time.monotonic()
@@ -103,10 +110,16 @@ class WorkspaceScannerService:
         if not include_ignored:
             changes = [c for c in changes if c.change_type != ChangeType.IGNORED]
 
+        git_scan_ms = (time.monotonic() - started_at) * 1000
         pull_request = None
         if github_client is not None:
+            github_started_at = time.monotonic()
             pull_request = self._fetch_pull_request(
-                adapter, branch_status.branch_name, github_client, on_log
+                adapter, branch_status.branch_name, github_client, on_log, previous_pull_request
+            )
+            github_fetch_ms = (time.monotonic() - github_started_at) * 1000
+            on_log(
+                f"{repo_path.name}: git scan {git_scan_ms:.0f}ms, github fetch {github_fetch_ms:.0f}ms"
             )
 
         repo = Repository(
@@ -124,7 +137,16 @@ class WorkspaceScannerService:
         branch_name: str,
         github_client: GitHubClient,
         on_log: Callable[[str], None],
+        previous_pull_request: tuple[PullRequestInfo, str] | None = None,
     ):
+        if previous_pull_request is not None:
+            prev_pr, prev_branch = previous_pull_request
+            if prev_pr.state in ("merged", "closed") and branch_name == prev_branch:
+                on_log(
+                    f"Reusing cached PR for {prev_pr.repository} (terminal state {prev_pr.state})"
+                )
+                return prev_pr
+
         remote_url = adapter.get_remote_url("origin")
         if remote_url is None:
             return None

@@ -52,36 +52,104 @@ def test_get_authenticated_login():
 
 
 def test_find_pull_request_returns_none_when_no_matches():
-    with patch("urllib.request.urlopen", return_value=_FakeResponse([])):
+    payload = {"data": {"repository": {"pullRequests": {"nodes": []}}}}
+    with patch("urllib.request.urlopen", return_value=_FakeResponse(payload)):
         result = GitHubClient("token").find_pull_request("owner", "repo", "feature")
 
     assert result is None
 
 
 def test_find_pull_request_returns_info_when_found():
-    pr_payload = [
-        {
-            "number": 42,
-            "title": "Add feature",
-            "state": "open",
-            "merged_at": None,
-            "html_url": "https://github.com/owner/repo/pull/42",
-            "comments": 3,
+    payload = {
+        "data": {
+            "repository": {
+                "pullRequests": {
+                    "nodes": [
+                        {
+                            "number": 42,
+                            "title": "Add feature",
+                            "state": "OPEN",
+                            "url": "https://github.com/owner/repo/pull/42",
+                            "comments": {"totalCount": 3},
+                            "reviewComments": {"totalCount": 2},
+                        }
+                    ]
+                }
+            }
         }
-    ]
-    review_comments_payload = [{"id": 1}, {"id": 2}]
+    }
 
-    responses = [_FakeResponse(pr_payload), _FakeResponse(review_comments_payload)]
-
-    with patch("urllib.request.urlopen", side_effect=responses):
+    with patch("urllib.request.urlopen", return_value=_FakeResponse(payload)):
         result = GitHubClient("token").find_pull_request("owner", "repo", "feature")
 
     assert result is not None
     assert result.number == 42
     assert result.title == "Add feature"
     assert result.state == "open"
+    assert result.url == "https://github.com/owner/repo/pull/42"
     assert result.comment_count == 3
     assert result.review_comment_count == 2
+    assert result.repository == "owner/repo"
+
+
+def test_find_pull_request_lowercases_merged_state():
+    payload = {
+        "data": {
+            "repository": {
+                "pullRequests": {
+                    "nodes": [
+                        {
+                            "number": 42,
+                            "title": "Add feature",
+                            "state": "MERGED",
+                            "url": "https://github.com/owner/repo/pull/42",
+                            "comments": {"totalCount": 0},
+                            "reviewComments": {"totalCount": 0},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    with patch("urllib.request.urlopen", return_value=_FakeResponse(payload)):
+        result = GitHubClient("token").find_pull_request("owner", "repo", "feature")
+
+    assert result.state == "merged"
+
+
+def test_find_pull_request_raises_github_error_on_graphql_errors():
+    payload = {"errors": [{"message": "Something went wrong"}]}
+    with patch("urllib.request.urlopen", return_value=_FakeResponse(payload)):
+        with pytest.raises(GitHubError):
+            GitHubClient("token").find_pull_request("owner", "repo", "feature")
+
+
+def test_find_pull_request_maps_comment_counts_without_swapping():
+    payload = {
+        "data": {
+            "repository": {
+                "pullRequests": {
+                    "nodes": [
+                        {
+                            "number": 42,
+                            "title": "Add feature",
+                            "state": "OPEN",
+                            "url": "https://github.com/owner/repo/pull/42",
+                            "comments": {"totalCount": 5},
+                            "reviewComments": {"totalCount": 9},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    with patch("urllib.request.urlopen", return_value=_FakeResponse(payload)):
+        result = GitHubClient("token").find_pull_request("owner", "repo", "feature")
+
+    assert result.comment_count == 5
+    assert result.review_comment_count == 9
 
 
 def test_get_authenticated_login_raises_github_error_on_http_error():
