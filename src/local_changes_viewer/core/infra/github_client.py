@@ -5,10 +5,33 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 
-from local_changes_viewer.core.domain.pull_request import PullRequestInfo
+from local_changes_viewer.core.domain.pull_request import (
+    COMMENT_TYPE_APPROVE_REVIEW,
+    COMMENT_TYPE_COMMENT_REVIEW,
+    COMMENT_TYPE_ISSUE_COMMENT,
+    COMMENT_TYPE_PENDING_REVIEW,
+    COMMENT_TYPE_REQUEST_CHANGES_REVIEW,
+    COMMENT_TYPE_REVIEW_COMMENT,
+    PullRequestDetails,
+    PullRequestInfo,
+    PullRequestThread,
+)
 
 _API_BASE = "https://api.github.com"
 _TIMEOUT_SECONDS = 10
+
+_REVIEW_STATE_COMMENT_TYPES = {
+    "APPROVED": COMMENT_TYPE_APPROVE_REVIEW,
+    "CHANGES_REQUESTED": COMMENT_TYPE_REQUEST_CHANGES_REVIEW,
+    "COMMENTED": COMMENT_TYPE_COMMENT_REVIEW,
+    "PENDING": COMMENT_TYPE_PENDING_REVIEW,
+}
+
+
+def _title_from_body(body: str, fallback: str) -> str:
+    if not body:
+        return fallback
+    return body.splitlines()[0][:120]
 
 _REMOTE_URL_RE = re.compile(
     r"^(?:https://github\.com/|ssh://git@github\.com(?:-[\w.-]+)?/|git@github\.com(?:-[\w.-]+)?:)"
@@ -166,6 +189,147 @@ class GitHubClient:
             rollup = commit_nodes[0]["commit"]["statusCheckRollup"]
             checks_state = rollup["state"] if rollup else None
         return approved, unresolved_count, last_reviewer, changed_files, checks_state
+
+    def get_pull_request_details(self, owner: str, repo: str, number: int) -> PullRequestDetails:
+        query = """
+        query($owner: String!, $repo: String!, $number: Int!) {
+          repository(owner: $owner, name: $repo) {
+            pullRequest(number: $number) {
+              title
+              number
+              url
+              headRefName
+              baseRefName
+              state
+              isDraft
+              createdAt
+              updatedAt
+              comments(last: 1) {
+                nodes {
+                  author { login }
+                }
+              }
+            }
+          }
+        }
+        """
+        data = self._graphql(query, {"owner": owner, "repo": repo, "number": number})
+        pull_request = data["repository"]["pullRequest"]
+        status = "Draft" if pull_request["isDraft"] else pull_request["state"].capitalize()
+        comment_nodes = pull_request["comments"]["nodes"]
+        last_comment_writer = None
+        if comment_nodes and comment_nodes[0]["author"] is not None:
+            last_comment_writer = comment_nodes[0]["author"]["login"]
+        return PullRequestDetails(
+            title=pull_request["title"],
+            number=pull_request["number"],
+            url=pull_request["url"],
+            head_ref=pull_request["headRefName"],
+            base_ref=pull_request["baseRefName"],
+            status=status,
+            created_at=pull_request["createdAt"],
+            updated_at=pull_request["updatedAt"],
+            last_comment_writer=last_comment_writer,
+        )
+
+    def get_pull_request_open_threads(
+        self, owner: str, repo: str, number: int
+    ) -> list[PullRequestThread]:
+        query = """
+        query($owner: String!, $repo: String!, $number: Int!) {
+          repository(owner: $owner, name: $repo) {
+            pullRequest(number: $number) {
+              reviewThreads(first: 100) {
+                nodes {
+                  isResolved
+                  comments(first: 1) {
+                    nodes {
+                      author { login }
+                      body
+                      createdAt
+                      url
+                    }
+                  }
+                }
+              }
+              comments(first: 100) {
+                nodes {
+                  author { login }
+                  body
+                  createdAt
+                  url
+                }
+              }
+              reviews(first: 100) {
+                nodes {
+                  author { login }
+                  body
+                  createdAt
+                  url
+                  state
+                }
+              }
+            }
+          }
+        }
+        """
+        data = self._graphql(query, {"owner": owner, "repo": repo, "number": number})
+        pull_request = data["repository"]["pullRequest"]
+        results: list[PullRequestThread] = []
+
+        for thread in pull_request["reviewThreads"]["nodes"]:
+            if thread["isResolved"]:
+                continue
+            comment_nodes = thread["comments"]["nodes"]
+            if not comment_nodes:
+                continue
+            comment = comment_nodes[0]
+            writer = comment["author"]["login"] if comment["author"] is not None else None
+            body = comment["body"].strip()
+            results.append(
+                PullRequestThread(
+                    created_at=comment["createdAt"],
+                    writer=writer,
+                    title=_title_from_body(body, "(no comment text)"),
+                    body=body,
+                    url=comment["url"],
+                    comment_type=COMMENT_TYPE_REVIEW_COMMENT,
+                )
+            )
+
+        for comment in pull_request["comments"]["nodes"]:
+            writer = comment["author"]["login"] if comment["author"] is not None else None
+            body = comment["body"].strip()
+            results.append(
+                PullRequestThread(
+                    created_at=comment["createdAt"],
+                    writer=writer,
+                    title=_title_from_body(body, "(no comment text)"),
+                    body=body,
+                    url=comment["url"],
+                    comment_type=COMMENT_TYPE_ISSUE_COMMENT,
+                )
+            )
+
+        for review in pull_request["reviews"]["nodes"]:
+            comment_type = _REVIEW_STATE_COMMENT_TYPES.get(review["state"])
+            if comment_type is None:
+                continue
+            writer = review["author"]["login"] if review["author"] is not None else None
+            body = review["body"].strip()
+            results.append(
+                PullRequestThread(
+                    created_at=review["createdAt"],
+                    writer=writer,
+                    title=_title_from_body(body, f"{comment_type} (no summary)"),
+                    body=body,
+                    url=review["url"],
+                    comment_type=comment_type,
+                )
+            )
+
+        results.sort(key=lambda thread: thread.created_at, reverse=True)
+        return results
 
     def find_pull_request(self, owner: str, repo: str, branch: str) -> PullRequestInfo | None:
         data = self._graphql(_FIND_PR_QUERY, {"owner": owner, "repo": repo, "branch": branch})

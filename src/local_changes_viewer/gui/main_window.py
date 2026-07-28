@@ -41,9 +41,14 @@ from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
 from local_changes_viewer.gui.github_connect_dialog import GitHubConnectDialog
 from local_changes_viewer.gui.my_pull_requests_dialog import MyPullRequestsDialog
+from local_changes_viewer.gui.pull_request_info_dialog import PullRequestInfoDialog
+from local_changes_viewer.gui.pull_request_issues_dialog import PullRequestIssuesDialog
 from local_changes_viewer.gui.settings import AppSettings
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 from local_changes_viewer.gui.workers.my_pull_requests_worker import MyPullRequestsWorker
+from local_changes_viewer.gui.workers.pull_request_details_worker import PullRequestDetailsWorker
+from local_changes_viewer.gui.workers.pull_request_refresh_worker import PullRequestRefreshWorker
+from local_changes_viewer.gui.workers.pull_request_threads_worker import PullRequestThreadsWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
 from local_changes_viewer.gui.workspace_tree.aggregate_list import AggregateChangeList
 from local_changes_viewer.gui.workspace_tree.tree_model import FILE_CHANGE_ROLE
@@ -568,6 +573,9 @@ class MainWindow(QMainWindow):
 
         dialog = MyPullRequestsDialog(pull_requests, self)
         dialog.refresh_requested.connect(self._on_my_pull_requests_refresh_requested)
+        dialog.pull_request_refresh_requested.connect(self._on_pull_request_refresh_requested)
+        dialog.pull_request_info_requested.connect(self._on_pull_request_info_requested)
+        dialog.pull_request_issues_requested.connect(self._on_pull_request_issues_requested)
         self._my_pull_requests_dialog = dialog
         dialog.exec()
         self._my_pull_requests_dialog = None
@@ -578,6 +586,66 @@ class MainWindow(QMainWindow):
         if self._my_pull_requests_dialog is not None:
             self._my_pull_requests_dialog.set_refreshing(False)
         QMessageBox.warning(self, "My Open Pull Requests", f"Failed to fetch: {message}")
+
+    def _on_pull_request_refresh_requested(self, repository: str, number: int) -> None:
+        github_client = self._github_client()
+        if github_client is None:
+            return
+        applog.log(f"Refreshing {repository}#{number}", level=applog.LogLevel.INFO)
+        self.statusBar().showMessage(f"Refreshing {repository}#{number}…")
+        worker = PullRequestRefreshWorker(github_client, repository, number)
+        worker.signals.finished.connect(self._on_pull_request_refresh_ready)
+        worker.signals.error.connect(self._on_pull_request_action_error)
+        self._thread_pool.start(worker)
+
+    def _on_pull_request_refresh_ready(self, repository: str, number: int, result: tuple) -> None:
+        approved, unresolved_count, last_reviewer, changed_files, checks_state = result
+        self.statusBar().clearMessage()
+        if self._my_pull_requests_dialog is not None:
+            self._my_pull_requests_dialog.update_pull_request_fields(
+                repository,
+                number,
+                approved=approved,
+                unresolved_review_thread_count=unresolved_count,
+                last_reviewer=last_reviewer,
+                changed_files=changed_files,
+                checks_state=checks_state,
+            )
+
+    def _on_pull_request_info_requested(self, repository: str, number: int) -> None:
+        github_client = self._github_client()
+        if github_client is None:
+            return
+        applog.log(f"Fetching info for {repository}#{number}", level=applog.LogLevel.INFO)
+        self.statusBar().showMessage(f"Fetching info for {repository}#{number}…")
+        worker = PullRequestDetailsWorker(github_client, repository, number)
+        worker.signals.finished.connect(self._on_pull_request_details_ready)
+        worker.signals.error.connect(self._on_pull_request_action_error)
+        self._thread_pool.start(worker)
+
+    def _on_pull_request_details_ready(self, details) -> None:
+        self.statusBar().clearMessage()
+        PullRequestInfoDialog(details, self).exec()
+
+    def _on_pull_request_issues_requested(self, repository: str, number: int) -> None:
+        github_client = self._github_client()
+        if github_client is None:
+            return
+        applog.log(f"Fetching open issues for {repository}#{number}", level=applog.LogLevel.INFO)
+        self.statusBar().showMessage(f"Fetching open issues for {repository}#{number}…")
+        worker = PullRequestThreadsWorker(github_client, repository, number)
+        worker.signals.finished.connect(self._on_pull_request_threads_ready)
+        worker.signals.error.connect(self._on_pull_request_action_error)
+        self._thread_pool.start(worker)
+
+    def _on_pull_request_threads_ready(self, number: int, threads: list) -> None:
+        self.statusBar().clearMessage()
+        PullRequestIssuesDialog(threads, number, self).exec()
+
+    def _on_pull_request_action_error(self, message: str) -> None:
+        applog.log(f"Pull request action failed: {message}", level=applog.LogLevel.ERROR)
+        self.statusBar().clearMessage()
+        QMessageBox.warning(self, "Pull Request", f"Action failed: {message}")
 
     def _on_manage_folder_filters(self) -> None:
         dialog = FolderFilterDialog(self._folder_filter_rules, self)

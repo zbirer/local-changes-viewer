@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QHeaderView,
     QLabel,
+    QMenu,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -16,6 +17,8 @@ from local_changes_viewer.core.domain.pull_request import PullRequestInfo
 
 _COLUMNS = ["PR ID", "Link", "Title", "Approved", "Unresolved", "Last Reviewer", "Files", "Checks"]
 _URL_ROLE = Qt.ItemDataRole.UserRole
+_REPO_ROLE = Qt.ItemDataRole.UserRole + 1
+_NUMBER_ROLE = Qt.ItemDataRole.UserRole + 2
 
 _CHECKS_TEXT = {
     "SUCCESS": "✓ Success",
@@ -40,6 +43,9 @@ def _checks_text(checks_state: str | None) -> str:
 
 class MyPullRequestsDialog(QDialog):
     refresh_requested = Signal()
+    pull_request_refresh_requested = Signal(str, int)  # repository, number
+    pull_request_info_requested = Signal(str, int)  # repository, number
+    pull_request_issues_requested = Signal(str, int)  # repository, number
 
     def __init__(self, pull_requests: list[PullRequestInfo], parent=None) -> None:
         super().__init__(parent)
@@ -51,6 +57,8 @@ class MyPullRequestsDialog(QDialog):
         self._tree.setColumnCount(len(_COLUMNS))
         self._tree.setHeaderLabels(_COLUMNS)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_context_menu_requested)
 
         header = self._tree.header()
         header.setStretchLastSection(False)
@@ -108,6 +116,8 @@ class MyPullRequestsDialog(QDialog):
                         ]
                     )
                     pr_item.setData(0, _URL_ROLE, pr.url)
+                    pr_item.setData(0, _REPO_ROLE, pr.repository)
+                    pr_item.setData(0, _NUMBER_ROLE, pr.number)
                     repo_item.addChild(pr_item)
 
                     link_label = QLabel(f'<a href="{pr.url}">Open</a>')
@@ -124,6 +134,60 @@ class MyPullRequestsDialog(QDialog):
     def set_refreshing(self, refreshing: bool) -> None:
         self._refresh_button.setEnabled(not refreshing)
         self._refresh_button.setText("Refreshing…" if refreshing else "Refresh")
+
+    def update_pull_request_fields(
+        self,
+        repository: str,
+        number: int,
+        *,
+        approved: bool | None,
+        unresolved_review_thread_count: int,
+        last_reviewer: str | None,
+        changed_files: int,
+        checks_state: str | None,
+    ) -> None:
+        item = self._find_pr_item(repository, number)
+        if item is None:
+            return
+        item.setText(3, _approved_text(approved))
+        item.setText(4, str(unresolved_review_thread_count))
+        item.setText(5, last_reviewer or "-")
+        item.setText(6, str(changed_files))
+        item.setText(7, _checks_text(checks_state))
+
+    def _find_pr_item(self, repository: str, number: int) -> QTreeWidgetItem | None:
+        for i in range(self._tree.topLevelItemCount()):
+            repo_item = self._tree.topLevelItem(i)
+            for j in range(repo_item.childCount()):
+                pr_item = repo_item.child(j)
+                if (
+                    pr_item.data(0, _REPO_ROLE) == repository
+                    and pr_item.data(0, _NUMBER_ROLE) == number
+                ):
+                    return pr_item
+        return None
+
+    def _on_context_menu_requested(self, pos) -> None:
+        item = self._tree.itemAt(pos)
+        if item is None or item.parent() is None:
+            return
+        repository = item.data(0, _REPO_ROLE)
+        number = item.data(0, _NUMBER_ROLE)
+        if repository is None or number is None:
+            return
+        self._tree.setCurrentItem(item)
+
+        menu = QMenu(self._tree)
+        menu.addAction(
+            "Refresh", lambda: self.pull_request_refresh_requested.emit(repository, number)
+        )
+        menu.addAction(
+            "Info", lambda: self.pull_request_info_requested.emit(repository, number)
+        )
+        menu.addAction(
+            "Open Issues", lambda: self.pull_request_issues_requested.emit(repository, number)
+        )
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         url = item.data(0, _URL_ROLE)
