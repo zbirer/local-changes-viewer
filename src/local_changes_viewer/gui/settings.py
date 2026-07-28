@@ -66,10 +66,25 @@ class AppSettings:
         raw = self._settings.value("folder_filter_rules", [])
         if not raw:
             return []
+        if isinstance(raw, str):
+            # QSettings can collapse a single-element string list back to a
+            # bare string on some platforms/backends.
+            raw = [raw]
         rules = []
         for entry in raw:
             mode_value, _, text = entry.partition(":")
-            rules.append(FolderFilterRule(text=text, mode=FolderFilterMode(mode_value)))
+            try:
+                rules.append(FolderFilterRule(text=text, mode=FolderFilterMode(mode_value)))
+            except ValueError:
+                applog.log(
+                    f"Ignoring malformed folder filter rule entry: {entry!r}",
+                    level=applog.LogLevel.WARNING,
+                )
+        applog.log(
+            f"Loaded folder filter rules from settings: "
+            f"[{', '.join(f'{r.mode.value}:{r.text!r}' for r in rules)}]",
+            level=applog.LogLevel.DEBUG,
+        )
         return rules
 
     def set_folder_filter_rules(self, rules: list[FolderFilterRule]) -> None:

@@ -27,11 +27,13 @@ class FakeGitRepoAdapter:
         changes: list[FileChange],
         branch_status: BranchStatus,
         remote_url: str | None = None,
+        worktrees: list[Path] | None = None,
     ) -> None:
         self.repo_path = repo_path
         self._changes = changes
         self._branch_status = branch_status
         self._remote_url = remote_url
+        self._worktrees = worktrees or []
 
     def list_changes(self) -> list[FileChange]:
         return self._changes
@@ -41,6 +43,9 @@ class FakeGitRepoAdapter:
 
     def get_remote_url(self, name: str = "origin") -> str | None:
         return self._remote_url
+
+    def list_worktrees(self) -> list[Path]:
+        return self._worktrees
 
 
 class FakeGitHubClient:
@@ -76,6 +81,52 @@ def test_scan_builds_workspace_from_multiple_repos(tmp_path: Path):
     repo_b_result = next(r for r in workspace.repositories if r.name == "repo_b")
     assert repo_b_result.branch_status.ahead == 1
     assert repo_b_result.branch_status.behind == 2
+
+
+def test_scan_includes_linked_worktrees_as_separate_repos(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    worktree = tmp_path / "repo_a" / ".worktrees" / "feature-x"
+    fixtures = {
+        repo_a: FakeGitRepoAdapter(
+            repo_a,
+            [],
+            _branch(),
+            worktrees=[worktree],
+        ),
+        worktree: FakeGitRepoAdapter(
+            worktree,
+            [FileChange(path=Path("f.py"), change_type=ChangeType.MODIFIED)],
+            _branch("feature-x"),
+        ),
+    }
+
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: fixtures[path],
+    )
+
+    workspace = service.scan(tmp_path)
+
+    assert {r.name for r in workspace.repositories} == {"repo_a", "feature-x"}
+    worktree_result = next(r for r in workspace.repositories if r.name == "feature-x")
+    assert worktree_result.changes[0].path == Path("f.py")
+
+
+def test_scan_skips_repo_when_listing_worktrees_fails(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+
+    class RaisingWorktreeAdapter(FakeGitRepoAdapter):
+        def list_worktrees(self) -> list[Path]:
+            raise RuntimeError("git worktree failed")
+
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: RaisingWorktreeAdapter(repo_a, [], _branch()),
+    )
+
+    workspace = service.scan(tmp_path)
+
+    assert {r.name for r in workspace.repositories} == {"repo_a"}
 
 
 def test_scan_filters_ignored_files_by_default(tmp_path: Path):

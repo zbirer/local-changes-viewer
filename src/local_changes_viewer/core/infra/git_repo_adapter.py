@@ -85,6 +85,20 @@ class GitRepoAdapter:
         except (IndexError, KeyError):
             return None
 
+    def list_worktrees(self) -> list[Path]:
+        try:
+            output = self._repo.git.worktree("list", "--porcelain")
+        except git.GitCommandError:
+            return []
+
+        worktrees: list[Path] = []
+        for line in output.splitlines():
+            if line.startswith("worktree "):
+                path = Path(line.removeprefix("worktree ").strip())
+                if path.resolve() != self._repo_path.resolve():
+                    worktrees.append(path)
+        return worktrees
+
     def _find_default_branch(self) -> str | None:
         try:
             output = self._repo.git.ls_remote("--symref", "origin", "HEAD")

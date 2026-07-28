@@ -653,6 +653,11 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_folder_filter_rules_changed(self, rules: list[FolderFilterRule]) -> None:
+        rules_desc = ", ".join(f"{r.mode.value}:{r.text!r}" for r in rules)
+        applog.log(
+            f"Folder filter rules changed ({len(rules)}): [{rules_desc}]",
+            level=applog.LogLevel.INFO,
+        )
         self._folder_filter_rules = rules
         self._settings.set_folder_filter_rules(rules)
         self._refresh_display()
@@ -783,6 +788,11 @@ class MainWindow(QMainWindow):
     def _refresh_display(self, *, preserve_tree: bool = False) -> None:
         if self._workspace is None:
             return
+        rules_desc = ", ".join(f"{r.mode.value}:{r.text!r}" for r in self._folder_filter_rules)
+        applog.log(
+            f"Applying folder filter rules ({len(self._folder_filter_rules)}): [{rules_desc}]",
+            level=applog.LogLevel.DEBUG,
+        )
         display_workspace = filter_workspace(
             self._workspace,
             ignore_md_files=self._ignore_md_action.isChecked(),
@@ -790,6 +800,15 @@ class MainWindow(QMainWindow):
             folder_filter_rules=self._folder_filter_rules,
             max_age_minutes=self._time_filter_minutes,
         )
+        before_by_repo = {r.path: len(r.changes) for r in self._workspace.repositories}
+        for repo in display_workspace.repositories:
+            before_count = before_by_repo.get(repo.path, len(repo.changes))
+            after_count = len(repo.changes)
+            if before_count != after_count:
+                applog.log(
+                    f"Folder filter on {repo.path}: {before_count} -> {after_count} changes",
+                    level=applog.LogLevel.DEBUG,
+                )
         if preserve_tree:
             self._tree_view.update_workspace(display_workspace)
         else:

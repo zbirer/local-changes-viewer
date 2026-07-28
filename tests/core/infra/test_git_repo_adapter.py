@@ -263,6 +263,19 @@ def test_get_remote_url_returns_origin_url(tmp_path: Path, repo: git.Repo):
     assert GitRepoAdapter(tmp_path).get_remote_url() == "https://github.com/owner/repo.git"
 
 
+def test_list_worktrees_returns_linked_worktree_paths(tmp_path: Path, repo: git.Repo):
+    worktree_path = tmp_path / "wt" / "feature-x"
+    repo.git.worktree("add", str(worktree_path), "-b", "feature-x")
+
+    worktrees = GitRepoAdapter(tmp_path).list_worktrees()
+
+    assert worktrees == [worktree_path]
+
+
+def test_list_worktrees_returns_empty_list_when_no_linked_worktrees(tmp_path: Path, repo: git.Repo):
+    assert GitRepoAdapter(tmp_path).list_worktrees() == []
+
+
 def test_branch_status_default_branch_queried_live_from_remote(tmp_path: Path):
     remote_bare = tmp_path / "remote.git"
     git.Repo.init(remote_bare, bare=True)

@@ -36,43 +36,134 @@ class RepoTreeModel(QStandardItemModel):
         self.clear()
         self.setHorizontalHeaderLabels(["Name"])
         root = self.invisibleRootItem()
-        for repo in workspace.repositories:
-            repo_item = self._build_repo_item(repo)
-            root.appendRow(repo_item)
-            self._add_changes(repo_item, repo)
+        roots, children_by_parent = self._partition(workspace.repositories)
+        self._sync_level(root, roots, children_by_parent)
 
     def update_workspace(self, workspace: Workspace) -> None:
         root = self.invisibleRootItem()
+        roots, children_by_parent = self._partition(workspace.repositories)
+        self._sync_level(root, roots, children_by_parent)
+
+    def _sync_level(
+        self,
+        container_item: QStandardItem,
+        repos: list,
+        children_by_parent: dict,
+    ) -> None:
         existing_by_key: dict[str, QStandardItem] = {}
-        for row in range(root.rowCount()):
-            item = root.child(row)
+        for row in range(container_item.rowCount()):
+            item = container_item.child(row)
             key = item.data(NODE_KEY_ROLE)
             if key is not None:
                 existing_by_key[key] = item
 
-        new_keys = {str(repo.path) for repo in workspace.repositories}
-        for row in reversed(range(root.rowCount())):
-            item = root.child(row)
+        new_keys = {str(repo.path) for repo in repos}
+        for row in reversed(range(container_item.rowCount())):
+            item = container_item.child(row)
             key = item.data(NODE_KEY_ROLE)
             if key is not None and key not in new_keys:
-                root.removeRow(row)
+                container_item.removeRow(row)
 
-        for repo in workspace.repositories:
+        for repo in repos:
             key = str(repo.path)
             existing_item = existing_by_key.get(key)
+            nested = children_by_parent.get(key, [])
             signature = self._change_signature(repo)
 
             if existing_item is None:
                 repo_item = self._build_repo_item(repo)
-                root.appendRow(repo_item)
-                self._add_changes(repo_item, repo)
-                continue
+                container_item.appendRow(repo_item)
+                self._add_changes(repo_item, repo, self._blocked_dirs(repo, nested))
+                repo_item.setData(signature, _CHANGE_SIGNATURE_ROLE)
+            else:
+                repo_item = existing_item
+                self._update_repo_item(repo_item, repo)
+                if existing_item.data(_CHANGE_SIGNATURE_ROLE) != signature:
+                    existing_item.removeRows(0, existing_item.rowCount())
+                    self._add_changes(repo_item, repo, self._blocked_dirs(repo, nested))
+                    existing_item.setData(signature, _CHANGE_SIGNATURE_ROLE)
 
-            self._update_repo_item(existing_item, repo)
-            if existing_item.data(_CHANGE_SIGNATURE_ROLE) != signature:
-                existing_item.removeRows(0, existing_item.rowCount())
-                self._add_changes(existing_item, repo)
-                existing_item.setData(signature, _CHANGE_SIGNATURE_ROLE)
+            self._sync_nested_repos(repo_item, repo, nested, children_by_parent)
+
+    def _sync_nested_repos(
+        self,
+        repo_item: QStandardItem,
+        repo,
+        nested: list,
+        children_by_parent: dict,
+    ) -> None:
+        dir_items: dict[Path, QStandardItem] = {}
+        children_by_container: dict[int, tuple[QStandardItem, list]] = {}
+
+        for child in nested:
+            rel = child.path.relative_to(repo.path)
+            parent_item = repo_item
+            accumulated = Path()
+            for part in rel.parts[:-1]:
+                accumulated = accumulated / part
+                dir_item = dir_items.get(accumulated)
+                if dir_item is None:
+                    dir_key = f"{repo.path}::{accumulated}"
+                    dir_item = self._find_child_by_key(parent_item, dir_key)
+                    if dir_item is None:
+                        dir_item = QStandardItem(part)
+                        dir_item.setEditable(False)
+                        dir_item.setData(dir_key, NODE_KEY_ROLE)
+                        parent_item.appendRow(dir_item)
+                    dir_items[accumulated] = dir_item
+                parent_item = dir_item
+
+            entry = children_by_container.setdefault(id(parent_item), (parent_item, []))
+            entry[1].append(child)
+
+        for container_item, children in children_by_container.values():
+            self._sync_level(container_item, children, children_by_parent)
+
+    @staticmethod
+    def _find_child_by_key(parent_item: QStandardItem, key: str) -> QStandardItem | None:
+        for row in range(parent_item.rowCount()):
+            child = parent_item.child(row)
+            if child.data(NODE_KEY_ROLE) == key:
+                return child
+        return None
+
+    @staticmethod
+    def _blocked_dirs(repo, nested: list) -> set:
+        blocked: set = set()
+        for child in nested:
+            rel = child.path.relative_to(repo.path)
+            accumulated = Path()
+            for part in rel.parts[:-1]:
+                accumulated = accumulated / part
+                blocked.add(accumulated)
+        return blocked
+
+    @staticmethod
+    def _partition(repositories: list) -> tuple[list, dict[str, list]]:
+        by_path = {str(r.path): r for r in repositories}
+        parent_of: dict[str, str | None] = {}
+        for repo in repositories:
+            best_parent: str | None = None
+            for other in repositories:
+                if other is repo:
+                    continue
+                try:
+                    repo.path.relative_to(other.path)
+                except ValueError:
+                    continue
+                if best_parent is None or len(other.path.parts) > len(
+                    by_path[best_parent].path.parts
+                ):
+                    best_parent = str(other.path)
+            parent_of[str(repo.path)] = best_parent
+
+        roots = [r for r in repositories if parent_of[str(r.path)] is None]
+        children_by_parent: dict[str, list] = {}
+        for repo in repositories:
+            parent = parent_of[str(repo.path)]
+            if parent is not None:
+                children_by_parent.setdefault(parent, []).append(repo)
+        return roots, children_by_parent
 
     def set_repo_highlighted(self, repo_path: Path, highlighted: bool) -> None:
         root = self.invisibleRootItem()
@@ -166,8 +257,13 @@ class RepoTreeModel(QStandardItemModel):
         return tooltip
 
     @staticmethod
-    def _add_changes(repo_item: QStandardItem, repo) -> None:
-        changes = repo.changes
+    def _add_changes(repo_item: QStandardItem, repo, skip_dirs: set | None = None) -> None:
+        skip_dirs = skip_dirs or set()
+        changes = [
+            change
+            for change in repo.changes
+            if not (change.is_directory and change.path in skip_dirs)
+        ]
         dir_items: dict[Path, QStandardItem] = {}
         dir_counts: dict[Path, int] = {}
         for change in changes:

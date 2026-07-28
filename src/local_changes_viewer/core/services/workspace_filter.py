@@ -7,8 +7,23 @@ from local_changes_viewer.core.domain.repository import Repository
 from local_changes_viewer.core.domain.workspace import Workspace
 
 
-def _is_inside_filtered_folder(path: Path, rules: list[FolderFilterRule]) -> bool:
-    for folder_name in path.parts[:-1]:
+def _is_inside_filtered_folder(change: FileChange, rules: list[FolderFilterRule]) -> bool:
+    parts = change.path.parts if change.is_directory else change.path.parts[:-1]
+    for folder_name in parts:
+        for rule in rules:
+            if rule.matches(folder_name):
+                return True
+    return False
+
+
+def _repo_is_inside_filtered_folder(
+    repo: Repository, root_path: Path, rules: list[FolderFilterRule]
+) -> bool:
+    try:
+        rel_parts = repo.path.relative_to(root_path).parts
+    except ValueError:
+        rel_parts = repo.path.parts
+    for folder_name in rel_parts:
         for rule in rules:
             if rule.matches(folder_name):
                 return True
@@ -35,13 +50,18 @@ def filter_workspace(
     folder_filter_rules = folder_filter_rules or []
     repositories: list[Repository] = []
     for repo in workspace.repositories:
+        if folder_filter_rules and _repo_is_inside_filtered_folder(
+            repo, workspace.root_path, folder_filter_rules
+        ):
+            continue
+
         changes = repo.changes
         if ignore_md_files:
             changes = [c for c in changes if c.path.suffix.lower() != ".md"]
 
         if folder_filter_rules:
             changes = [
-                c for c in changes if not _is_inside_filtered_folder(c.path, folder_filter_rules)
+                c for c in changes if not _is_inside_filtered_folder(c, folder_filter_rules)
             ]
 
         if max_age_minutes > 0:

@@ -113,6 +113,57 @@ def test_folder_filter_rule_checks_any_ancestor_folder_not_filename() -> None:
     assert [c.path for c in result.repositories[0].changes] == [Path("vendor.py")]
 
 
+def test_folder_filter_rule_matches_untracked_directory_leaf_entry() -> None:
+    changes = [
+        FileChange(
+            path=Path("node_modules"),
+            change_type=ChangeType.UNTRACKED,
+            is_directory=True,
+        ),
+        FileChange(path=Path("src/b.py"), change_type=ChangeType.MODIFIED),
+    ]
+    workspace = Workspace(root_path=Path("/root"), repositories=[_repo("repo_a", changes)])
+    rules = [FolderFilterRule(text="node_modules", mode=FolderFilterMode.EQUALS)]
+
+    result = filter_workspace(workspace, folder_filter_rules=rules)
+
+    assert [c.path for c in result.repositories[0].changes] == [Path("src/b.py")]
+
+
+def test_folder_filter_rule_excludes_nested_repo_under_filtered_folder() -> None:
+    root = Path("/root")
+    kept_repo = Repository(
+        path=root / "server",
+        name="server",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)],
+    )
+    nested_repo_in_node_modules = Repository(
+        path=root / "server" / "node_modules" / "some-pkg",
+        name="some-pkg",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("b.py"), change_type=ChangeType.MODIFIED)],
+    )
+    nested_repo_in_claude = Repository(
+        path=root / "server" / ".claude" / "worktrees" / "wt",
+        name="wt",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("c.py"), change_type=ChangeType.MODIFIED)],
+    )
+    workspace = Workspace(
+        root_path=root,
+        repositories=[kept_repo, nested_repo_in_node_modules, nested_repo_in_claude],
+    )
+    rules = [
+        FolderFilterRule(text="node_modules", mode=FolderFilterMode.EQUALS),
+        FolderFilterRule(text=".claude", mode=FolderFilterMode.CONTAINS),
+    ]
+
+    result = filter_workspace(workspace, folder_filter_rules=rules)
+
+    assert [r.name for r in result.repositories] == ["server"]
+
+
 def test_does_not_mutate_original_repository_changes() -> None:
     changes = [
         FileChange(path=Path("README.md"), change_type=ChangeType.MODIFIED),
