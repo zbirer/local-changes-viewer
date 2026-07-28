@@ -28,7 +28,8 @@ class MyPullRequestsDialog(QDialog):
     def __init__(self, pull_requests: list[PullRequestInfo], parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("My Open Pull Requests")
-        self.resize(800, 500)
+        width = int(parent.width() * 0.8) if parent is not None else 800
+        self.resize(width, 500)
 
         self._tree = QTreeWidget()
         self._tree.setColumnCount(len(_COLUMNS))
@@ -74,6 +75,7 @@ class MyPullRequestsDialog(QDialog):
             self._tree.addTopLevelItem(empty_item)
 
         header = self._tree.header()
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
