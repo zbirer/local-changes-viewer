@@ -123,11 +123,12 @@ class GitHubClient:
 
     def get_pull_request_review_status(
         self, owner: str, repo: str, number: int
-    ) -> tuple[bool | None, int, str | None]:
+    ) -> tuple[bool | None, int, str | None, int, str | None]:
         query = """
         query($owner: String!, $repo: String!, $number: Int!) {
           repository(owner: $owner, name: $repo) {
             pullRequest(number: $number) {
+              changedFiles
               reviewDecision
               reviewThreads(first: 100) {
                 nodes { isResolved }
@@ -135,6 +136,13 @@ class GitHubClient:
               reviews(last: 1) {
                 nodes {
                   author { login }
+                }
+              }
+              commits(last: 1) {
+                nodes {
+                  commit {
+                    statusCheckRollup { state }
+                  }
                 }
               }
             }
@@ -151,7 +159,13 @@ class GitHubClient:
         last_reviewer = None
         if review_nodes and review_nodes[0]["author"] is not None:
             last_reviewer = review_nodes[0]["author"]["login"]
-        return approved, unresolved_count, last_reviewer
+        changed_files = pull_request["changedFiles"]
+        commit_nodes = pull_request["commits"]["nodes"]
+        checks_state = None
+        if commit_nodes:
+            rollup = commit_nodes[0]["commit"]["statusCheckRollup"]
+            checks_state = rollup["state"] if rollup else None
+        return approved, unresolved_count, last_reviewer, changed_files, checks_state
 
     def find_pull_request(self, owner: str, repo: str, branch: str) -> PullRequestInfo | None:
         data = self._graphql(_FIND_PR_QUERY, {"owner": owner, "repo": repo, "branch": branch})
@@ -200,14 +214,20 @@ class GitHubClient:
                     continue
                 matched += 1
                 try:
-                    approved, unresolved_count, last_reviewer = self.get_pull_request_review_status(
-                        owner, repo, pr["number"]
+                    approved, unresolved_count, last_reviewer, changed_files, checks_state = (
+                        self.get_pull_request_review_status(owner, repo, pr["number"])
                     )
                 except GitHubError as exc:
                     self._on_log(
                         f"{owner}/{repo}#{pr['number']}: failed to fetch review status: {exc}"
                     )
-                    approved, unresolved_count, last_reviewer = None, 0, None
+                    approved, unresolved_count, last_reviewer, changed_files, checks_state = (
+                        None,
+                        0,
+                        None,
+                        0,
+                        None,
+                    )
                 results.append(
                     PullRequestInfo(
                         number=pr["number"],
@@ -220,6 +240,8 @@ class GitHubClient:
                         approved=approved,
                         unresolved_review_thread_count=unresolved_count,
                         last_reviewer=last_reviewer,
+                        changed_files=changed_files,
+                        checks_state=checks_state,
                     )
                 )
             self._on_log(f"{owner}/{repo}: {matched} PR(s) matched author '{author}'")

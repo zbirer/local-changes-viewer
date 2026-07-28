@@ -71,6 +71,7 @@ class MainWindow(QMainWindow):
         self._auto_refresh_minutes = 0
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
+        self._my_pull_requests_dialog: MyPullRequestsDialog | None = None
 
         self._tree_view = RepoTreeView(self._settings)
         self._tree_view.file_selected.connect(self._on_file_selected)
@@ -505,6 +506,14 @@ class MainWindow(QMainWindow):
         return GitHubClient(token, on_log=self._github_log)
 
     def _on_show_my_pull_requests(self) -> None:
+        self._fetch_my_pull_requests()
+
+    def _on_my_pull_requests_refresh_requested(self) -> None:
+        if self._my_pull_requests_dialog is not None:
+            self._my_pull_requests_dialog.set_refreshing(True)
+        self._fetch_my_pull_requests()
+
+    def _fetch_my_pull_requests(self) -> None:
         username = self._settings.github_username()
         github_client = self._github_client()
         if username is None or github_client is None:
@@ -552,11 +561,22 @@ class MainWindow(QMainWindow):
 
     def _on_my_pull_requests_ready(self, pull_requests: list) -> None:
         self.statusBar().clearMessage()
-        MyPullRequestsDialog(pull_requests, self).exec()
+        if self._my_pull_requests_dialog is not None:
+            self._my_pull_requests_dialog.set_pull_requests(pull_requests)
+            self._my_pull_requests_dialog.set_refreshing(False)
+            return
+
+        dialog = MyPullRequestsDialog(pull_requests, self)
+        dialog.refresh_requested.connect(self._on_my_pull_requests_refresh_requested)
+        self._my_pull_requests_dialog = dialog
+        dialog.exec()
+        self._my_pull_requests_dialog = None
 
     def _on_my_pull_requests_error(self, message: str) -> None:
         applog.log(f"Failed to fetch open pull requests: {message}", level=applog.LogLevel.ERROR)
         self.statusBar().clearMessage()
+        if self._my_pull_requests_dialog is not None:
+            self._my_pull_requests_dialog.set_refreshing(False)
         QMessageBox.warning(self, "My Open Pull Requests", f"Failed to fetch: {message}")
 
     def _on_manage_folder_filters(self) -> None:
