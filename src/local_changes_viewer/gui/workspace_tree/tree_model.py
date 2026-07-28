@@ -94,6 +94,7 @@ class RepoTreeModel(QStandardItemModel):
     ) -> None:
         dir_items: dict[Path, QStandardItem] = {}
         children_by_container: dict[int, tuple[QStandardItem, list]] = {}
+        live_dir_keys: set[str] = set()
 
         for child in nested:
             rel = child.path.relative_to(repo.path)
@@ -101,9 +102,10 @@ class RepoTreeModel(QStandardItemModel):
             accumulated = Path()
             for part in rel.parts[:-1]:
                 accumulated = accumulated / part
+                dir_key = f"{repo.path}::{accumulated}"
+                live_dir_keys.add(dir_key)
                 dir_item = dir_items.get(accumulated)
                 if dir_item is None:
-                    dir_key = f"{repo.path}::{accumulated}"
                     dir_item = self._find_child_by_key(parent_item, dir_key)
                     if dir_item is None:
                         dir_item = QStandardItem(part)
@@ -116,8 +118,25 @@ class RepoTreeModel(QStandardItemModel):
             entry = children_by_container.setdefault(id(parent_item), (parent_item, []))
             entry[1].append(child)
 
+        self._prune_stale_dirs(repo_item, live_dir_keys)
+
         for container_item, children in children_by_container.values():
             self._sync_level(container_item, children, children_by_parent)
+
+    @staticmethod
+    def _prune_stale_dirs(item: QStandardItem, live_dir_keys: set[str]) -> None:
+        # Synthetic directory nodes (created above for intermediate path segments
+        # between a repo and a nested repo) have no counterpart in _sync_level's
+        # removal pass, so a directory whose nested repo got filtered out (or
+        # removed) would otherwise linger in the tree forever.
+        for row in reversed(range(item.rowCount())):
+            child = item.child(row)
+            key = child.data(NODE_KEY_ROLE)
+            if key is not None and "::" in str(key):
+                if key not in live_dir_keys:
+                    item.removeRow(row)
+                else:
+                    RepoTreeModel._prune_stale_dirs(child, live_dir_keys)
 
     @staticmethod
     def _find_child_by_key(parent_item: QStandardItem, key: str) -> QStandardItem | None:
@@ -143,6 +162,11 @@ class RepoTreeModel(QStandardItemModel):
         by_path = {str(r.path): r for r in repositories}
         parent_of: dict[str, str | None] = {}
         for repo in repositories:
+            logical_parent = getattr(repo, "logical_parent_path", None)
+            if logical_parent is not None and str(logical_parent) in by_path:
+                parent_of[str(repo.path)] = str(logical_parent)
+                continue
+
             best_parent: str | None = None
             for other in repositories:
                 if other is repo:

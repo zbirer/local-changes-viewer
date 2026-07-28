@@ -164,6 +164,29 @@ def test_folder_filter_rule_excludes_nested_repo_under_filtered_folder() -> None
     assert [r.name for r in result.repositories] == ["server"]
 
 
+def test_preserves_logical_parent_path_through_filtering() -> None:
+    root = Path("/root")
+    parent_repo = Repository(
+        path=root / "server",
+        name="server",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)],
+    )
+    worktree_repo = Repository(
+        path=root / "server-worktrees" / "pr-1",
+        name="pr-1",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("b.py"), change_type=ChangeType.MODIFIED)],
+        logical_parent_path=root / "server",
+    )
+    workspace = Workspace(root_path=root, repositories=[parent_repo, worktree_repo])
+
+    result = filter_workspace(workspace)
+
+    worktree_result = next(r for r in result.repositories if r.name == "pr-1")
+    assert worktree_result.logical_parent_path == root / "server"
+
+
 def test_does_not_mutate_original_repository_changes() -> None:
     changes = [
         FileChange(path=Path("README.md"), change_type=ChangeType.MODIFIED),

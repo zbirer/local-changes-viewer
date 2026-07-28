@@ -76,6 +76,7 @@ def filter_workspace(
                 name=repo.name,
                 branch_status=repo.branch_status,
                 changes=changes,
+                logical_parent_path=repo.logical_parent_path,
             )
         )
     return Workspace(root_path=workspace.root_path, repositories=repositories)

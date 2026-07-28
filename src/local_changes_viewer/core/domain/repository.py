@@ -21,3 +21,4 @@ class Repository:
     branch_status: BranchStatus
     changes: list[FileChange] = field(default_factory=list)
     pull_request: PullRequestInfo | None = None
+    logical_parent_path: Path | None = None

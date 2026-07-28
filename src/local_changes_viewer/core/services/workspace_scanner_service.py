@@ -46,7 +46,7 @@ class WorkspaceScannerService:
         on_progress("Discovering git repositories…")
         discovery_started_at = time.monotonic()
         repo_paths = self._filesystem_scanner.find_git_repos(root)
-        repo_paths = self._expand_with_worktrees(repo_paths, on_log)
+        repo_paths, worktree_parents = self._expand_with_worktrees(repo_paths, on_log)
         discovery_seconds = time.monotonic() - discovery_started_at
         total = len(repo_paths)
         if total == 0:
@@ -71,6 +71,7 @@ class WorkspaceScannerService:
                     github_client,
                     on_log,
                     (previous_pull_requests or {}).get(repo_path),
+                    worktree_parents.get(repo_path),
                 ),
                 repo_paths,
             )
@@ -92,9 +93,10 @@ class WorkspaceScannerService:
 
     def _expand_with_worktrees(
         self, repo_paths: list[Path], on_log: Callable[[str], None]
-    ) -> list[Path]:
+    ) -> tuple[list[Path], dict[Path, Path]]:
         expanded = list(repo_paths)
         seen = set(repo_paths)
+        worktree_parents: dict[Path, Path] = {}
         for repo_path in repo_paths:
             try:
                 worktree_paths = self._adapter_factory(repo_path).list_worktrees()
@@ -102,10 +104,11 @@ class WorkspaceScannerService:
                 on_log(f"{repo_path.name}: failed to list worktrees: {exc}")
                 continue
             for worktree_path in worktree_paths:
+                worktree_parents.setdefault(worktree_path, repo_path)
                 if worktree_path not in seen:
                     seen.add(worktree_path)
                     expanded.append(worktree_path)
-        return expanded
+        return expanded, worktree_parents
 
     def _scan_repo(
         self,
@@ -114,6 +117,7 @@ class WorkspaceScannerService:
         github_client: GitHubClient | None = None,
         on_log: Callable[[str], None] | None = None,
         previous_pull_request: tuple[PullRequestInfo, str] | None = None,
+        logical_parent_path: Path | None = None,
     ) -> tuple[Repository | None, float]:
         on_log = on_log or (lambda _message: None)
         started_at = time.monotonic()
@@ -146,6 +150,7 @@ class WorkspaceScannerService:
             branch_status=branch_status,
             changes=changes,
             pull_request=pull_request,
+            logical_parent_path=logical_parent_path,
         )
         return repo, time.monotonic() - started_at
 
