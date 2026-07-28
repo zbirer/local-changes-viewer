@@ -138,10 +138,6 @@ class MainWindow(QMainWindow):
         self._hide_empty_repos_action.toggled.connect(self._on_display_filter_toggled)
         settings_menu.addAction(self._hide_empty_repos_action)
 
-        manage_folder_filters_action = QAction("Manage Folder Filters…", self)
-        manage_folder_filters_action.triggered.connect(self._on_manage_folder_filters)
-        settings_menu.addAction(manage_folder_filters_action)
-
         self._sync_scroll_action = QAction(
             "Sync side-by-side scroll", self, checkable=True
         )
@@ -155,6 +151,10 @@ class MainWindow(QMainWindow):
         log_level_action = QAction("Log Level…", self)
         log_level_action.triggered.connect(self._on_configure_log_level)
         settings_menu.addAction(log_level_action)
+
+        manage_folder_filters_action = QAction("Filtered Folders…", self)
+        manage_folder_filters_action.triggered.connect(self._on_manage_folder_filters)
+        settings_menu.addAction(manage_folder_filters_action)
 
         github_menu = self.menuBar().addMenu("GitHub")
 
