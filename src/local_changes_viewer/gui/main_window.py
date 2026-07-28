@@ -531,19 +531,23 @@ class MainWindow(QMainWindow):
             return
 
         owner_repo_pairs = []
+        seen_owner_repo = set()
         for repo in self._workspace.repositories:
             remote_url = GitRepoAdapter(repo.path).get_remote_url("origin")
             if remote_url is None:
                 applog.log(f"GitHub: {repo.name} has no 'origin' remote, skipping", level=applog.LogLevel.DEBUG)
                 continue
             owner_repo = parse_github_owner_repo(remote_url)
-            if owner_repo is not None:
-                owner_repo_pairs.append(owner_repo)
-            else:
+            if owner_repo is None:
                 applog.log(
                     f"GitHub: {repo.name} remote '{remote_url}' is not a recognized GitHub URL, skipping",
                     level=applog.LogLevel.DEBUG,
                 )
+                continue
+            if owner_repo in seen_owner_repo:
+                continue
+            seen_owner_repo.add(owner_repo)
+            owner_repo_pairs.append(owner_repo)
 
         applog.log(
             f"GitHub: resolved {len(owner_repo_pairs)} GitHub repo(s) from tree: {owner_repo_pairs}",
