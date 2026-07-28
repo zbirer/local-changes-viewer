@@ -6,6 +6,7 @@ from local_changes_viewer.core.infra.github_client import GitHubClient
 class MyPullRequestsWorkerSignals(QObject):
     finished = Signal(list)  # list[PullRequestInfo]
     error = Signal(str)
+    progress = Signal(str)
 
 
 class MyPullRequestsWorker(QRunnable):
@@ -24,7 +25,7 @@ class MyPullRequestsWorker(QRunnable):
     def run(self) -> None:
         try:
             pull_requests = self._github_client.list_authored_open_pull_requests(
-                self._username, self._owner_repo_pairs
+                self._username, self._owner_repo_pairs, on_progress=self.signals.progress.emit
             )
         except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
             self.signals.error.emit(str(exc))

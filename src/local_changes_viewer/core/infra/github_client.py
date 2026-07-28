@@ -170,14 +170,20 @@ class GitHubClient:
         )
 
     def list_authored_open_pull_requests(
-        self, author: str, owner_repo_pairs: list[tuple[str, str]]
+        self,
+        author: str,
+        owner_repo_pairs: list[tuple[str, str]],
+        on_progress: Callable[[str], None] | None = None,
     ) -> list[PullRequestInfo]:
+        on_progress = on_progress or (lambda _message: None)
+        total = len(owner_repo_pairs)
         self._on_log(
-            f"Fetching open PRs authored by '{author}' across {len(owner_repo_pairs)} "
+            f"Fetching open PRs authored by '{author}' across {total} "
             f"repo(s): {owner_repo_pairs}"
         )
         results = []
-        for owner, repo in owner_repo_pairs:
+        for index, (owner, repo) in enumerate(owner_repo_pairs, start=1):
+            on_progress(f"Fetching your open pull requests… ({index}/{total}: {owner}/{repo})")
             try:
                 prs = self._get(f"/repos/{owner}/{repo}/pulls?state=open&per_page=100")
             except GitHubError as exc:

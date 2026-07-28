@@ -547,6 +547,7 @@ class MainWindow(QMainWindow):
         worker = MyPullRequestsWorker(github_client, username, owner_repo_pairs)
         worker.signals.finished.connect(self._on_my_pull_requests_ready)
         worker.signals.error.connect(self._on_my_pull_requests_error)
+        worker.signals.progress.connect(self._on_scan_progress)
         self._thread_pool.start(worker)
 
     def _on_my_pull_requests_ready(self, pull_requests: list) -> None:
