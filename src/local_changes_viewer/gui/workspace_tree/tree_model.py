@@ -5,6 +5,7 @@ from PySide6.QtGui import QBrush, QColor, QStandardItem, QStandardItemModel
 
 from local_changes_viewer.core.domain.file_change import ChangeType
 from local_changes_viewer.core.domain.workspace import Workspace
+from local_changes_viewer.gui import applog
 
 _CHANGE_COLORS = {
     ChangeType.MODIFIED: QColor("#3B82F6"),
@@ -101,7 +102,7 @@ class RepoTreeModel(QStandardItemModel):
             accumulated = Path()
             for part in self._relative_parts(child, repo)[:-1]:
                 accumulated = accumulated / part
-                dir_key = f"{repo.path}::{accumulated}"
+                dir_key = f"nested-dir::{repo.path}::{accumulated}"
                 live_dir_keys.add(dir_key)
                 dir_item = dir_items.get(accumulated)
                 if dir_item is None:
@@ -131,8 +132,12 @@ class RepoTreeModel(QStandardItemModel):
         for row in reversed(range(item.rowCount())):
             child = item.child(row)
             key = child.data(NODE_KEY_ROLE)
-            if key is not None and "::" in str(key):
+            if key is not None and str(key).startswith("nested-dir::"):
                 if key not in live_dir_keys:
+                    applog.log(
+                        f"Pruning stale nested-repo dir node {key!r} ({child.rowCount()} children)",
+                        level=applog.LogLevel.DEBUG,
+                    )
                     item.removeRow(row)
                 else:
                     RepoTreeModel._prune_stale_dirs(child, live_dir_keys)
@@ -330,3 +335,9 @@ class RepoTreeModel(QStandardItemModel):
             file_item.setData(change, FILE_CHANGE_ROLE)
             file_item.setData(str(repo.path), REPO_PATH_ROLE)
             parent_item.appendRow(file_item)
+
+        applog.log(
+            f"_add_changes for {repo.path}: {len(changes)} changes -> "
+            f"{repo_item.rowCount()} top-level rows",
+            level=applog.LogLevel.VERBOSE,
+        )
