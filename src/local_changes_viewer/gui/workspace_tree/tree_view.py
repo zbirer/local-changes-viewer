@@ -150,6 +150,35 @@ class RepoTreeView(QTreeView):
         self._programmatic_change = False
         self._settings.set_collapsed_node_keys(set())
 
+    def expand_changed_repos(self) -> None:
+        applog.log("Expand Changed Repos", level=applog.LogLevel.INFO)
+        self._programmatic_change = True
+        for row in range(self._proxy.rowCount(QModelIndex())):
+            index = self._proxy.index(row, 0, QModelIndex())
+            if self._proxy.rowCount(index) > 0:
+                self.expand(index)
+                self._expand_all_descendants(index)
+        self._programmatic_change = False
+        self._settings.set_collapsed_node_keys(self._collect_collapsed_keys(QModelIndex()))
+
+    def _expand_all_descendants(self, index: QModelIndex) -> None:
+        for row in range(self._proxy.rowCount(index)):
+            child = self._proxy.index(row, 0, index)
+            if self._proxy.rowCount(child) > 0:
+                self.expand(child)
+                self._expand_all_descendants(child)
+
+    def _collect_collapsed_keys(self, parent: QModelIndex) -> set[str]:
+        keys: set[str] = set()
+        for row in range(self._proxy.rowCount(parent)):
+            index = self._proxy.index(row, 0, parent)
+            if self._proxy.rowCount(index) > 0 and not self.isExpanded(index):
+                key = index.data(NODE_KEY_ROLE)
+                if key is not None:
+                    keys.add(key)
+            keys |= self._collect_collapsed_keys(index)
+        return keys
+
     def _collect_all_keys(self, parent: QModelIndex) -> set[str]:
         keys: set[str] = set()
         for row in range(self._proxy.rowCount(parent)):

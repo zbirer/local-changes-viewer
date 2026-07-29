@@ -97,10 +97,9 @@ class RepoTreeModel(QStandardItemModel):
         live_dir_keys: set[str] = set()
 
         for child in nested:
-            rel = child.path.relative_to(repo.path)
             parent_item = repo_item
             accumulated = Path()
-            for part in rel.parts[:-1]:
+            for part in self._relative_parts(child, repo)[:-1]:
                 accumulated = accumulated / part
                 dir_key = f"{repo.path}::{accumulated}"
                 live_dir_keys.add(dir_key)
@@ -147,12 +146,22 @@ class RepoTreeModel(QStandardItemModel):
         return None
 
     @staticmethod
+    def _relative_parts(child, repo) -> tuple:
+        # A nested repo discovered via a logical parent (e.g. a git worktree
+        # living in a sibling directory) isn't a filesystem subpath of its
+        # parent's path, so relative_to would raise; treat it as a direct
+        # child in that case instead of an intermediate-directory descendant.
+        try:
+            return child.path.relative_to(repo.path).parts
+        except ValueError:
+            return (child.path.name,)
+
+    @staticmethod
     def _blocked_dirs(repo, nested: list) -> set:
         blocked: set = set()
         for child in nested:
-            rel = child.path.relative_to(repo.path)
             accumulated = Path()
-            for part in rel.parts[:-1]:
+            for part in RepoTreeModel._relative_parts(child, repo)[:-1]:
                 accumulated = accumulated / part
                 blocked.add(accumulated)
         return blocked

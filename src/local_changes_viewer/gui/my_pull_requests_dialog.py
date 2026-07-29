@@ -14,8 +14,19 @@ from PySide6.QtWidgets import (
 )
 
 from local_changes_viewer.core.domain.pull_request import PullRequestInfo
+from local_changes_viewer.gui.formatting import format_timestamp
 
-_COLUMNS = ["PR ID", "Link", "Title", "Approved", "Unresolved", "Last Reviewer", "Files", "Checks"]
+_COLUMNS = [
+    "PR ID",
+    "Link",
+    "Title",
+    "Approved",
+    "Unresolved",
+    "Last Reviewer",
+    "Last Review Time",
+    "Files",
+    "Checks",
+]
 _URL_ROLE = Qt.ItemDataRole.UserRole
 _REPO_ROLE = Qt.ItemDataRole.UserRole + 1
 _NUMBER_ROLE = Qt.ItemDataRole.UserRole + 2
@@ -70,6 +81,7 @@ class MyPullRequestsDialog(QDialog):
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
         self._tree.setColumnWidth(0, 275)
         self._tree.setColumnWidth(1, 70)
 
@@ -111,6 +123,7 @@ class MyPullRequestsDialog(QDialog):
                             _approved_text(pr.approved),
                             str(pr.unresolved_review_thread_count),
                             pr.last_reviewer or "-",
+                            format_timestamp(pr.last_reviewed_at) if pr.last_reviewed_at else "-",
                             str(pr.changed_files),
                             _checks_text(pr.checks_state),
                         ]
@@ -143,6 +156,7 @@ class MyPullRequestsDialog(QDialog):
         approved: bool | None,
         unresolved_review_thread_count: int,
         last_reviewer: str | None,
+        last_reviewed_at: str | None,
         changed_files: int,
         checks_state: str | None,
     ) -> None:
@@ -152,8 +166,9 @@ class MyPullRequestsDialog(QDialog):
         item.setText(3, _approved_text(approved))
         item.setText(4, str(unresolved_review_thread_count))
         item.setText(5, last_reviewer or "-")
-        item.setText(6, str(changed_files))
-        item.setText(7, _checks_text(checks_state))
+        item.setText(6, format_timestamp(last_reviewed_at) if last_reviewed_at else "-")
+        item.setText(7, str(changed_files))
+        item.setText(8, _checks_text(checks_state))
 
     def _find_pr_item(self, repository: str, number: int) -> QTreeWidgetItem | None:
         for i in range(self._tree.topLevelItemCount()):

@@ -118,6 +118,32 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._on_open_folder)
         actions_menu.addAction(open_action)
 
+        view_menu = self.menuBar().addMenu("View")
+
+        collapse_all_action = QAction("Collapse All", self)
+        collapse_all_action.triggered.connect(self._tree_view.collapse_all)
+        view_menu.addAction(collapse_all_action)
+
+        expand_all_action = QAction("Expand All", self)
+        expand_all_action.triggered.connect(self._tree_view.expand_all)
+        view_menu.addAction(expand_all_action)
+
+        expand_changed_repos_action = QAction("Expand Changed Repos", self)
+        expand_changed_repos_action.triggered.connect(self._tree_view.expand_changed_repos)
+        view_menu.addAction(expand_changed_repos_action)
+
+        view_menu.addSeparator()
+
+        increase_font_action = QAction("Increase Font Size", self)
+        increase_font_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
+        increase_font_action.triggered.connect(self._diff_view.increase_font_size)
+        view_menu.addAction(increase_font_action)
+
+        decrease_font_action = QAction("Decrease Font Size", self)
+        decrease_font_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
+        decrease_font_action.triggered.connect(self._diff_view.decrease_font_size)
+        view_menu.addAction(decrease_font_action)
+
         settings_menu = self.menuBar().addMenu("Settings")
 
         self._include_ignored_action = QAction("Show ignored files", self, checkable=True)
@@ -171,28 +197,6 @@ class MainWindow(QMainWindow):
         self._disconnect_github_action = QAction("Disconnect GitHub", self)
         self._disconnect_github_action.triggered.connect(self._on_disconnect_github)
         github_menu.addAction(self._disconnect_github_action)
-
-        actions_menu.addSeparator()
-
-        collapse_all_action = QAction("Collapse All", self)
-        collapse_all_action.triggered.connect(self._tree_view.collapse_all)
-        actions_menu.addAction(collapse_all_action)
-
-        expand_all_action = QAction("Expand All", self)
-        expand_all_action.triggered.connect(self._tree_view.expand_all)
-        actions_menu.addAction(expand_all_action)
-
-        actions_menu.addSeparator()
-
-        increase_font_action = QAction("Increase Font Size", self)
-        increase_font_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
-        increase_font_action.triggered.connect(self._diff_view.increase_font_size)
-        actions_menu.addAction(increase_font_action)
-
-        decrease_font_action = QAction("Decrease Font Size", self)
-        decrease_font_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
-        decrease_font_action.triggered.connect(self._diff_view.decrease_font_size)
-        actions_menu.addAction(decrease_font_action)
 
         actions_menu.addSeparator()
 
@@ -603,7 +607,7 @@ class MainWindow(QMainWindow):
         self._thread_pool.start(worker)
 
     def _on_pull_request_refresh_ready(self, repository: str, number: int, result: tuple) -> None:
-        approved, unresolved_count, last_reviewer, changed_files, checks_state = result
+        approved, unresolved_count, last_reviewer, last_reviewed_at, changed_files, checks_state = result
         self.statusBar().clearMessage()
         if self._my_pull_requests_dialog is not None:
             self._my_pull_requests_dialog.update_pull_request_fields(
@@ -612,6 +616,7 @@ class MainWindow(QMainWindow):
                 approved=approved,
                 unresolved_review_thread_count=unresolved_count,
                 last_reviewer=last_reviewer,
+                last_reviewed_at=last_reviewed_at,
                 changed_files=changed_files,
                 checks_state=checks_state,
             )

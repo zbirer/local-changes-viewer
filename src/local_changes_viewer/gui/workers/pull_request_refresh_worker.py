@@ -4,7 +4,7 @@ from local_changes_viewer.core.infra.github_client import GitHubClient
 
 
 class PullRequestRefreshWorkerSignals(QObject):
-    finished = Signal(str, int, object)  # repository, number, (approved, unresolved, reviewer, files, checks)
+    finished = Signal(str, int, object)  # repository, number, (approved, unresolved, reviewer, reviewed_at, files, checks)
     error = Signal(str)
 
 

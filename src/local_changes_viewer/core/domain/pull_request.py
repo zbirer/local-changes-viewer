@@ -20,6 +20,7 @@ class PullRequestInfo:
     approved: bool | None = None  # None means not fetched
     unresolved_review_thread_count: int = 0
     last_reviewer: str | None = None
+    last_reviewed_at: str | None = None
     changed_files: int = 0
     checks_state: str | None = None  # e.g. "SUCCESS", "PENDING", "FAILURE"; None if no checks
 

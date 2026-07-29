@@ -8,7 +8,20 @@ from local_changes_viewer.gui.main_window import MainWindow
 APP_NAME = "GitChanges"
 
 
+def _disable_macos_fullscreen_menu_item() -> None:
+    # macOS auto-injects "Enter Full Screen" into any menu titled "View"; the
+    # only reliable way to suppress it is this NSUserDefaults key.
+    if sys.platform != "darwin":
+        return
+    try:
+        from Foundation import NSUserDefaults
+    except ImportError:
+        return
+    NSUserDefaults.standardUserDefaults().setBool_forKey_(False, "NSFullScreenMenuItemEverywhere")
+
+
 def main() -> int:
+    _disable_macos_fullscreen_menu_item()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
