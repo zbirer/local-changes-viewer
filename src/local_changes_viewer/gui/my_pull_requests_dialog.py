@@ -67,6 +67,7 @@ class MyPullRequestsDialog(QDialog):
         self._tree = QTreeWidget()
         self._tree.setColumnCount(len(_COLUMNS))
         self._tree.setHeaderLabels(_COLUMNS)
+        self._repo_urls: dict[str, list[str]] = {}
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_context_menu_requested)
@@ -100,19 +101,27 @@ class MyPullRequestsDialog(QDialog):
 
     def set_pull_requests(self, pull_requests: list[PullRequestInfo]) -> None:
         self._tree.clear()
+        self._repo_urls: dict[str, list[str]] = defaultdict(list)
 
         if pull_requests:
             by_repo: dict[str, list[PullRequestInfo]] = defaultdict(list)
             for pr in pull_requests:
                 by_repo[pr.repository].append(pr)
+                self._repo_urls[pr.repository].append(pr.url)
 
             for repo_name in sorted(by_repo):
                 repo_item = QTreeWidgetItem([repo_name])
-                repo_item.setFirstColumnSpanned(True)
                 font = repo_item.font(0)
                 font.setBold(True)
                 repo_item.setFont(0, font)
                 self._tree.addTopLevelItem(repo_item)
+
+                open_all_label = QLabel('<a href="#">Open All</a>')
+                open_all_label.setOpenExternalLinks(False)
+                open_all_label.linkActivated.connect(
+                    lambda _checked, repo=repo_name: self._open_all_prs(repo)
+                )
+                self._tree.setItemWidget(repo_item, 1, open_all_label)
 
                 for pr in by_repo[repo_name]:
                     pr_item = QTreeWidgetItem(
@@ -203,6 +212,10 @@ class MyPullRequestsDialog(QDialog):
             "Open Issues", lambda: self.pull_request_issues_requested.emit(repository, number)
         )
         menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _open_all_prs(self, repository: str) -> None:
+        for url in self._repo_urls.get(repository, []):
+            QDesktopServices.openUrl(QUrl(url))
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         url = item.data(0, _URL_ROLE)
