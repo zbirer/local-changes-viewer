@@ -20,6 +20,7 @@ NODE_KEY_ROLE = Qt.ItemDataRole.UserRole + 1
 FILE_CHANGE_ROLE = Qt.ItemDataRole.UserRole + 2
 REPO_PATH_ROLE = Qt.ItemDataRole.UserRole + 3
 _CHANGE_SIGNATURE_ROLE = Qt.ItemDataRole.UserRole + 4
+FOLDER_PATH_ROLE = Qt.ItemDataRole.UserRole + 5
 
 _REFRESH_HIGHLIGHT_COLOR = QColor("#FEF3C7")
 _REFRESH_HIGHLIGHT_TEXT_COLOR = QColor("#1F2937")
@@ -111,6 +112,7 @@ class RepoTreeModel(QStandardItemModel):
                         dir_item = QStandardItem(part)
                         dir_item.setEditable(False)
                         dir_item.setData(dir_key, NODE_KEY_ROLE)
+                        dir_item.setData(str(repo.path / accumulated), FOLDER_PATH_ROLE)
                         parent_item.appendRow(dir_item)
                     dir_items[accumulated] = dir_item
                 parent_item = dir_item
@@ -230,6 +232,7 @@ class RepoTreeModel(QStandardItemModel):
         repo_item = QStandardItem("")
         repo_item.setEditable(False)
         repo_item.setData(str(repo.path), NODE_KEY_ROLE)
+        repo_item.setData(str(repo.path), FOLDER_PATH_ROLE)
         repo_item.setData(self._change_signature(repo), _CHANGE_SIGNATURE_ROLE)
         repo_item.setBackground(QBrush(_REPO_BG_COLOR))
         repo_item.setForeground(QBrush(_REPO_TEXT_COLOR))
@@ -322,6 +325,7 @@ class RepoTreeModel(QStandardItemModel):
                     dir_item = QStandardItem(f"{part}  ({dir_counts[accumulated]})")
                     dir_item.setEditable(False)
                     dir_item.setData(f"{repo.path}::{accumulated}", NODE_KEY_ROLE)
+                    dir_item.setData(str(repo.path / accumulated), FOLDER_PATH_ROLE)
                     parent_item.appendRow(dir_item)
                     dir_items[accumulated] = dir_item
                 parent_item = dir_item

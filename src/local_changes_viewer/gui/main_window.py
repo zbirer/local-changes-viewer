@@ -52,7 +52,7 @@ from local_changes_viewer.gui.workers.pull_request_refresh_worker import PullReq
 from local_changes_viewer.gui.workers.pull_request_threads_worker import PullRequestThreadsWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
 from local_changes_viewer.gui.workspace_tree.aggregate_list import AggregateChangeList
-from local_changes_viewer.gui.workspace_tree.tree_model import FILE_CHANGE_ROLE
+from local_changes_viewer.gui.workspace_tree.tree_model import FILE_CHANGE_ROLE, FOLDER_PATH_ROLE
 from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
 
 
@@ -764,15 +764,32 @@ class MainWindow(QMainWindow):
 
     def _on_tree_context_menu(self, pos) -> None:
         index = self._tree_view.indexAt(pos)
-        if not index.isValid() or index.data(FILE_CHANGE_ROLE) is None:
+        if not index.isValid():
             return
-        self._tree_view.setCurrentIndex(index)
 
-        menu = QMenu(self._tree_view)
-        menu.addAction("Copy Path", self._on_copy_file_path)
-        menu.addAction("Copy Name", self._on_copy_file_name)
-        menu.addAction("Refresh Diff", self._on_refresh_diff)
-        menu.exec(self._tree_view.viewport().mapToGlobal(pos))
+        if index.data(FILE_CHANGE_ROLE) is not None:
+            self._tree_view.setCurrentIndex(index)
+            menu = QMenu(self._tree_view)
+            menu.addAction("Copy Path", self._on_copy_file_path)
+            menu.addAction("Copy Name", self._on_copy_file_name)
+            menu.addAction("Refresh Diff", self._on_refresh_diff)
+            menu.exec(self._tree_view.viewport().mapToGlobal(pos))
+            return
+
+        folder_path = index.data(FOLDER_PATH_ROLE)
+        if folder_path is not None:
+            menu = QMenu(self._tree_view)
+            menu.addAction("Copy Name", lambda: self._on_copy_folder_name(folder_path))
+            menu.addAction("Copy Path", lambda: self._on_copy_folder_path(folder_path))
+            menu.exec(self._tree_view.viewport().mapToGlobal(pos))
+
+    def _on_copy_folder_name(self, folder_path: str) -> None:
+        QGuiApplication.clipboard().setText(Path(folder_path).name)
+        self.statusBar().showMessage("Folder name copied to clipboard", 3000)
+
+    def _on_copy_folder_path(self, folder_path: str) -> None:
+        QGuiApplication.clipboard().setText(folder_path)
+        self.statusBar().showMessage("Folder path copied to clipboard", 3000)
 
     def _on_refresh_diff(self) -> None:
         if self._selected_change is None or self._selected_repo_path is None:
