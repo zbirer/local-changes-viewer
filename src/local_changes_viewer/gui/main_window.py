@@ -171,6 +171,12 @@ class MainWindow(QMainWindow):
         self._sync_scroll_action.toggled.connect(self._on_sync_scroll_toggled)
         settings_menu.addAction(self._sync_scroll_action)
 
+        self._always_reload_diff_action = QAction(
+            "Always reload fresh diff", self, checkable=True
+        )
+        self._always_reload_diff_action.toggled.connect(self._on_always_reload_diff_toggled)
+        settings_menu.addAction(self._always_reload_diff_action)
+
         auto_refresh_action = QAction("Auto Refresh…", self)
         auto_refresh_action.triggered.connect(self._on_configure_auto_refresh)
         settings_menu.addAction(auto_refresh_action)
@@ -274,6 +280,7 @@ class MainWindow(QMainWindow):
         self._hide_empty_repos_action.setChecked(self._settings.hide_repos_without_changes())
         self._sync_scroll_action.setChecked(self._settings.sync_side_by_side_scroll())
         self._diff_view.set_sync_scroll(self._sync_scroll_action.isChecked())
+        self._always_reload_diff_action.setChecked(self._settings.always_reload_diff())
         self._apply_auto_refresh_interval(self._settings.auto_refresh_minutes())
         self._disconnect_github_action.setEnabled(self._settings.github_username() is not None)
 
@@ -299,6 +306,7 @@ class MainWindow(QMainWindow):
         self._settings.set_ignore_md_files(self._ignore_md_action.isChecked())
         self._settings.set_hide_repos_without_changes(self._hide_empty_repos_action.isChecked())
         self._settings.set_sync_side_by_side_scroll(self._sync_scroll_action.isChecked())
+        self._settings.set_always_reload_diff(self._always_reload_diff_action.isChecked())
         super().closeEvent(event)
 
     def _on_open_folder(self) -> None:
@@ -323,7 +331,7 @@ class MainWindow(QMainWindow):
         self._selected_change = change
         self._selected_repo_path = repo_path
         self._update_file_info_label(repo_path, change)
-        if change.diff is not None:
+        if change.diff is not None and not self._always_reload_diff_action.isChecked():
             self._diff_view.set_diff(change.diff, str(change.path), self._editable_path(repo_path, change))
             return
         self._load_diff(repo_path, change)
@@ -397,6 +405,9 @@ class MainWindow(QMainWindow):
     def _on_sync_scroll_toggled(self, checked: bool) -> None:
         applog.log(f"Sync side-by-side scroll: {checked}", level=applog.LogLevel.INFO)
         self._diff_view.set_sync_scroll(checked)
+
+    def _on_always_reload_diff_toggled(self, checked: bool) -> None:
+        applog.log(f"Always reload fresh diff: {checked}", level=applog.LogLevel.INFO)
 
     def _on_configure_auto_refresh(self) -> None:
         current = self._settings.auto_refresh_minutes()

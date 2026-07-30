@@ -126,6 +126,15 @@ class AppSettings:
     def set_sync_side_by_side_scroll(self, enabled: bool) -> None:
         self._settings.setValue("sync_side_by_side_scroll", enabled)
 
+    def always_reload_diff(self) -> bool:
+        value = self._settings.value("always_reload_diff", True)
+        if isinstance(value, str):
+            return value.lower() == "true"
+        return bool(value)
+
+    def set_always_reload_diff(self, enabled: bool) -> None:
+        self._settings.setValue("always_reload_diff", enabled)
+
     def collapsed_node_keys(self) -> set[str]:
         value = self._settings.value("collapsed_node_keys", [])
         applog.log(
