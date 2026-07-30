@@ -713,7 +713,15 @@ class MainWindow(QMainWindow):
         menu = QMenu(self._tree_view)
         menu.addAction("Copy Path", self._on_copy_file_path)
         menu.addAction("Copy Name", self._on_copy_file_name)
+        menu.addAction("Refresh Diff", self._on_refresh_diff)
         menu.exec(self._tree_view.viewport().mapToGlobal(pos))
+
+    def _on_refresh_diff(self) -> None:
+        if self._selected_change is None or self._selected_repo_path is None:
+            self.statusBar().showMessage("No file selected", 3000)
+            return
+        self._selected_change.diff = None
+        self._load_diff(self._selected_repo_path, self._selected_change)
 
     def _on_open_in_editor(self) -> None:
         if self._selected_change is None or self._selected_repo_path is None:
