@@ -131,6 +131,7 @@ class PullRequestsTreeWidget(QWidget):
                     pr_item.setData(0, _URL_ROLE, pr.url)
                     pr_item.setData(0, _REPO_ROLE, pr.repository)
                     pr_item.setData(0, _NUMBER_ROLE, pr.number)
+                    pr_item.setToolTip(2, pr.title)
                     repo_item.addChild(pr_item)
 
                     link_label = QLabel(f'<a href="{pr.url}">Open</a>')
