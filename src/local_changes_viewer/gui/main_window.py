@@ -3,6 +3,7 @@ from pathlib import Path
 from PySide6.QtCore import QProcess, Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QCloseEvent,
     QDesktopServices,
     QGuiApplication,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterRule
+from local_changes_viewer.core.domain.profile import Profile
 from local_changes_viewer.core.domain.pull_request import PullRequestInfo
 from local_changes_viewer.core.domain.repository import Repository
 from local_changes_viewer.core.domain.workspace import Workspace
@@ -41,6 +43,7 @@ from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
 from local_changes_viewer.gui.github_connect_dialog import GitHubConnectDialog
 from local_changes_viewer.gui.my_pull_requests_dialog import MyPullRequestsDialog
+from local_changes_viewer.gui.profile_dialog import ProfileDialog
 from local_changes_viewer.gui.pull_requests_panel import PullRequestsPanel
 from local_changes_viewer.gui.pull_request_info_dialog import PullRequestInfoDialog
 from local_changes_viewer.gui.pull_request_issues_dialog import PullRequestIssuesDialog
@@ -67,6 +70,8 @@ class MainWindow(QMainWindow):
         self._root_folder: str | None = None
         self._workspace: Workspace | None = None
         self._folder_filter_rules: list[FolderFilterRule] = self._settings.folder_filter_rules()
+        self._profiles: list[Profile] = self._settings.profiles()
+        self._active_profile_name: str | None = self._settings.active_profile_name()
         self._selected_change: FileChange | None = None
         self._selected_repo_path: Path | None = None
         self._thread_pool = QThreadPool.globalInstance()
@@ -168,6 +173,13 @@ class MainWindow(QMainWindow):
         decrease_font_action.triggered.connect(self._diff_view.decrease_font_size)
         view_menu.addAction(decrease_font_action)
 
+        view_menu.addSeparator()
+
+        self._profile_menu = view_menu.addMenu("Profile")
+        self._profile_action_group = QActionGroup(self)
+        self._profile_action_group.setExclusive(True)
+        self._rebuild_profile_menu()
+
         settings_menu = self.menuBar().addMenu("Settings")
 
         self._include_ignored_action = QAction("Show ignored files", self, checkable=True)
@@ -211,6 +223,10 @@ class MainWindow(QMainWindow):
         manage_folder_filters_action = QAction("Filtered Folders…", self)
         manage_folder_filters_action.triggered.connect(self._on_manage_folder_filters)
         settings_menu.addAction(manage_folder_filters_action)
+
+        manage_profiles_action = QAction("Profiles…", self)
+        manage_profiles_action.triggered.connect(self._on_manage_profiles)
+        settings_menu.addAction(manage_profiles_action)
 
         github_menu = self.menuBar().addMenu("GitHub")
 
@@ -746,6 +762,98 @@ class MainWindow(QMainWindow):
         self._settings.set_folder_filter_rules(rules)
         self._refresh_display()
 
+    def _on_manage_profiles(self) -> None:
+        available_repo_names = (
+            sorted(
+                {
+                    repo.name
+                    for repo in self._workspace.repositories
+                    if repo.logical_parent_path is None
+                }
+            )
+            if self._workspace is not None
+            else []
+        )
+        dialog = ProfileDialog(self._profiles, available_repo_names, self)
+        dialog.profiles_changed.connect(self._on_profiles_changed)
+        dialog.exec()
+
+    def _on_profiles_changed(self, profiles: list[Profile]) -> None:
+        applog.log(f"Profiles changed ({len(profiles)})", level=applog.LogLevel.INFO)
+        self._profiles = profiles
+        self._settings.set_profiles(profiles)
+        if self._active_profile_name is not None and not any(
+            p.name == self._active_profile_name for p in profiles
+        ):
+            self._active_profile_name = None
+            self._settings.set_active_profile_name(None)
+        self._rebuild_profile_menu()
+        self._refresh_display()
+
+    def _rebuild_profile_menu(self) -> None:
+        self._profile_menu.clear()
+        for action in self._profile_action_group.actions():
+            self._profile_action_group.removeAction(action)
+
+        no_profile_action = QAction("No Profile", self, checkable=True)
+        no_profile_action.setChecked(self._active_profile_name is None)
+        no_profile_action.triggered.connect(lambda: self._on_profile_selected(None))
+        self._profile_action_group.addAction(no_profile_action)
+        self._profile_menu.addAction(no_profile_action)
+
+        if self._profiles:
+            self._profile_menu.addSeparator()
+        for profile in self._profiles:
+            action = QAction(profile.name, self, checkable=True)
+            action.setChecked(profile.name == self._active_profile_name)
+            action.triggered.connect(lambda _checked, name=profile.name: self._on_profile_selected(name))
+            self._profile_action_group.addAction(action)
+            self._profile_menu.addAction(action)
+
+    def _on_profile_selected(self, name: str | None) -> None:
+        applog.log(f"Active profile changed: {name!r}", level=applog.LogLevel.INFO)
+        self._active_profile_name = name
+        self._settings.set_active_profile_name(name)
+        self._refresh_display()
+
+    def _active_profile(self) -> Profile | None:
+        if self._active_profile_name is None:
+            return None
+        return next((p for p in self._profiles if p.name == self._active_profile_name), None)
+
+    def _on_add_repo_to_profile(self, repo_name: str, profile_name: str) -> None:
+        profile = next((p for p in self._profiles if p.name == profile_name), None)
+        if profile is None or repo_name in profile.repo_names:
+            return
+        profile.repo_names.append(repo_name)
+        applog.log(f"Added {repo_name!r} to profile {profile_name!r}", level=applog.LogLevel.INFO)
+        self._settings.set_profiles(self._profiles)
+        if profile_name == self._active_profile_name:
+            self._refresh_display()
+
+    def _on_remove_repo_from_profile(self, repo_name: str, profile_name: str) -> None:
+        profile = next((p for p in self._profiles if p.name == profile_name), None)
+        if profile is None or repo_name not in profile.repo_names:
+            return
+        profile.repo_names.remove(repo_name)
+        applog.log(f"Removed {repo_name!r} from profile {profile_name!r}", level=applog.LogLevel.INFO)
+        self._settings.set_profiles(self._profiles)
+        if profile_name == self._active_profile_name:
+            self._refresh_display()
+
+    def _on_new_profile_with_repo(self, repo_name: str) -> None:
+        name, ok = QInputDialog.getText(self, "New Profile", "Profile name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if any(p.name == name for p in self._profiles):
+            QMessageBox.warning(self, "Profiles", f"A profile named {name!r} already exists.")
+            return
+        self._profiles.append(Profile(name=name, repo_names=[repo_name]))
+        self._settings.set_profiles(self._profiles)
+        self._rebuild_profile_menu()
+        applog.log(f"Created profile {name!r} with repo {repo_name!r}", level=applog.LogLevel.INFO)
+
     def _on_copy_app_log(self) -> None:
         text = "\n".join(applog.all_entries())
         QGuiApplication.clipboard().setText(text)
@@ -793,7 +901,28 @@ class MainWindow(QMainWindow):
             menu = QMenu(self._tree_view)
             menu.addAction("Copy Name", lambda: self._on_copy_folder_name(folder_path))
             menu.addAction("Copy Path", lambda: self._on_copy_folder_path(folder_path))
+            if not index.parent().isValid():
+                repo_name = Path(folder_path).name
+                menu.addSeparator()
+                self._add_profile_submenu(menu, repo_name)
             menu.exec(self._tree_view.viewport().mapToGlobal(pos))
+
+    def _add_profile_submenu(self, menu: QMenu, repo_name: str) -> None:
+        submenu = menu.addMenu("Add to Profile")
+        for profile in self._profiles:
+            action = submenu.addAction(profile.name)
+            action.setCheckable(True)
+            action.setChecked(repo_name in profile.repo_names)
+            action.toggled.connect(
+                lambda checked, name=profile.name: (
+                    self._on_add_repo_to_profile(repo_name, name)
+                    if checked
+                    else self._on_remove_repo_from_profile(repo_name, name)
+                )
+            )
+        if self._profiles:
+            submenu.addSeparator()
+        submenu.addAction("New Profile…", lambda: self._on_new_profile_with_repo(repo_name))
 
     def _on_copy_folder_name(self, folder_path: str) -> None:
         QGuiApplication.clipboard().setText(Path(folder_path).name)
@@ -908,6 +1037,7 @@ class MainWindow(QMainWindow):
             hide_repos_without_changes=self._hide_empty_repos_action.isChecked(),
             folder_filter_rules=self._folder_filter_rules,
             max_age_minutes=self._time_filter_minutes,
+            profile=self._active_profile(),
         )
         before_by_repo = {r.path: len(r.changes) for r in self._workspace.repositories}
         for repo in display_workspace.repositories:

@@ -1,6 +1,9 @@
+import json
+
 from PySide6.QtCore import QByteArray, QSettings
 
 from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterMode, FolderFilterRule
+from local_changes_viewer.core.domain.profile import Profile
 from local_changes_viewer.gui import applog
 
 
@@ -134,6 +137,33 @@ class AppSettings:
 
     def set_always_reload_diff(self, enabled: bool) -> None:
         self._settings.setValue("always_reload_diff", enabled)
+
+    def profiles(self) -> list[Profile]:
+        raw = self._settings.value("profiles", "")
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            applog.log(f"Ignoring malformed profiles value: {raw!r}", level=applog.LogLevel.WARNING)
+            return []
+        return [
+            Profile(name=entry["name"], repo_names=list(entry.get("repo_names", [])))
+            for entry in data
+        ]
+
+    def set_profiles(self, profiles: list[Profile]) -> None:
+        data = [{"name": p.name, "repo_names": list(p.repo_names)} for p in profiles]
+        self._settings.setValue("profiles", json.dumps(data))
+
+    def active_profile_name(self) -> str | None:
+        return self._settings.value("active_profile_name", None) or None
+
+    def set_active_profile_name(self, name: str | None) -> None:
+        if name is None:
+            self._settings.remove("active_profile_name")
+        else:
+            self._settings.setValue("active_profile_name", name)
 
     def collapsed_node_keys(self) -> set[str]:
         value = self._settings.value("collapsed_node_keys", [])

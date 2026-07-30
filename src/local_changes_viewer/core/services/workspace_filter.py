@@ -3,6 +3,7 @@ from pathlib import Path
 
 from local_changes_viewer.core.domain.file_change import FileChange
 from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterRule
+from local_changes_viewer.core.domain.profile import Profile
 from local_changes_viewer.core.domain.repository import Repository
 from local_changes_viewer.core.domain.workspace import Workspace
 
@@ -46,10 +47,14 @@ def filter_workspace(
     hide_repos_without_changes: bool = False,
     folder_filter_rules: list[FolderFilterRule] | None = None,
     max_age_minutes: int = 0,
+    profile: Profile | None = None,
 ) -> Workspace:
     folder_filter_rules = folder_filter_rules or []
     repositories: list[Repository] = []
     for repo in workspace.repositories:
+        if profile is not None and repo.name not in profile.repo_names:
+            continue
+
         if folder_filter_rules and _repo_is_inside_filtered_folder(
             repo, workspace.root_path, folder_filter_rules
         ):
