@@ -225,6 +225,9 @@ class MyPullRequestsDialog(QDialog):
         menu.addAction(
             "Open Issues", lambda: self.pull_request_issues_requested.emit(repository, number)
         )
+        menu.addAction(
+            "Copy URL", lambda: self._copy_pr_url(item.data(0, _URL_ROLE), item.text(2))
+        )
         menu.exec(self._tree.viewport().mapToGlobal(pos))
 
     def _open_all_prs(self, repository: str) -> None:
@@ -234,6 +237,9 @@ class MyPullRequestsDialog(QDialog):
     def _copy_all_urls(self, repository: str) -> None:
         lines = [f"{pr.url} - {pr.title}" for pr in self._repo_prs.get(repository, [])]
         QApplication.clipboard().setText("\n".join(lines))
+
+    def _copy_pr_url(self, url: str, title: str) -> None:
+        QApplication.clipboard().setText(f"{url} - {title}")
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         url = item.data(0, _URL_ROLE)
