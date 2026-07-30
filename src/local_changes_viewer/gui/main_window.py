@@ -90,6 +90,7 @@ class MainWindow(QMainWindow):
         self._diff_view.refresh_requested.connect(self._on_refresh)
         self._diff_view.time_filter_minutes_changed.connect(self._on_time_filter_changed)
         self._diff_view.file_saved.connect(self._on_file_saved)
+        self._diff_view.pull_requests_requested.connect(self._on_show_my_pull_requests)
 
         self._aggregate_list = AggregateChangeList()
         self._aggregate_list.file_selected.connect(self._on_file_selected)

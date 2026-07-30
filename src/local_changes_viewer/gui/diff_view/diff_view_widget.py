@@ -21,6 +21,7 @@ class DiffViewWidget(QWidget):
     refresh_requested = Signal()
     time_filter_minutes_changed = Signal(int)
     file_saved = Signal(str)
+    pull_requests_requested = Signal()
 
     _MAX_TIME_FILTER_MINUTES = 180
 
@@ -37,6 +38,9 @@ class DiffViewWidget(QWidget):
         self._stack = QStackedWidget()
         self._stack.addWidget(self._unified)
         self._stack.addWidget(self._side_by_side)
+
+        self._pull_requests_button = QPushButton("PRs")
+        self._pull_requests_button.clicked.connect(self.pull_requests_requested.emit)
 
         self._toggle_button = QPushButton("Side-by-side")
         self._toggle_button.setCheckable(True)
@@ -75,6 +79,7 @@ class DiffViewWidget(QWidget):
 
         toolbar_layout = QHBoxLayout()
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.addWidget(self._pull_requests_button)
         toolbar_layout.addWidget(self._toggle_button)
         toolbar_layout.addWidget(self._prev_button)
         toolbar_layout.addWidget(self._next_button)
