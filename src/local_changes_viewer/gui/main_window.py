@@ -101,7 +101,7 @@ class MainWindow(QMainWindow):
 
         tree_panel = QWidget()
         tree_layout = QVBoxLayout(tree_panel)
-        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.setContentsMargins(6, 6, 6, 0)
         tree_layout.addWidget(self._filter_box)
         tree_layout.addWidget(left_tabs)
 
