@@ -40,6 +40,29 @@ def _changed_within(repo_path: Path, change: FileChange, max_age_minutes: int) -
     return age_minutes <= max_age_minutes
 
 
+def _repo_matches_profile(
+    repo: Repository, profile: Profile, by_path: dict[str, Repository]
+) -> bool:
+    current: Repository | None = repo
+    while current is not None:
+        if current.name in profile.repo_names:
+            return True
+        parent = current.logical_parent_path
+        current = by_path.get(str(parent)) if parent is not None else None
+    return False
+
+
+def _repo_or_descendant_has_changes(
+    repo: Repository, children_by_parent: dict[str, list[Repository]]
+) -> bool:
+    if repo.changes:
+        return True
+    return any(
+        _repo_or_descendant_has_changes(child, children_by_parent)
+        for child in children_by_parent.get(str(repo.path), [])
+    )
+
+
 def filter_workspace(
     workspace: Workspace,
     *,
@@ -50,9 +73,10 @@ def filter_workspace(
     profile: Profile | None = None,
 ) -> Workspace:
     folder_filter_rules = folder_filter_rules or []
-    repositories: list[Repository] = []
+    all_by_path = {str(r.path): r for r in workspace.repositories}
+    considered: list[Repository] = []
     for repo in workspace.repositories:
-        if profile is not None and repo.name not in profile.repo_names:
+        if profile is not None and not _repo_matches_profile(repo, profile, all_by_path):
             continue
 
         if folder_filter_rules and _repo_is_inside_filtered_folder(
@@ -72,10 +96,7 @@ def filter_workspace(
         if max_age_minutes > 0:
             changes = [c for c in changes if _changed_within(repo.path, c, max_age_minutes)]
 
-        if hide_repos_without_changes and not changes:
-            continue
-
-        repositories.append(
+        considered.append(
             Repository(
                 path=repo.path,
                 name=repo.name,
@@ -84,4 +105,21 @@ def filter_workspace(
                 logical_parent_path=repo.logical_parent_path,
             )
         )
+
+    if not hide_repos_without_changes:
+        return Workspace(root_path=workspace.root_path, repositories=considered)
+
+    by_path = {str(r.path): r for r in considered}
+    children_by_parent: dict[str, list[Repository]] = {}
+    for r in considered:
+        parent = r.logical_parent_path
+        if parent is not None and str(parent) in by_path:
+            children_by_parent.setdefault(str(parent), []).append(r)
+
+    # A parent repo with no changes of its own is still kept when a nested
+    # worktree underneath it has changes, so that worktree isn't orphaned as
+    # a top-level item once its parent's row is dropped.
+    repositories = [
+        r for r in considered if _repo_or_descendant_has_changes(r, children_by_parent)
+    ]
     return Workspace(root_path=workspace.root_path, repositories=repositories)

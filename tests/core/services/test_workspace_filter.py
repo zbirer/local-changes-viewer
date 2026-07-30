@@ -4,6 +4,7 @@ from pathlib import Path
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterMode, FolderFilterRule
+from local_changes_viewer.core.domain.profile import Profile
 from local_changes_viewer.core.domain.repository import BranchStatus, Repository
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.core.services.workspace_filter import filter_workspace
@@ -185,6 +186,39 @@ def test_preserves_logical_parent_path_through_filtering() -> None:
 
     worktree_result = next(r for r in result.repositories if r.name == "pr-1")
     assert worktree_result.logical_parent_path == root / "server"
+
+
+def test_profile_keeps_nested_worktree_child_of_matching_parent() -> None:
+    root = Path("/root")
+    parent_repo = Repository(
+        path=root / "dashboard",
+        name="dashboard",
+        branch_status=_BRANCH,
+        changes=[],
+    )
+    worktree_repo = Repository(
+        path=root / "dashboard" / ".worktrees" / "pr-4161",
+        name="pr-4161",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)],
+        logical_parent_path=root / "dashboard",
+    )
+    other_repo = Repository(
+        path=root / "unrelated",
+        name="unrelated",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("b.py"), change_type=ChangeType.MODIFIED)],
+    )
+    workspace = Workspace(
+        root_path=root, repositories=[parent_repo, worktree_repo, other_repo]
+    )
+    profile = Profile(name="main", repo_names=["dashboard"])
+
+    result = filter_workspace(
+        workspace, profile=profile, hide_repos_without_changes=True
+    )
+
+    assert [r.name for r in result.repositories] == ["dashboard", "pr-4161"]
 
 
 def test_does_not_mutate_original_repository_changes() -> None:
