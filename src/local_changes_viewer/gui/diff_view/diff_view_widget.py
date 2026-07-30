@@ -30,6 +30,10 @@ class DiffViewWidget(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        # Overrides the toolbar's cumulative minimum width so the splitter divider
+        # can be dragged nearly all the way to the right instead of stopping where
+        # the toolbar buttons would otherwise be clipped.
+        self.setMinimumWidth(1)
         self._current_hunk_index = -1
         self._font_point_size = 12
         self._unified = UnifiedView()
