@@ -286,6 +286,10 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+        self._scan_refresh_timer.stop()
+        self._auto_refresh_timer.stop()
+        self._thread_pool.clear()
+        self._thread_pool.waitForDone()
         self._settings.set_window_geometry(self.saveGeometry())
         self._settings.set_splitter_sizes(self._splitter.sizes())
         mode = "side_by_side" if self._diff_view.is_side_by_side() else "unified"
