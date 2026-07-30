@@ -262,6 +262,7 @@ class MyPullRequestsDialog(QDialog):
         self._refresh_button = buttons.addButton(
             "Refresh", QDialogButtonBox.ButtonRole.ActionRole
         )
+        self._refresh_button.setToolTip("Refresh the list of pull requests")
         self._refresh_button.clicked.connect(self.refresh_requested.emit)
 
         layout = QVBoxLayout(self)

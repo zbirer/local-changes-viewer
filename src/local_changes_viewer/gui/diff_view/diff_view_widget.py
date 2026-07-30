@@ -44,30 +44,38 @@ class DiffViewWidget(QWidget):
         self._stack.addWidget(self._side_by_side)
 
         self._pull_requests_button = QPushButton("PRs")
+        self._pull_requests_button.setToolTip("Show your open pull requests")
         self._pull_requests_button.clicked.connect(self.pull_requests_requested.emit)
 
         self._toggle_button = QPushButton("Side-by-side")
+        self._toggle_button.setToolTip("Toggle side-by-side / unified diff view")
         self._toggle_button.setCheckable(True)
         self._toggle_button.toggled.connect(self._on_toggled)
 
         self._prev_button = QPushButton("Prev change")
+        self._prev_button.setToolTip("Scroll to the previous change")
         self._prev_button.clicked.connect(self._on_prev)
         self._next_button = QPushButton("Next change")
+        self._next_button.setToolTip("Scroll to the next change")
         self._next_button.clicked.connect(self._on_next)
 
         self._refresh_button = QPushButton("Refresh")
+        self._refresh_button.setToolTip("Refresh the diff")
         self._refresh_button.clicked.connect(self.refresh_requested.emit)
 
         self._edit_button = QPushButton("Edit")
+        self._edit_button.setToolTip("Edit the file in place")
         self._edit_button.setCheckable(True)
         self._edit_button.setEnabled(False)
         self._edit_button.toggled.connect(self._on_edit_toggled)
 
         self._save_button = QPushButton("Save")
+        self._save_button.setToolTip("Save edits to the file")
         self._save_button.setEnabled(False)
         self._save_button.clicked.connect(self._on_save_clicked)
 
         self._line_numbers_button = QPushButton("Line Numbers")
+        self._line_numbers_button.setToolTip("Toggle line numbers")
         self._line_numbers_button.setCheckable(True)
         self._line_numbers_button.setChecked(False)
         self._line_numbers_button.toggled.connect(self._on_line_numbers_toggled)

@@ -23,6 +23,7 @@ class PullRequestsPanel(QWidget):
         title_label.setFont(font)
 
         self._refresh_button = QPushButton("Refresh")
+        self._refresh_button.setToolTip("Refresh the list of pull requests")
         self._refresh_button.clicked.connect(self.refresh_requested.emit)
 
         close_button = QPushButton("✕")

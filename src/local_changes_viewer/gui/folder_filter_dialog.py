@@ -30,9 +30,11 @@ class FolderFilterDialog(QDialog):
         self._mode_combo.addItem("equals", FolderFilterMode.EQUALS)
 
         add_button = QPushButton("Add")
+        add_button.setToolTip("Add this folder filter rule")
         add_button.clicked.connect(self._on_add)
 
         remove_button = QPushButton("Remove Selected")
+        remove_button.setToolTip("Remove the selected filter rules")
         remove_button.clicked.connect(self._on_remove)
 
         input_layout = QHBoxLayout()
@@ -41,6 +43,7 @@ class FolderFilterDialog(QDialog):
         input_layout.addWidget(add_button)
 
         close_button = QPushButton("Close")
+        close_button.setToolTip("Close this dialog")
         close_button.clicked.connect(self.accept)
 
         layout = QVBoxLayout(self)
