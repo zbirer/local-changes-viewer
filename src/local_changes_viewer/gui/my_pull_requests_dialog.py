@@ -1,7 +1,7 @@
 from collections import defaultdict
 
 from PySide6.QtCore import QUrl, Qt, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -29,6 +29,8 @@ _COLUMNS = [
     "Files",
     "Checks",
 ]
+_APPROVED_ROW_BACKGROUND = QBrush(QColor("#1e3d2b"))
+
 _URL_ROLE = Qt.ItemDataRole.UserRole
 _REPO_ROLE = Qt.ItemDataRole.UserRole + 1
 _NUMBER_ROLE = Qt.ItemDataRole.UserRole + 2
@@ -132,6 +134,7 @@ class PullRequestsTreeWidget(QWidget):
                     pr_item.setData(0, _REPO_ROLE, pr.repository)
                     pr_item.setData(0, _NUMBER_ROLE, pr.number)
                     pr_item.setToolTip(2, pr.title)
+                    self._apply_approved_style(pr_item, pr.approved)
                     repo_item.addChild(pr_item)
 
                     link_label = QLabel(f'<a href="{pr.url}">Open</a>')
@@ -166,6 +169,12 @@ class PullRequestsTreeWidget(QWidget):
         item.setText(6, format_review_time(last_reviewed_at) if last_reviewed_at else "-")
         item.setText(7, str(changed_files))
         item.setText(8, _checks_text(checks_state))
+        self._apply_approved_style(item, approved)
+
+    def _apply_approved_style(self, item: QTreeWidgetItem, approved: bool | None) -> None:
+        background = _APPROVED_ROW_BACKGROUND if approved else QBrush()
+        for column in range(len(_COLUMNS)):
+            item.setBackground(column, background)
 
     def _find_pr_item(self, repository: str, number: int) -> QTreeWidgetItem | None:
         for i in range(self._tree.topLevelItemCount()):
