@@ -46,7 +46,9 @@ class WorkspaceScannerService:
         on_progress("Discovering git repositories…")
         discovery_started_at = time.monotonic()
         repo_paths = self._filesystem_scanner.find_git_repos(root)
-        repo_paths, worktree_parents = self._expand_with_worktrees(repo_paths, on_log)
+        repo_paths, worktree_parents, worktrees_by_parent = self._expand_with_worktrees(
+            repo_paths, on_log
+        )
         discovery_seconds = time.monotonic() - discovery_started_at
         total = len(repo_paths)
         if total == 0:
@@ -72,6 +74,7 @@ class WorkspaceScannerService:
                     on_log,
                     (previous_pull_requests or {}).get(repo_path),
                     worktree_parents.get(repo_path),
+                    worktrees_by_parent.get(repo_path),
                 ),
                 repo_paths,
             )
@@ -93,10 +96,11 @@ class WorkspaceScannerService:
 
     def _expand_with_worktrees(
         self, repo_paths: list[Path], on_log: Callable[[str], None]
-    ) -> tuple[list[Path], dict[Path, Path]]:
+    ) -> tuple[list[Path], dict[Path, Path], dict[Path, list[Path]]]:
         expanded = list(repo_paths)
         seen = set(repo_paths)
         worktree_parents: dict[Path, Path] = {}
+        worktrees_by_parent: dict[Path, list[Path]] = {}
         for repo_path in repo_paths:
             try:
                 worktree_paths = self._adapter_factory(repo_path).list_worktrees()
@@ -105,10 +109,11 @@ class WorkspaceScannerService:
                 continue
             for worktree_path in worktree_paths:
                 worktree_parents.setdefault(worktree_path, repo_path)
+                worktrees_by_parent.setdefault(repo_path, []).append(worktree_path)
                 if worktree_path not in seen:
                     seen.add(worktree_path)
                     expanded.append(worktree_path)
-        return expanded, worktree_parents
+        return expanded, worktree_parents, worktrees_by_parent
 
     def _scan_repo(
         self,
@@ -118,6 +123,7 @@ class WorkspaceScannerService:
         on_log: Callable[[str], None] | None = None,
         previous_pull_request: tuple[PullRequestInfo, str] | None = None,
         logical_parent_path: Path | None = None,
+        nested_worktree_paths: list[Path] | None = None,
     ) -> tuple[Repository | None, float]:
         on_log = on_log or (lambda _message: None)
         started_at = time.monotonic()
@@ -131,6 +137,21 @@ class WorkspaceScannerService:
 
         if not include_ignored:
             changes = [c for c in changes if c.change_type != ChangeType.IGNORED]
+
+        if nested_worktree_paths:
+            # git status reports a nested worktree checkout as a single untracked
+            # directory entry (it never descends into another git repo), which
+            # would otherwise surface as a spurious change for a folder that's
+            # actually displayed separately as its own repo.
+            repo_path_resolved = repo_path.resolve()
+            worktree_paths_resolved = [p.resolve() for p in nested_worktree_paths]
+            changes = [
+                c
+                for c in changes
+                if not self._change_covers_worktree(
+                    repo_path_resolved / c.path, worktree_paths_resolved
+                )
+            ]
 
         git_scan_ms = (time.monotonic() - started_at) * 1000
         pull_request = None
@@ -153,6 +174,13 @@ class WorkspaceScannerService:
             logical_parent_path=logical_parent_path,
         )
         return repo, time.monotonic() - started_at
+
+    @staticmethod
+    def _change_covers_worktree(change_path: Path, worktree_paths: list[Path]) -> bool:
+        return any(
+            worktree_path == change_path or worktree_path.is_relative_to(change_path)
+            for worktree_path in worktree_paths
+        )
 
     @staticmethod
     def _fetch_pull_request(
