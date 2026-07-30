@@ -501,6 +501,8 @@ class MainWindow(QMainWindow):
 
     def _update_status_extra_label(self) -> None:
         parts = []
+        if self._active_profile_name:
+            parts.append(f"Profile: {self._active_profile_name}")
         if self._auto_refresh_minutes:
             parts.append(f"Auto refresh: {self._auto_refresh_minutes} min")
         if self._time_filter_minutes:
@@ -811,6 +813,7 @@ class MainWindow(QMainWindow):
         ):
             self._active_profile_name = None
             self._settings.set_active_profile_name(None)
+            self._update_status_extra_label()
         self._rebuild_profile_menu()
         self._refresh_display()
 
@@ -838,6 +841,7 @@ class MainWindow(QMainWindow):
         applog.log(f"Active profile changed: {name!r}", level=applog.LogLevel.INFO)
         self._active_profile_name = name
         self._settings.set_active_profile_name(name)
+        self._update_status_extra_label()
         self._refresh_display()
 
     def _active_profile(self) -> Profile | None:
