@@ -42,6 +42,12 @@ from local_changes_viewer.gui import applog, github_auth
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
 from local_changes_viewer.gui.github_connect_dialog import GitHubConnectDialog
+from local_changes_viewer.gui.help_dialog import (
+    show_actions_help,
+    show_pull_requests_help,
+    show_settings_help,
+    show_toolbar_help,
+)
 from local_changes_viewer.gui.my_pull_requests_dialog import MyPullRequestsDialog
 from local_changes_viewer.gui.profile_dialog import ProfileDialog
 from local_changes_viewer.gui.pull_requests_panel import PullRequestsPanel
@@ -247,6 +253,24 @@ class MainWindow(QMainWindow):
         self._disconnect_github_action = QAction("Disconnect GitHub", self)
         self._disconnect_github_action.triggered.connect(self._on_disconnect_github)
         github_menu.addAction(self._disconnect_github_action)
+
+        help_menu = self.menuBar().addMenu("Help")
+
+        help_settings_action = QAction("Help on Settings", self)
+        help_settings_action.triggered.connect(lambda: show_settings_help(self))
+        help_menu.addAction(help_settings_action)
+
+        help_actions_action = QAction("Help on Actions", self)
+        help_actions_action.triggered.connect(lambda: show_actions_help(self))
+        help_menu.addAction(help_actions_action)
+
+        help_pr_action = QAction("Help on PR Panel / Dialog", self)
+        help_pr_action.triggered.connect(lambda: show_pull_requests_help(self))
+        help_menu.addAction(help_pr_action)
+
+        help_toolbar_action = QAction("Help on Toolbar Buttons", self)
+        help_toolbar_action.triggered.connect(lambda: show_toolbar_help(self))
+        help_menu.addAction(help_toolbar_action)
 
         actions_menu.addSeparator()
 
