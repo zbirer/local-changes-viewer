@@ -152,6 +152,12 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
+        open_pr_panel_view_action = QAction("Open PRs Panel", self)
+        open_pr_panel_view_action.triggered.connect(self._on_open_pull_requests_panel)
+        view_menu.addAction(open_pr_panel_view_action)
+
+        view_menu.addSeparator()
+
         increase_font_action = QAction("Increase Font Size", self)
         increase_font_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
         increase_font_action.triggered.connect(self._diff_view.increase_font_size)
