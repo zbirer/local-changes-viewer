@@ -3,6 +3,7 @@ from collections import defaultdict
 from PySide6.QtCore import QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QHeaderView,
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from local_changes_viewer.core.domain.pull_request import PullRequestInfo
-from local_changes_viewer.gui.formatting import format_timestamp
+from local_changes_viewer.gui.formatting import format_review_time
 
 _COLUMNS = [
     "PR ID",
@@ -67,7 +68,7 @@ class MyPullRequestsDialog(QDialog):
         self._tree = QTreeWidget()
         self._tree.setColumnCount(len(_COLUMNS))
         self._tree.setHeaderLabels(_COLUMNS)
-        self._repo_urls: dict[str, list[str]] = {}
+        self._repo_prs: dict[str, list[PullRequestInfo]] = {}
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_context_menu_requested)
@@ -101,13 +102,13 @@ class MyPullRequestsDialog(QDialog):
 
     def set_pull_requests(self, pull_requests: list[PullRequestInfo]) -> None:
         self._tree.clear()
-        self._repo_urls: dict[str, list[str]] = defaultdict(list)
+        self._repo_prs = {}
 
         if pull_requests:
             by_repo: dict[str, list[PullRequestInfo]] = defaultdict(list)
             for pr in pull_requests:
                 by_repo[pr.repository].append(pr)
-                self._repo_urls[pr.repository].append(pr.url)
+            self._repo_prs = dict(by_repo)
 
             for repo_name in sorted(by_repo):
                 repo_item = QTreeWidgetItem([repo_name])
@@ -132,7 +133,7 @@ class MyPullRequestsDialog(QDialog):
                             _approved_text(pr.approved),
                             str(pr.unresolved_review_thread_count),
                             pr.last_reviewer or "-",
-                            format_timestamp(pr.last_reviewed_at) if pr.last_reviewed_at else "-",
+                            format_review_time(pr.last_reviewed_at) if pr.last_reviewed_at else "-",
                             str(pr.changed_files),
                             _checks_text(pr.checks_state),
                         ]
@@ -175,7 +176,7 @@ class MyPullRequestsDialog(QDialog):
         item.setText(3, _approved_text(approved))
         item.setText(4, str(unresolved_review_thread_count))
         item.setText(5, last_reviewer or "-")
-        item.setText(6, format_timestamp(last_reviewed_at) if last_reviewed_at else "-")
+        item.setText(6, format_review_time(last_reviewed_at) if last_reviewed_at else "-")
         item.setText(7, str(changed_files))
         item.setText(8, _checks_text(checks_state))
 
@@ -193,8 +194,21 @@ class MyPullRequestsDialog(QDialog):
 
     def _on_context_menu_requested(self, pos) -> None:
         item = self._tree.itemAt(pos)
-        if item is None or item.parent() is None:
+        if item is None:
             return
+
+        if item.parent() is None:
+            repository = item.text(0)
+            if repository not in self._repo_prs:
+                return
+            self._tree.setCurrentItem(item)
+
+            menu = QMenu(self._tree)
+            menu.addAction("Open All", lambda: self._open_all_prs(repository))
+            menu.addAction("Copy All URLs", lambda: self._copy_all_urls(repository))
+            menu.exec(self._tree.viewport().mapToGlobal(pos))
+            return
+
         repository = item.data(0, _REPO_ROLE)
         number = item.data(0, _NUMBER_ROLE)
         if repository is None or number is None:
@@ -214,8 +228,12 @@ class MyPullRequestsDialog(QDialog):
         menu.exec(self._tree.viewport().mapToGlobal(pos))
 
     def _open_all_prs(self, repository: str) -> None:
-        for url in self._repo_urls.get(repository, []):
-            QDesktopServices.openUrl(QUrl(url))
+        for pr in self._repo_prs.get(repository, []):
+            QDesktopServices.openUrl(QUrl(pr.url))
+
+    def _copy_all_urls(self, repository: str) -> None:
+        lines = [f"{pr.url} - {pr.title}" for pr in self._repo_prs.get(repository, [])]
+        QApplication.clipboard().setText("\n".join(lines))
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         url = item.data(0, _URL_ROLE)
