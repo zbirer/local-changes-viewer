@@ -41,6 +41,7 @@ from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
 from local_changes_viewer.gui.github_connect_dialog import GitHubConnectDialog
 from local_changes_viewer.gui.my_pull_requests_dialog import MyPullRequestsDialog
+from local_changes_viewer.gui.pull_requests_panel import PullRequestsPanel
 from local_changes_viewer.gui.pull_request_info_dialog import PullRequestInfoDialog
 from local_changes_viewer.gui.pull_request_issues_dialog import PullRequestIssuesDialog
 from local_changes_viewer.gui.settings import AppSettings
@@ -77,6 +78,16 @@ class MainWindow(QMainWindow):
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
         self._my_pull_requests_dialog: MyPullRequestsDialog | None = None
+        self._pr_panel = PullRequestsPanel()
+        self._pr_panel.hide()
+        self._pr_panel.refresh_requested.connect(self._on_my_pull_requests_refresh_requested)
+        self._pr_panel.pull_request_refresh_requested.connect(
+            self._on_pull_request_refresh_requested
+        )
+        self._pr_panel.pull_request_info_requested.connect(self._on_pull_request_info_requested)
+        self._pr_panel.pull_request_issues_requested.connect(
+            self._on_pull_request_issues_requested
+        )
 
         self._tree_view = RepoTreeView(self._settings)
         self._tree_view.file_selected.connect(self._on_file_selected)
@@ -104,7 +115,13 @@ class MainWindow(QMainWindow):
         tree_layout = QVBoxLayout(tree_panel)
         tree_layout.setContentsMargins(6, 6, 6, 0)
         tree_layout.addWidget(self._filter_box)
-        tree_layout.addWidget(left_tabs)
+
+        self._left_vertical_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._left_vertical_splitter.addWidget(left_tabs)
+        self._left_vertical_splitter.addWidget(self._pr_panel)
+        self._left_vertical_splitter.setStretchFactor(0, 1)
+        self._left_vertical_splitter.setStretchFactor(1, 1)
+        tree_layout.addWidget(self._left_vertical_splitter)
 
         self._splitter = QSplitter()
         self._splitter.addWidget(tree_panel)
@@ -194,6 +211,10 @@ class MainWindow(QMainWindow):
         my_pull_requests_action = QAction("My Open Pull Requests…", self)
         my_pull_requests_action.triggered.connect(self._on_show_my_pull_requests)
         github_menu.addAction(my_pull_requests_action)
+
+        open_pr_panel_action = QAction("Open PRs Panel", self)
+        open_pr_panel_action.triggered.connect(self._on_open_pull_requests_panel)
+        github_menu.addAction(open_pr_panel_action)
 
         github_menu.addSeparator()
 
@@ -533,9 +554,15 @@ class MainWindow(QMainWindow):
     def _on_show_my_pull_requests(self) -> None:
         self._fetch_my_pull_requests()
 
+    def _on_open_pull_requests_panel(self) -> None:
+        self._pr_panel.show()
+        self._fetch_my_pull_requests()
+
     def _on_my_pull_requests_refresh_requested(self) -> None:
         if self._my_pull_requests_dialog is not None:
             self._my_pull_requests_dialog.set_refreshing(True)
+        if self._pr_panel.isVisible():
+            self._pr_panel.set_refreshing(True)
         self._fetch_my_pull_requests()
 
     def _fetch_my_pull_requests(self) -> None:
@@ -590,9 +617,16 @@ class MainWindow(QMainWindow):
 
     def _on_my_pull_requests_ready(self, pull_requests: list) -> None:
         self.statusBar().clearMessage()
+        if self._pr_panel.isVisible():
+            self._pr_panel.set_pull_requests(pull_requests)
+            self._pr_panel.set_refreshing(False)
+
         if self._my_pull_requests_dialog is not None:
             self._my_pull_requests_dialog.set_pull_requests(pull_requests)
             self._my_pull_requests_dialog.set_refreshing(False)
+            return
+
+        if self._pr_panel.isVisible():
             return
 
         dialog = MyPullRequestsDialog(pull_requests, self)
@@ -609,6 +643,8 @@ class MainWindow(QMainWindow):
         self.statusBar().clearMessage()
         if self._my_pull_requests_dialog is not None:
             self._my_pull_requests_dialog.set_refreshing(False)
+        if self._pr_panel.isVisible():
+            self._pr_panel.set_refreshing(False)
         QMessageBox.warning(self, "My Open Pull Requests", f"Failed to fetch: {message}")
 
     def _on_pull_request_refresh_requested(self, repository: str, number: int) -> None:
@@ -627,6 +663,17 @@ class MainWindow(QMainWindow):
         self.statusBar().clearMessage()
         if self._my_pull_requests_dialog is not None:
             self._my_pull_requests_dialog.update_pull_request_fields(
+                repository,
+                number,
+                approved=approved,
+                unresolved_review_thread_count=unresolved_count,
+                last_reviewer=last_reviewer,
+                last_reviewed_at=last_reviewed_at,
+                changed_files=changed_files,
+                checks_state=checks_state,
+            )
+        if self._pr_panel.isVisible():
+            self._pr_panel.update_pull_request_fields(
                 repository,
                 number,
                 approved=approved,

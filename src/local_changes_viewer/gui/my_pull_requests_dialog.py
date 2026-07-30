@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from local_changes_viewer.core.domain.pull_request import PullRequestInfo
@@ -53,17 +54,15 @@ def _checks_text(checks_state: str | None) -> str:
     return _CHECKS_TEXT.get(checks_state, checks_state.title())
 
 
-class MyPullRequestsDialog(QDialog):
-    refresh_requested = Signal()
+class PullRequestsTreeWidget(QWidget):
+    """Tree of open pull requests, grouped by repository, with per-item and per-repo actions."""
+
     pull_request_refresh_requested = Signal(str, int)  # repository, number
     pull_request_info_requested = Signal(str, int)  # repository, number
     pull_request_issues_requested = Signal(str, int)  # repository, number
 
-    def __init__(self, pull_requests: list[PullRequestInfo], parent=None) -> None:
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("My Open Pull Requests")
-        width = int(parent.width() * 0.8) if parent is not None else 800
-        self.resize(width, 500)
 
         self._tree = QTreeWidget()
         self._tree.setColumnCount(len(_COLUMNS))
@@ -87,18 +86,9 @@ class MyPullRequestsDialog(QDialog):
         self._tree.setColumnWidth(0, 275)
         self._tree.setColumnWidth(1, 70)
 
-        self.set_pull_requests(pull_requests)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        self._refresh_button = buttons.addButton(
-            "Refresh", QDialogButtonBox.ButtonRole.ActionRole
-        )
-        self._refresh_button.clicked.connect(self.refresh_requested.emit)
-
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._tree)
-        layout.addWidget(buttons)
 
     def set_pull_requests(self, pull_requests: list[PullRequestInfo]) -> None:
         self._tree.clear()
@@ -153,10 +143,6 @@ class MyPullRequestsDialog(QDialog):
             empty_item = QTreeWidgetItem(["No open pull requests found."])
             empty_item.setFirstColumnSpanned(True)
             self._tree.addTopLevelItem(empty_item)
-
-    def set_refreshing(self, refreshing: bool) -> None:
-        self._refresh_button.setEnabled(not refreshing)
-        self._refresh_button.setText("Refreshing…" if refreshing else "Refresh")
 
     def update_pull_request_fields(
         self,
@@ -245,3 +231,69 @@ class MyPullRequestsDialog(QDialog):
         url = item.data(0, _URL_ROLE)
         if url:
             QDesktopServices.openUrl(QUrl(url))
+
+
+class MyPullRequestsDialog(QDialog):
+    refresh_requested = Signal()
+    pull_request_refresh_requested = Signal(str, int)  # repository, number
+    pull_request_info_requested = Signal(str, int)  # repository, number
+    pull_request_issues_requested = Signal(str, int)  # repository, number
+
+    def __init__(self, pull_requests: list[PullRequestInfo], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("My Open Pull Requests")
+        width = int(parent.width() * 0.8) if parent is not None else 800
+        self.resize(width, 500)
+
+        self._tree_widget = PullRequestsTreeWidget()
+        self._tree_widget.pull_request_refresh_requested.connect(
+            self.pull_request_refresh_requested.emit
+        )
+        self._tree_widget.pull_request_info_requested.connect(
+            self.pull_request_info_requested.emit
+        )
+        self._tree_widget.pull_request_issues_requested.connect(
+            self.pull_request_issues_requested.emit
+        )
+        self._tree_widget.set_pull_requests(pull_requests)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        self._refresh_button = buttons.addButton(
+            "Refresh", QDialogButtonBox.ButtonRole.ActionRole
+        )
+        self._refresh_button.clicked.connect(self.refresh_requested.emit)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._tree_widget)
+        layout.addWidget(buttons)
+
+    def set_pull_requests(self, pull_requests: list[PullRequestInfo]) -> None:
+        self._tree_widget.set_pull_requests(pull_requests)
+
+    def set_refreshing(self, refreshing: bool) -> None:
+        self._refresh_button.setEnabled(not refreshing)
+        self._refresh_button.setText("Refreshing…" if refreshing else "Refresh")
+
+    def update_pull_request_fields(
+        self,
+        repository: str,
+        number: int,
+        *,
+        approved: bool | None,
+        unresolved_review_thread_count: int,
+        last_reviewer: str | None,
+        last_reviewed_at: str | None,
+        changed_files: int,
+        checks_state: str | None,
+    ) -> None:
+        self._tree_widget.update_pull_request_fields(
+            repository,
+            number,
+            approved=approved,
+            unresolved_review_thread_count=unresolved_review_thread_count,
+            last_reviewer=last_reviewer,
+            last_reviewed_at=last_reviewed_at,
+            changed_files=changed_files,
+            checks_state=checks_state,
+        )
