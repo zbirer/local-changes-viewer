@@ -116,6 +116,9 @@ class DiffViewWidget(QWidget):
     def set_sync_scroll(self, enabled: bool) -> None:
         self._side_by_side.set_sync_scroll(enabled)
 
+    def set_pull_requests_button_enabled(self, enabled: bool) -> None:
+        self._pull_requests_button.setEnabled(enabled)
+
     def increase_font_size(self) -> None:
         self._set_font_point_size(self._font_point_size + 1)
 

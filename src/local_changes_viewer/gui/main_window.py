@@ -558,7 +558,9 @@ class MainWindow(QMainWindow):
         return GitHubClient(token, on_log=self._github_log)
 
     def _on_show_my_pull_requests(self) -> None:
-        self._fetch_my_pull_requests()
+        self._diff_view.set_pull_requests_button_enabled(False)
+        if not self._fetch_my_pull_requests():
+            self._diff_view.set_pull_requests_button_enabled(True)
 
     def _on_open_pull_requests_panel(self) -> None:
         self._pr_panel.show()
@@ -571,17 +573,17 @@ class MainWindow(QMainWindow):
             self._pr_panel.set_refreshing(True)
         self._fetch_my_pull_requests()
 
-    def _fetch_my_pull_requests(self) -> None:
+    def _fetch_my_pull_requests(self) -> bool:
         username = self._settings.github_username()
         github_client = self._github_client()
         if username is None or github_client is None:
             QMessageBox.information(
                 self, "My Open Pull Requests", "Connect to GitHub first (Settings menu)."
             )
-            return
+            return False
         if self._workspace is None or not self._workspace.repositories:
             QMessageBox.information(self, "My Open Pull Requests", "No repositories loaded.")
-            return
+            return False
 
         owner_repo_pairs = []
         seen_owner_repo = set()
@@ -611,7 +613,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "My Open Pull Requests", "No GitHub repositories found in the tree."
             )
-            return
+            return False
 
         applog.log("My Open Pull Requests", level=applog.LogLevel.INFO)
         self.statusBar().showMessage("Fetching your open pull requests…")
@@ -620,6 +622,7 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(self._on_my_pull_requests_error)
         worker.signals.progress.connect(self._on_scan_progress)
         self._thread_pool.start(worker)
+        return True
 
     def _on_my_pull_requests_ready(self, pull_requests: list) -> None:
         self.statusBar().clearMessage()
@@ -633,6 +636,7 @@ class MainWindow(QMainWindow):
             return
 
         if self._pr_panel.isVisible():
+            self._diff_view.set_pull_requests_button_enabled(True)
             return
 
         dialog = MyPullRequestsDialog(pull_requests, self)
@@ -643,6 +647,7 @@ class MainWindow(QMainWindow):
         self._my_pull_requests_dialog = dialog
         dialog.exec()
         self._my_pull_requests_dialog = None
+        self._diff_view.set_pull_requests_button_enabled(True)
 
     def _on_my_pull_requests_error(self, message: str) -> None:
         applog.log(f"Failed to fetch open pull requests: {message}", level=applog.LogLevel.ERROR)
@@ -651,6 +656,7 @@ class MainWindow(QMainWindow):
             self._my_pull_requests_dialog.set_refreshing(False)
         if self._pr_panel.isVisible():
             self._pr_panel.set_refreshing(False)
+        self._diff_view.set_pull_requests_button_enabled(True)
         QMessageBox.warning(self, "My Open Pull Requests", f"Failed to fetch: {message}")
 
     def _on_pull_request_refresh_requested(self, repository: str, number: int) -> None:
