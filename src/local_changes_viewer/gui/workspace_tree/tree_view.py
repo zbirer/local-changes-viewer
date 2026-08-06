@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QModelIndex, QSortFilterProxyModel, Qt, Signal
-from PySide6.QtWidgets import QToolTip, QTreeView
+from PySide6.QtWidgets import QHBoxLayout, QToolButton, QToolTip, QTreeView, QWidget
 
 from local_changes_viewer.gui import applog
 from local_changes_viewer.gui.settings import AppSettings
@@ -77,6 +77,64 @@ class RepoTreeView(QTreeView):
         self.expanded.connect(self._on_expanded)
         self.selectionModel().currentChanged.connect(self._on_current_changed)
 
+        self._row_actions_index = QModelIndex()
+        self._row_actions_widget = QWidget(self.viewport())
+        row_actions_layout = QHBoxLayout(self._row_actions_widget)
+        row_actions_layout.setContentsMargins(0, 0, 0, 0)
+        row_actions_layout.setSpacing(2)
+        self._expand_button = QToolButton(self._row_actions_widget)
+        self._expand_button.setText("+")
+        self._expand_button.setToolTip("Expand All")
+        self._expand_button.setAutoRaise(True)
+        self._expand_button.setFixedSize(18, 18)
+        self._collapse_button = QToolButton(self._row_actions_widget)
+        self._collapse_button.setText("−")
+        self._collapse_button.setToolTip("Collapse All")
+        self._collapse_button.setAutoRaise(True)
+        self._collapse_button.setFixedSize(18, 18)
+        row_actions_layout.addWidget(self._expand_button)
+        row_actions_layout.addWidget(self._collapse_button)
+        self._row_actions_widget.hide()
+        self._expand_button.clicked.connect(self._on_row_expand_clicked)
+        self._collapse_button.clicked.connect(self._on_row_collapse_clicked)
+        self.verticalScrollBar().valueChanged.connect(self._on_row_actions_scroll)
+        self.horizontalScrollBar().valueChanged.connect(self._on_row_actions_scroll)
+
+    def _on_row_expand_clicked(self) -> None:
+        if self._row_actions_index.isValid():
+            self.expand_index_recursive(self._row_actions_index)
+
+    def _on_row_collapse_clicked(self) -> None:
+        if self._row_actions_index.isValid():
+            self.collapse_index_recursive(self._row_actions_index)
+
+    def _on_row_actions_scroll(self, _value: int) -> None:
+        self._update_row_actions_widget(self._row_actions_index)
+
+    def _update_row_actions_widget(self, index: QModelIndex) -> None:
+        is_repo_root = (
+            index.isValid()
+            and index.data(NODE_KEY_ROLE) == index.data(FOLDER_PATH_ROLE)
+            and index.data(FOLDER_PATH_ROLE) is not None
+        )
+        if not is_repo_root:
+            self._row_actions_widget.hide()
+            self._row_actions_index = QModelIndex()
+            return
+
+        self._row_actions_index = index
+        rect = self.visualRect(index)
+        if rect.isEmpty() or not rect.intersects(self.viewport().rect()):
+            self._row_actions_widget.hide()
+            return
+
+        widget_size = self._row_actions_widget.sizeHint()
+        x = rect.right() - widget_size.width() - 4
+        y = rect.top() + (rect.height() - widget_size.height()) // 2
+        self._row_actions_widget.move(x, y)
+        self._row_actions_widget.show()
+        self._row_actions_widget.raise_()
+
     def viewportEvent(self, event) -> bool:
         if event.type() == QEvent.Type.ToolTip:
             index = self.indexAt(event.pos())
@@ -97,16 +155,19 @@ class RepoTreeView(QTreeView):
         if change is not None and repo_path is not None:
             self.file_selected.emit(repo_path, change)
             self.scope_changed.emit(Path(repo_path), change.path.parent)
+            self._update_row_actions_widget(current)
             return
 
         key = current.data(NODE_KEY_ROLE)
         if key is None:
+            self._update_row_actions_widget(current)
             return
         if "::" in key:
             repo_str, prefix_str = key.split("::", maxsplit=1)
             self.scope_changed.emit(Path(repo_str), Path(prefix_str))
         else:
             self.scope_changed.emit(Path(key), None)
+        self._update_row_actions_widget(current)
 
     def set_workspace(self, workspace) -> None:
         self._programmatic_change = True
@@ -294,17 +355,21 @@ class RepoTreeView(QTreeView):
     def _on_collapsed(self, index: QModelIndex) -> None:
         key = index.data(NODE_KEY_ROLE)
         if key is None or self._programmatic_change:
+            self._update_row_actions_widget(self._row_actions_index)
             return
         applog.log(f"Collapsed folder: {key}", level=applog.LogLevel.INFO)
         keys = self._settings.collapsed_node_keys()
         keys.add(key)
         self._settings.set_collapsed_node_keys(keys)
+        self._update_row_actions_widget(self._row_actions_index)
 
     def _on_expanded(self, index: QModelIndex) -> None:
         key = index.data(NODE_KEY_ROLE)
         if key is None or self._programmatic_change:
+            self._update_row_actions_widget(self._row_actions_index)
             return
         applog.log(f"Expanded folder: {key}", level=applog.LogLevel.INFO)
         keys = self._settings.collapsed_node_keys()
         keys.discard(key)
         self._settings.set_collapsed_node_keys(keys)
+        self._update_row_actions_widget(self._row_actions_index)
