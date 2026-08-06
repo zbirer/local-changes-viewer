@@ -54,9 +54,14 @@ class ProfileDialog(QDialog):
         self._repo_list = QListWidget()
         self._repo_list.itemChanged.connect(self._on_repo_item_changed)
 
+        add_repo_button = QPushButton("Add Repo…")
+        add_repo_button.setToolTip("Add a repository by name to the selected profile")
+        add_repo_button.clicked.connect(self._on_add_repo)
+
         right_layout = QVBoxLayout()
         right_layout.addWidget(QLabel("Repositories in selected profile:"))
         right_layout.addWidget(self._repo_list)
+        right_layout.addWidget(add_repo_button)
 
         body_layout = QHBoxLayout()
         body_layout.addLayout(left_layout, 1)
@@ -121,6 +126,21 @@ class ProfileDialog(QDialog):
             profile.repo_names.append(repo_name)
         elif not checked and repo_name in profile.repo_names:
             profile.repo_names.remove(repo_name)
+        self.profiles_changed.emit(list(self._profiles))
+
+    def _on_add_repo(self) -> None:
+        profile = self._current_profile()
+        if profile is None:
+            return
+        name, ok = QInputDialog.getText(self, "Add Repo", "Repository name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name not in self._available_repo_names:
+            self._available_repo_names = sorted(set(self._available_repo_names) | {name})
+        if name not in profile.repo_names:
+            profile.repo_names.append(name)
+        self._refresh_repo_list()
         self.profiles_changed.emit(list(self._profiles))
 
     def _on_new_profile(self) -> None:
