@@ -71,7 +71,6 @@ def test_find_pull_request_returns_info_when_found():
                             "state": "OPEN",
                             "url": "https://github.com/owner/repo/pull/42",
                             "comments": {"totalCount": 3},
-                            "reviewComments": {"totalCount": 2},
                         }
                     ]
                 }
@@ -88,7 +87,7 @@ def test_find_pull_request_returns_info_when_found():
     assert result.state == "open"
     assert result.url == "https://github.com/owner/repo/pull/42"
     assert result.comment_count == 3
-    assert result.review_comment_count == 2
+    assert result.review_comment_count == 0
     assert result.repository == "owner/repo"
 
 
@@ -104,7 +103,6 @@ def test_find_pull_request_lowercases_merged_state():
                             "state": "MERGED",
                             "url": "https://github.com/owner/repo/pull/42",
                             "comments": {"totalCount": 0},
-                            "reviewComments": {"totalCount": 0},
                         }
                     ]
                 }
@@ -125,7 +123,7 @@ def test_find_pull_request_raises_github_error_on_graphql_errors():
             GitHubClient("token").find_pull_request("owner", "repo", "feature")
 
 
-def test_find_pull_request_maps_comment_counts_without_swapping():
+def test_find_pull_request_hardcodes_review_comment_count_to_zero():
     payload = {
         "data": {
             "repository": {
@@ -137,7 +135,6 @@ def test_find_pull_request_maps_comment_counts_without_swapping():
                             "state": "OPEN",
                             "url": "https://github.com/owner/repo/pull/42",
                             "comments": {"totalCount": 5},
-                            "reviewComments": {"totalCount": 9},
                         }
                     ]
                 }
@@ -149,7 +146,7 @@ def test_find_pull_request_maps_comment_counts_without_swapping():
         result = GitHubClient("token").find_pull_request("owner", "repo", "feature")
 
     assert result.comment_count == 5
-    assert result.review_comment_count == 9
+    assert result.review_comment_count == 0
 
 
 def test_get_authenticated_login_raises_github_error_on_http_error():

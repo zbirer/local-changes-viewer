@@ -56,7 +56,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="local-changes-viewer.app",
-    icon=None,
+    icon=str(project_root / "packaging" / "app_icon.icns"),
     bundle_identifier="us.canopycare.local-changes-viewer",
     info_plist={
         "CFBundleName": "GitChanges",

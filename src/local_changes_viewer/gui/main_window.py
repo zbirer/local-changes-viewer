@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, Qt, QThreadPool, QTimer, QUrl
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
-from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterRule
+from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterMode, FolderFilterRule
 from local_changes_viewer.core.domain.profile import Profile
 from local_changes_viewer.core.domain.pull_request import PullRequestInfo
 from local_changes_viewer.core.domain.repository import Repository
@@ -59,9 +60,16 @@ from local_changes_viewer.gui.workers.my_pull_requests_worker import MyPullReque
 from local_changes_viewer.gui.workers.pull_request_details_worker import PullRequestDetailsWorker
 from local_changes_viewer.gui.workers.pull_request_refresh_worker import PullRequestRefreshWorker
 from local_changes_viewer.gui.workers.pull_request_threads_worker import PullRequestThreadsWorker
+from local_changes_viewer.gui.workers.repo_refresh_worker import RepoRefreshWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
+from local_changes_viewer.gui.workers.watch_paths_worker import WatchPathsWorker
+from local_changes_viewer.gui.workspace_watcher import WorkspaceFileWatcher
 from local_changes_viewer.gui.workspace_tree.aggregate_list import AggregateChangeList
-from local_changes_viewer.gui.workspace_tree.tree_model import FILE_CHANGE_ROLE, FOLDER_PATH_ROLE
+from local_changes_viewer.gui.workspace_tree.tree_model import (
+    FILE_CHANGE_ROLE,
+    FOLDER_PATH_ROLE,
+    NODE_KEY_ROLE,
+)
 from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
 
 
@@ -81,13 +89,17 @@ class MainWindow(QMainWindow):
         self._selected_change: FileChange | None = None
         self._selected_repo_path: Path | None = None
         self._thread_pool = QThreadPool.globalInstance()
+        self._shutdown_requested = threading.Event()
         self._scan_refresh_timer = QTimer(self)
         self._scan_refresh_timer.setInterval(150)
         self._scan_refresh_timer.timeout.connect(self._refresh_display)
         self._incremental_scan = False
+        self._scan_in_progress = False
         self._auto_refresh_minutes = 0
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
+        self._file_watcher = WorkspaceFileWatcher(self)
+        self._file_watcher.changed.connect(self._on_file_watcher_changed)
         self._my_pull_requests_dialog: MyPullRequestsDialog | None = None
         self._pr_panel = PullRequestsPanel()
         self._pr_panel.hide()
@@ -163,6 +175,16 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
+        expand_current_repo_action = QAction("Expand Current Repository", self)
+        expand_current_repo_action.triggered.connect(self._tree_view.expand_current_repo)
+        view_menu.addAction(expand_current_repo_action)
+
+        collapse_current_repo_action = QAction("Collapse Current Repository", self)
+        collapse_current_repo_action.triggered.connect(self._tree_view.collapse_current_repo)
+        view_menu.addAction(collapse_current_repo_action)
+
+        view_menu.addSeparator()
+
         open_pr_panel_view_action = QAction("Open PRs Panel", self)
         open_pr_panel_view_action.triggered.connect(self._on_open_pull_requests_panel)
         view_menu.addAction(open_pr_panel_view_action)
@@ -191,6 +213,14 @@ class MainWindow(QMainWindow):
         self._include_ignored_action = QAction("Show ignored files", self, checkable=True)
         self._include_ignored_action.toggled.connect(self._on_include_ignored_toggled)
         settings_menu.addAction(self._include_ignored_action)
+
+        self._include_unpushed_commits_action = QAction(
+            "Show committed but not pushed files", self, checkable=True
+        )
+        self._include_unpushed_commits_action.toggled.connect(
+            self._on_include_unpushed_commits_toggled
+        )
+        settings_menu.addAction(self._include_unpushed_commits_action)
 
         self._ignore_whitespace_action = QAction("Ignore whitespace", self, checkable=True)
         self._ignore_whitespace_action.toggled.connect(self._on_ignore_whitespace_toggled)
@@ -221,6 +251,12 @@ class MainWindow(QMainWindow):
         auto_refresh_action = QAction("Auto Refresh…", self)
         auto_refresh_action.triggered.connect(self._on_configure_auto_refresh)
         settings_menu.addAction(auto_refresh_action)
+
+        self._use_file_watcher_action = QAction(
+            "Watch for File Changes", self, checkable=True
+        )
+        self._use_file_watcher_action.toggled.connect(self._on_use_file_watcher_toggled)
+        settings_menu.addAction(self._use_file_watcher_action)
 
         log_level_action = QAction("Log Level…", self)
         log_level_action.triggered.connect(self._on_configure_log_level)
@@ -310,6 +346,9 @@ class MainWindow(QMainWindow):
         toggle_time_filter_action.triggered.connect(self._on_toggle_time_filter)
         actions_menu.addAction(toggle_time_filter_action)
 
+        self._scan_status_label = QLabel("")
+        self.statusBar().addPermanentWidget(self._scan_status_label)
+
         self._folder_status_label = QLabel("No folder open")
         self.statusBar().addPermanentWidget(self._folder_status_label)
 
@@ -343,12 +382,16 @@ class MainWindow(QMainWindow):
         self._diff_view.set_side_by_side(self._settings.diff_view_mode() == "side_by_side")
 
         self._ignore_whitespace_action.setChecked(self._settings.ignore_whitespace())
+        self._include_unpushed_commits_action.setChecked(
+            self._settings.include_unpushed_commits()
+        )
         self._ignore_md_action.setChecked(self._settings.ignore_md_files())
         self._hide_empty_repos_action.setChecked(self._settings.hide_repos_without_changes())
         self._sync_scroll_action.setChecked(self._settings.sync_side_by_side_scroll())
         self._diff_view.set_sync_scroll(self._sync_scroll_action.isChecked())
         self._always_reload_diff_action.setChecked(self._settings.always_reload_diff())
         self._apply_auto_refresh_interval(self._settings.auto_refresh_minutes())
+        self._use_file_watcher_action.setChecked(self._settings.use_file_watcher())
         self._disconnect_github_action.setEnabled(self._settings.github_username() is not None)
 
     def closeEvent(self, event: QCloseEvent) -> None:
@@ -363,13 +406,20 @@ class MainWindow(QMainWindow):
                 return
         self._scan_refresh_timer.stop()
         self._auto_refresh_timer.stop()
+        self._file_watcher.stop()
+        self._shutdown_requested.set()
         self._thread_pool.clear()
-        self._thread_pool.waitForDone()
+        # Repo scans already mid-flight (e.g. a blocking GitHub API call) can't be
+        # interrupted, so bound the wait rather than hang the app on quit.
+        self._thread_pool.waitForDone(3000)
         self._settings.set_window_geometry(self.saveGeometry())
         self._settings.set_splitter_sizes(self._splitter.sizes())
         mode = "side_by_side" if self._diff_view.is_side_by_side() else "unified"
         self._settings.set_diff_view_mode(mode)
         self._settings.set_ignore_whitespace(self._ignore_whitespace_action.isChecked())
+        self._settings.set_include_unpushed_commits(
+            self._include_unpushed_commits_action.isChecked()
+        )
         self._settings.set_ignore_md_files(self._ignore_md_action.isChecked())
         self._settings.set_hide_repos_without_changes(self._hide_empty_repos_action.isChecked())
         self._settings.set_sync_side_by_side_scroll(self._sync_scroll_action.isChecked())
@@ -384,6 +434,11 @@ class MainWindow(QMainWindow):
 
     def _on_include_ignored_toggled(self, checked: bool) -> None:
         applog.log(f"Show ignored files: {checked}", level=applog.LogLevel.INFO)
+        if self._root_folder:
+            self._start_scan(self._root_folder)
+
+    def _on_include_unpushed_commits_toggled(self, checked: bool) -> None:
+        applog.log(f"Show committed but not pushed files: {checked}", level=applog.LogLevel.INFO)
         if self._root_folder:
             self._start_scan(self._root_folder)
 
@@ -510,7 +565,26 @@ class MainWindow(QMainWindow):
         self._status_extra_label.setText("  |  ".join(parts))
 
     def _on_auto_refresh_timeout(self) -> None:
-        if self._root_folder:
+        if self._root_folder and not self._scan_in_progress:
+            self._start_scan(self._root_folder, auto_refresh=True)
+
+    def _on_use_file_watcher_toggled(self, checked: bool) -> None:
+        applog.log(f"Watch for file changes: {checked}", level=applog.LogLevel.INFO)
+        self._settings.set_use_file_watcher(checked)
+        if checked:
+            if self._workspace is not None:
+                self._refresh_watch_paths([r.path for r in self._workspace.repositories])
+        else:
+            self._file_watcher.stop()
+
+    def _refresh_watch_paths(self, repo_paths: list[Path]) -> None:
+        worker = WatchPathsWorker(repo_paths)
+        worker.signals.finished.connect(self._file_watcher.set_watch_paths)
+        self._thread_pool.start(worker)
+
+    def _on_file_watcher_changed(self) -> None:
+        if self._root_folder and not self._scan_in_progress:
+            applog.log("File change detected, refreshing", level=applog.LogLevel.DEBUG)
             self._start_scan(self._root_folder, auto_refresh=True)
 
     def _on_configure_log_level(self) -> None:
@@ -921,14 +995,32 @@ class MainWindow(QMainWindow):
             menu.addAction("Copy Path", self._on_copy_file_path)
             menu.addAction("Copy Name", self._on_copy_file_name)
             menu.addAction("Refresh Diff", self._on_refresh_diff)
+            menu.addSeparator()
+            menu.addAction("Filter Out This File", self._on_filter_out_file)
             menu.exec(self._tree_view.viewport().mapToGlobal(pos))
             return
 
         folder_path = index.data(FOLDER_PATH_ROLE)
         if folder_path is not None:
+            is_repo_root = index.data(NODE_KEY_ROLE) == folder_path
             menu = QMenu(self._tree_view)
             menu.addAction("Copy Name", lambda: self._on_copy_folder_name(folder_path))
             menu.addAction("Copy Path", lambda: self._on_copy_folder_path(folder_path))
+            menu.addAction(
+                "Filter Out This Folder", lambda: self._on_filter_out_folder(folder_path)
+            )
+            menu.addSeparator()
+            menu.addAction(
+                "Expand All", lambda: self._tree_view.expand_index_recursive(index)
+            )
+            menu.addAction(
+                "Collapse All", lambda: self._tree_view.collapse_index_recursive(index)
+            )
+            if is_repo_root:
+                menu.addSeparator()
+                menu.addAction(
+                    "Refresh Repo", lambda: self._on_refresh_repo(Path(folder_path))
+                )
             if not index.parent().isValid():
                 repo_name = Path(folder_path).name
                 menu.addSeparator()
@@ -959,6 +1051,74 @@ class MainWindow(QMainWindow):
     def _on_copy_folder_path(self, folder_path: str) -> None:
         QGuiApplication.clipboard().setText(folder_path)
         self.statusBar().showMessage("Folder path copied to clipboard", 3000)
+
+    def _on_filter_out_file(self) -> None:
+        if self._selected_change is None:
+            self.statusBar().showMessage("No file selected", 3000)
+            return
+        relative_path = self._selected_change.path.as_posix()
+        self._add_folder_filter_rule(
+            FolderFilterRule(text=relative_path, mode=FolderFilterMode.FILE_PATH),
+            f"Filtered out {relative_path}",
+        )
+
+    def _on_filter_out_folder(self, folder_path: str) -> None:
+        folder_name = Path(folder_path).name
+        self._add_folder_filter_rule(
+            FolderFilterRule(text=folder_name, mode=FolderFilterMode.EQUALS),
+            f"Filtered out folder '{folder_name}'",
+        )
+
+    def _add_folder_filter_rule(self, rule: FolderFilterRule, status_message: str) -> None:
+        if rule in self._folder_filter_rules:
+            self.statusBar().showMessage("Filter rule already exists", 3000)
+            return
+        self._on_folder_filter_rules_changed([*self._folder_filter_rules, rule])
+        self.statusBar().showMessage(status_message, 3000)
+
+    def _on_refresh_repo(self, repo_path: Path) -> None:
+        existing_repo = next(
+            (r for r in (self._workspace.repositories if self._workspace else []) if r.path == repo_path),
+            None,
+        )
+        previous_pull_request = None
+        logical_parent_path = None
+        if existing_repo is not None:
+            logical_parent_path = existing_repo.logical_parent_path
+            if existing_repo.pull_request is not None:
+                previous_pull_request = (
+                    existing_repo.pull_request,
+                    existing_repo.branch_status.branch_name,
+                )
+        self.statusBar().showMessage(f"Refreshing {repo_path.name}…")
+        worker = RepoRefreshWorker(
+            repo_path,
+            include_ignored=self._include_ignored_action.isChecked(),
+            github_client=self._github_client(),
+            previous_pull_request=previous_pull_request,
+            logical_parent_path=logical_parent_path,
+            include_unpushed_commits=self._include_unpushed_commits_action.isChecked(),
+        )
+        worker.signals.repo_ready.connect(
+            lambda repo: self._on_repo_refreshed(repo_path, repo)
+        )
+        worker.signals.error.connect(self._on_scan_error)
+        worker.signals.log_message.connect(self._on_scan_log_message)
+        self._thread_pool.start(worker)
+
+    def _on_repo_refreshed(self, repo_path: Path, repo: Repository | None) -> None:
+        if self._workspace is None:
+            return
+        if repo is None:
+            self.statusBar().showMessage(f"Failed to refresh {repo_path.name}", 5000)
+            return
+        self._workspace.repositories = [
+            repo if r.path == repo_path else r for r in self._workspace.repositories
+        ]
+        self._refresh_display(preserve_tree=True)
+        self._tree_view.highlight_repo(repo.path)
+        QTimer.singleShot(1500, lambda: self._tree_view.unhighlight_repo(repo.path))
+        self.statusBar().showMessage(f"Refreshed {repo_path.name}", 3000)
 
     def _on_refresh_diff(self) -> None:
         if self._selected_change is None or self._selected_repo_path is None:
@@ -993,6 +1153,8 @@ class MainWindow(QMainWindow):
             level=applog.LogLevel.INFO,
         )
         self._incremental_scan = auto_refresh or not rebuild
+        self._scan_in_progress = True
+        self._scan_status_label.setText("Scanning…")
         if not self._incremental_scan:
             self.statusBar().showMessage("Starting scan…")
             self._workspace = Workspace(root_path=Path(folder), repositories=[])
@@ -1005,11 +1167,15 @@ class MainWindow(QMainWindow):
                 for repo in self._workspace.repositories
                 if repo.pull_request is not None
             }
+        active_profile = self._active_profile()
         worker = ScanWorker(
             Path(folder),
             include_ignored=self._include_ignored_action.isChecked(),
             github_client=self._github_client(),
             previous_pull_requests=previous_pull_requests,
+            is_cancelled=self._shutdown_requested.is_set,
+            profile_repo_names=set(active_profile.repo_names) if active_profile else None,
+            include_unpushed_commits=self._include_unpushed_commits_action.isChecked(),
         )
         worker.signals.progress.connect(self._on_scan_progress)
         worker.signals.repo_ready.connect(self._on_repo_ready)
@@ -1021,6 +1187,7 @@ class MainWindow(QMainWindow):
     def _on_scan_progress(self, message: str) -> None:
         applog.log(message, level=applog.LogLevel.DEBUG)
         self.statusBar().showMessage(message)
+        self._scan_status_label.setText(f"Scanning: {message}")
 
     def _on_scan_log_message(self, message: str) -> None:
         applog.log(message, level=applog.LogLevel.WARNING)
@@ -1041,10 +1208,14 @@ class MainWindow(QMainWindow):
 
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._scan_refresh_timer.stop()
+        self._scan_in_progress = False
+        self._scan_status_label.setText("")
         self._workspace = workspace
         self._refresh_display(preserve_tree=self._incremental_scan)
         self._incremental_scan = False
         self._tree_view.clear_repo_highlights()
+        if self._use_file_watcher_action.isChecked():
+            self._refresh_watch_paths([r.path for r in workspace.repositories])
         repo_count = len(workspace.repositories)
         change_count = sum(len(r.changes) for r in workspace.repositories)
         message = f"Done — {repo_count} repositories, {change_count} changed files"
@@ -1086,5 +1257,7 @@ class MainWindow(QMainWindow):
 
     def _on_scan_error(self, message: str) -> None:
         self._scan_refresh_timer.stop()
+        self._scan_in_progress = False
+        self._scan_status_label.setText("")
         applog.log(f"Scan failed: {message}", level=applog.LogLevel.ERROR)
         self.statusBar().showMessage(f"Scan failed: {message}", 5000)

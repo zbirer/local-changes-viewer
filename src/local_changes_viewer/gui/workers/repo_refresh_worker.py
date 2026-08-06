@@ -1,4 +1,3 @@
-from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal
@@ -10,51 +9,44 @@ from local_changes_viewer.core.services.workspace_scanner_service import (
 )
 
 
-class ScanWorkerSignals(QObject):
-    workspace_ready = Signal(object)  # Workspace
-    repo_ready = Signal(object)  # Repository
+class RepoRefreshWorkerSignals(QObject):
+    repo_ready = Signal(object)  # Repository | None
     error = Signal(str)
-    progress = Signal(str)
     log_message = Signal(str)
 
 
-class ScanWorker(QRunnable):
+class RepoRefreshWorker(QRunnable):
     def __init__(
         self,
-        root: Path,
+        repo_path: Path,
         include_ignored: bool = False,
         github_client: GitHubClient | None = None,
-        previous_pull_requests: dict[Path, tuple[PullRequestInfo, str]] | None = None,
-        is_cancelled: Callable[[], bool] | None = None,
-        profile_repo_names: set[str] | None = None,
+        previous_pull_request: tuple[PullRequestInfo, str] | None = None,
+        logical_parent_path: Path | None = None,
         include_unpushed_commits: bool = False,
     ) -> None:
         super().__init__()
-        self._root = root
+        self._repo_path = repo_path
         self._include_ignored = include_ignored
         self._github_client = github_client
-        self._previous_pull_requests = previous_pull_requests
-        self._is_cancelled = is_cancelled
-        self._profile_repo_names = profile_repo_names
+        self._previous_pull_request = previous_pull_request
+        self._logical_parent_path = logical_parent_path
         self._include_unpushed_commits = include_unpushed_commits
         self._service = WorkspaceScannerService()
-        self.signals = ScanWorkerSignals()
+        self.signals = RepoRefreshWorkerSignals()
 
     def run(self) -> None:
         try:
-            workspace = self._service.scan(
-                self._root,
+            repo = self._service.scan_repo(
+                self._repo_path,
                 include_ignored=self._include_ignored,
-                on_progress=self.signals.progress.emit,
-                on_repo_ready=self.signals.repo_ready.emit,
                 github_client=self._github_client,
                 on_log=self.signals.log_message.emit,
-                previous_pull_requests=self._previous_pull_requests,
-                is_cancelled=self._is_cancelled,
-                profile_repo_names=self._profile_repo_names,
+                previous_pull_request=self._previous_pull_request,
+                logical_parent_path=self._logical_parent_path,
                 include_unpushed_commits=self._include_unpushed_commits,
             )
         except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
             self.signals.error.emit(str(exc))
         else:
-            self.signals.workspace_ready.emit(workspace)
+            self.signals.repo_ready.emit(repo)

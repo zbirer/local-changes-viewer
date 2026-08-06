@@ -16,6 +16,8 @@ _CHANGE_COLORS = {
     ChangeType.IGNORED: QColor("#9CA3AF"),
 }
 
+_UNPUSHED_COMMIT_COLOR = QColor("#F59E0B")
+
 NODE_KEY_ROLE = Qt.ItemDataRole.UserRole + 1
 FILE_CHANGE_ROLE = Qt.ItemDataRole.UserRole + 2
 REPO_PATH_ROLE = Qt.ItemDataRole.UserRole + 3
@@ -224,13 +226,21 @@ class RepoTreeModel(QStandardItemModel):
         return roots, children_by_parent
 
     def set_repo_highlighted(self, repo_path: Path, highlighted: bool) -> None:
-        root = self.invisibleRootItem()
         key = str(repo_path)
-        for row in range(root.rowCount()):
-            item = root.child(row)
+        item = self._find_item_by_key(self.invisibleRootItem(), key)
+        if item is not None:
+            self._set_item_highlighted(item, highlighted)
+
+    @staticmethod
+    def _find_item_by_key(parent_item: QStandardItem, key: str) -> QStandardItem | None:
+        for row in range(parent_item.rowCount()):
+            item = parent_item.child(row)
             if item.data(NODE_KEY_ROLE) == key:
-                self._set_item_highlighted(item, highlighted)
-                return
+                return item
+            found = RepoTreeModel._find_item_by_key(item, key)
+            if found is not None:
+                return found
+        return None
 
     def clear_all_highlights(self) -> None:
         root = self.invisibleRootItem()
@@ -273,7 +283,13 @@ class RepoTreeModel(QStandardItemModel):
     @staticmethod
     def _change_signature(repo) -> tuple:
         return tuple(
-            (str(c.path), c.change_type, c.is_directory, str(c.old_path) if c.old_path else None)
+            (
+                str(c.path),
+                c.change_type,
+                c.is_directory,
+                str(c.old_path) if c.old_path else None,
+                c.is_unpushed_commit,
+            )
             for c in repo.changes
         )
 
@@ -351,9 +367,18 @@ class RepoTreeModel(QStandardItemModel):
             file_name = parts[-1] if parts else str(change.path)
             if change.is_directory:
                 file_name += "/"
+            if change.is_unpushed_commit:
+                file_name += "  (unpushed commit)"
             file_item = QStandardItem(file_name)
             file_item.setEditable(False)
-            file_item.setForeground(QBrush(_CHANGE_COLORS[change.change_type]))
+            color = (
+                _UNPUSHED_COMMIT_COLOR
+                if change.is_unpushed_commit
+                else _CHANGE_COLORS[change.change_type]
+            )
+            file_item.setForeground(QBrush(color))
+            if change.is_unpushed_commit and change.commit_message:
+                file_item.setToolTip(change.commit_message)
             file_item.setData(change, FILE_CHANGE_ROLE)
             file_item.setData(str(repo.path), REPO_PATH_ROLE)
             parent_item.appendRow(file_item)

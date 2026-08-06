@@ -21,3 +21,5 @@ class FileChange:
     old_path: Path | None = None
     diff: DiffResult | None = None
     is_directory: bool = False
+    is_unpushed_commit: bool = False
+    commit_message: str | None = None

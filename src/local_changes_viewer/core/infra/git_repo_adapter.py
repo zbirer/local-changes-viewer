@@ -3,6 +3,7 @@ from pathlib import Path
 
 import git
 
+from local_changes_viewer.core.domain.commit_log_entry import CommitLogEntry
 from local_changes_viewer.core.domain.diff import DiffHunk, DiffLine, DiffLineKind, DiffResult
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.repository import BranchStatus
@@ -25,7 +26,7 @@ class GitRepoAdapter:
         self._repo_path = repo_path
         self._repo = git.Repo(repo_path)
 
-    def list_changes(self) -> list[FileChange]:
+    def list_changes(self, include_unpushed_commits: bool = False) -> list[FileChange]:
         output = self._repo.git.status("--porcelain=v1", "--ignored")
         changes: list[FileChange] = []
         for line in output.splitlines():
@@ -47,7 +48,64 @@ class GitRepoAdapter:
                     is_directory=rest.endswith("/"),
                 )
             )
+
+        if include_unpushed_commits:
+            existing_paths = {c.path for c in changes}
+            changes.extend(
+                change
+                for change in self._list_unpushed_commit_changes()
+                if change.path not in existing_paths
+            )
+
         return changes
+
+    def _list_unpushed_commit_changes(self) -> list[FileChange]:
+        upstream = self._get_upstream_ref()
+        if upstream is None:
+            return []
+        try:
+            output = self._repo.git.diff("--no-color", "--name-status", "-M", f"{upstream}...HEAD")
+        except git.GitCommandError:
+            return []
+
+        changes: list[FileChange] = []
+        for line in output.splitlines():
+            if not line:
+                continue
+            parts = line.split("\t")
+            code = parts[0]
+            if code.startswith("R"):
+                old_path, path = Path(parts[1]), Path(parts[2])
+                change_type = ChangeType.RENAMED
+            else:
+                path = Path(parts[1])
+                old_path = None
+                change_type = {"A": ChangeType.ADDED, "D": ChangeType.DELETED}.get(
+                    code[0], ChangeType.MODIFIED
+                )
+            changes.append(
+                FileChange(
+                    path=path,
+                    change_type=change_type,
+                    old_path=old_path,
+                    is_unpushed_commit=True,
+                    commit_message=self._get_commit_messages(upstream, path),
+                )
+            )
+        return changes
+
+    def _get_commit_messages(self, upstream: str, path: Path) -> str | None:
+        try:
+            output = self._repo.git.log("--format=%s", f"{upstream}..HEAD", "--", str(path))
+        except git.GitCommandError:
+            return None
+        return output.strip() or None
+
+    def _get_upstream_ref(self) -> str | None:
+        try:
+            return self._repo.git.rev_parse("--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+        except git.GitCommandError:
+            return None
 
     def get_branch_status(self) -> BranchStatus:
         output = self._repo.git.status("--porcelain=v1", "--branch")
@@ -77,6 +135,53 @@ class GitRepoAdapter:
             behind=behind,
             parent_branch=self._find_local_parent_branch(branch_name),
             default_branch=self._find_default_branch(),
+        )
+
+    def get_recent_commits(self, limit: int = 5) -> list[CommitLogEntry]:
+        commits = list(self._repo.iter_commits(max_count=limit))
+        return [
+            CommitLogEntry(
+                hexsha=commit.hexsha,
+                short_hexsha=commit.hexsha[:8],
+                message=commit.message.strip().splitlines()[0] if commit.message.strip() else "",
+                committed_datetime=commit.committed_datetime,
+            )
+            for commit in commits
+        ]
+
+    def get_commit_files(self, commit_hexsha: str) -> list[FileChange]:
+        output = self._repo.git.show(
+            "--no-color", "--name-status", "--pretty=format:", "-M", commit_hexsha
+        )
+        changes: list[FileChange] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            code = parts[0]
+            if code.startswith("R"):
+                old_path, path = Path(parts[1]), Path(parts[2])
+                change_type = ChangeType.RENAMED
+            else:
+                path = Path(parts[1])
+                old_path = None
+                change_type = {"A": ChangeType.ADDED, "D": ChangeType.DELETED}.get(
+                    code[0], ChangeType.MODIFIED
+                )
+            changes.append(FileChange(path=path, change_type=change_type, old_path=old_path))
+        return changes
+
+    def get_commit_file_diff(
+        self, commit_hexsha: str, file_path: Path, old_path: Path | None = None
+    ) -> DiffResult:
+        args = ["--no-color", "-M", "--unified=100000", commit_hexsha, "--"]
+        if old_path:
+            args.append(str(old_path))
+        args.append(str(file_path))
+        raw = self._repo.git.show(*args)
+        return self._parse_unified_diff(
+            raw, old_ref=f"{commit_hexsha[:8]}~1", new_ref=commit_hexsha[:8]
         )
 
     def get_remote_url(self, name: str = "origin") -> str | None:
@@ -144,14 +249,22 @@ class GitRepoAdapter:
         args = ["--no-color", "-M", "--unified=100000"]
         if ignore_whitespace:
             args.append("--ignore-all-space")
-        args.append("HEAD")
+
+        if change.is_unpushed_commit:
+            upstream = self._get_upstream_ref() or "HEAD"
+            args.append(f"{upstream}...HEAD")
+            old_ref, new_ref = upstream, "HEAD"
+        else:
+            args.append("HEAD")
+            old_ref, new_ref = "HEAD", "working tree"
+
         args.append("--")
         if change.old_path:
             args.append(str(change.old_path))
         args.append(str(change.path))
 
         raw = self._repo.git.diff(*args)
-        return self._parse_unified_diff(raw, old_ref="HEAD", new_ref="working tree")
+        return self._parse_unified_diff(raw, old_ref=old_ref, new_ref=new_ref)
 
     def _diff_untracked(self, path: Path) -> DiffResult:
         content = (self._repo_path / path).read_text(errors="replace")

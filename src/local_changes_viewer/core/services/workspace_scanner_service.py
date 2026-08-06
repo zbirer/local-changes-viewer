@@ -37,10 +37,14 @@ class WorkspaceScannerService:
         github_client: GitHubClient | None = None,
         on_log: Callable[[str], None] | None = None,
         previous_pull_requests: dict[Path, tuple[PullRequestInfo, str]] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+        profile_repo_names: set[str] | None = None,
+        include_unpushed_commits: bool = False,
     ) -> Workspace:
         on_progress = on_progress or (lambda _message: None)
         on_repo_ready = on_repo_ready or (lambda _repo: None)
         on_log = on_log or (lambda _message: None)
+        is_cancelled = is_cancelled or (lambda: False)
 
         scan_started_at = time.monotonic()
         on_progress("Discovering git repositories…")
@@ -49,6 +53,15 @@ class WorkspaceScannerService:
         repo_paths, worktree_parents, worktrees_by_parent = self._expand_with_worktrees(
             repo_paths, on_log
         )
+        if profile_repo_names is not None:
+            repo_paths = [
+                path
+                for path in repo_paths
+                if self._repo_in_profile(path, worktree_parents, profile_repo_names)
+            ]
+            on_log(
+                f"Profile filter active: scanning {len(repo_paths)} of the discovered repositories"
+            )
         discovery_seconds = time.monotonic() - discovery_started_at
         total = len(repo_paths)
         if total == 0:
@@ -75,10 +88,15 @@ class WorkspaceScannerService:
                     (previous_pull_requests or {}).get(repo_path),
                     worktree_parents.get(repo_path),
                     worktrees_by_parent.get(repo_path),
+                    is_cancelled,
+                    include_unpushed_commits,
+                    profile_repo_names is not None and repo_path.name not in profile_repo_names,
                 ),
                 repo_paths,
             )
             for index, (repo_path, timed_repo) in enumerate(zip(repo_paths, results), start=1):
+                if is_cancelled():
+                    break
                 repo, repo_seconds = timed_repo
                 on_progress(
                     f"Scanned {index}/{total}: {repo_path.name}… ({repo_seconds:.2f}s)"
@@ -94,6 +112,40 @@ class WorkspaceScannerService:
 
         return Workspace(root_path=root, repositories=repositories)
 
+    def scan_repo(
+        self,
+        repo_path: Path,
+        include_ignored: bool = False,
+        github_client: GitHubClient | None = None,
+        on_log: Callable[[str], None] | None = None,
+        previous_pull_request: tuple[PullRequestInfo, str] | None = None,
+        logical_parent_path: Path | None = None,
+        include_unpushed_commits: bool = False,
+    ) -> Repository | None:
+        on_log = on_log or (lambda _message: None)
+        try:
+            nested_worktree_paths = [
+                path
+                for path in self._adapter_factory(repo_path).list_worktrees()
+                if path.exists()
+            ]
+        except Exception as exc:
+            on_log(f"{repo_path.name}: failed to list worktrees: {exc}")
+            nested_worktree_paths = []
+
+        repo, _ = self._scan_repo(
+            repo_path,
+            include_ignored,
+            github_client,
+            on_log,
+            previous_pull_request,
+            logical_parent_path,
+            nested_worktree_paths,
+            None,
+            include_unpushed_commits,
+        )
+        return repo
+
     def _expand_with_worktrees(
         self, repo_paths: list[Path], on_log: Callable[[str], None]
     ) -> tuple[list[Path], dict[Path, Path], dict[Path, list[Path]]]:
@@ -108,6 +160,9 @@ class WorkspaceScannerService:
                 on_log(f"{repo_path.name}: failed to list worktrees: {exc}")
                 continue
             for worktree_path in worktree_paths:
+                if not worktree_path.exists():
+                    on_log(f"{repo_path.name}: skipping stale worktree path {worktree_path}")
+                    continue
                 worktree_parents.setdefault(worktree_path, repo_path)
                 worktrees_by_parent.setdefault(repo_path, []).append(worktree_path)
                 if worktree_path not in seen:
@@ -124,12 +179,18 @@ class WorkspaceScannerService:
         previous_pull_request: tuple[PullRequestInfo, str] | None = None,
         logical_parent_path: Path | None = None,
         nested_worktree_paths: list[Path] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+        include_unpushed_commits: bool = False,
+        skip_github_fetch: bool = False,
     ) -> tuple[Repository | None, float]:
         on_log = on_log or (lambda _message: None)
+        is_cancelled = is_cancelled or (lambda: False)
         started_at = time.monotonic()
+        if is_cancelled():
+            return None, 0.0
         try:
             adapter = self._adapter_factory(repo_path)
-            changes = adapter.list_changes()
+            changes = adapter.list_changes(include_unpushed_commits=include_unpushed_commits)
             branch_status = adapter.get_branch_status()
         except Exception as exc:
             on_log(f"Skipping repo {repo_path}: failed to read git state: {exc}\n{traceback.format_exc()}")
@@ -155,7 +216,7 @@ class WorkspaceScannerService:
 
         git_scan_ms = (time.monotonic() - started_at) * 1000
         pull_request = None
-        if github_client is not None:
+        if github_client is not None and not is_cancelled() and not skip_github_fetch:
             github_started_at = time.monotonic()
             pull_request = self._fetch_pull_request(
                 adapter, branch_status.branch_name, github_client, on_log, previous_pull_request
@@ -163,6 +224,10 @@ class WorkspaceScannerService:
             github_fetch_ms = (time.monotonic() - github_started_at) * 1000
             on_log(
                 f"{repo_path.name}: git scan {git_scan_ms:.0f}ms, github fetch {github_fetch_ms:.0f}ms"
+            )
+        elif skip_github_fetch:
+            on_log(
+                f"{repo_path.name}: skipping GitHub fetch (worktree not explicitly in profile)"
             )
 
         repo = Repository(
@@ -174,6 +239,17 @@ class WorkspaceScannerService:
             logical_parent_path=logical_parent_path,
         )
         return repo, time.monotonic() - started_at
+
+    @staticmethod
+    def _repo_in_profile(
+        repo_path: Path, worktree_parents: dict[Path, Path], profile_repo_names: set[str]
+    ) -> bool:
+        current: Path | None = repo_path
+        while current is not None:
+            if current.name in profile_repo_names:
+                return True
+            current = worktree_parents.get(current)
+        return False
 
     @staticmethod
     def _change_covers_worktree(change_path: Path, worktree_paths: list[Path]) -> bool:

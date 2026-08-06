@@ -56,6 +56,15 @@ class AppSettings:
     def set_ignore_md_files(self, enabled: bool) -> None:
         self._settings.setValue("ignore_md_files", enabled)
 
+    def include_unpushed_commits(self) -> bool:
+        value = self._settings.value("include_unpushed_commits", False)
+        if isinstance(value, str):
+            return value.lower() == "true"
+        return bool(value)
+
+    def set_include_unpushed_commits(self, enabled: bool) -> None:
+        self._settings.setValue("include_unpushed_commits", enabled)
+
     def hide_repos_without_changes(self) -> bool:
         value = self._settings.value("hide_repos_without_changes", False)
         if isinstance(value, str):
@@ -104,6 +113,15 @@ class AppSettings:
 
     def set_auto_refresh_minutes(self, minutes: int) -> None:
         self._settings.setValue("auto_refresh_minutes", minutes)
+
+    def use_file_watcher(self) -> bool:
+        value = self._settings.value("use_file_watcher", True)
+        if isinstance(value, str):
+            return value.lower() == "true"
+        return bool(value)
+
+    def set_use_file_watcher(self, enabled: bool) -> None:
+        self._settings.setValue("use_file_watcher", enabled)
 
     def log_level(self) -> str:
         return str(self._settings.value("log_level", "INFO"))

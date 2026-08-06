@@ -114,6 +114,25 @@ def test_folder_filter_rule_checks_any_ancestor_folder_not_filename() -> None:
     assert [c.path for c in result.repositories[0].changes] == [Path("vendor.py")]
 
 
+def test_folder_filter_rule_file_path_matches_only_that_exact_file() -> None:
+    changes = [
+        FileChange(path=Path("src/analytics/events/clicked-log-call.ts"), change_type=ChangeType.MODIFIED),
+        FileChange(path=Path("src/analytics/events/other-file.ts"), change_type=ChangeType.MODIFIED),
+    ]
+    workspace = Workspace(root_path=Path("/root"), repositories=[_repo("repo_a", changes)])
+    rules = [
+        FolderFilterRule(
+            text="src/analytics/events/clicked-log-call.ts", mode=FolderFilterMode.FILE_PATH
+        )
+    ]
+
+    result = filter_workspace(workspace, folder_filter_rules=rules)
+
+    assert [c.path for c in result.repositories[0].changes] == [
+        Path("src/analytics/events/other-file.ts")
+    ]
+
+
 def test_folder_filter_rule_matches_untracked_directory_leaf_entry() -> None:
     changes = [
         FileChange(

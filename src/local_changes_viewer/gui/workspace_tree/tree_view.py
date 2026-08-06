@@ -7,6 +7,7 @@ from local_changes_viewer.gui import applog
 from local_changes_viewer.gui.settings import AppSettings
 from local_changes_viewer.gui.workspace_tree.tree_model import (
     FILE_CHANGE_ROLE,
+    FOLDER_PATH_ROLE,
     NODE_KEY_ROLE,
     REPO_PATH_ROLE,
     RepoTreeModel,
@@ -89,6 +90,8 @@ class RepoTreeView(QTreeView):
         return super().viewportEvent(event)
 
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        if self._programmatic_change:
+            return
         change = current.data(FILE_CHANGE_ROLE)
         repo_path = current.data(REPO_PATH_ROLE)
         if change is not None and repo_path is not None:
@@ -119,6 +122,9 @@ class RepoTreeView(QTreeView):
 
     def highlight_repo(self, repo_path: Path) -> None:
         self._model.set_repo_highlighted(repo_path, True)
+
+    def unhighlight_repo(self, repo_path: Path) -> None:
+        self._model.set_repo_highlighted(repo_path, False)
 
     def clear_repo_highlights(self) -> None:
         self._model.clear_all_highlights()
@@ -167,6 +173,78 @@ class RepoTreeView(QTreeView):
             if self._proxy.rowCount(child) > 0:
                 self.expand(child)
                 self._expand_all_descendants(child)
+
+    def _collapse_all_descendants(self, index: QModelIndex) -> None:
+        for row in range(self._proxy.rowCount(index)):
+            child = self._proxy.index(row, 0, index)
+            if self._proxy.rowCount(child) > 0:
+                self._collapse_all_descendants(child)
+                self.collapse(child)
+
+    def find_repo_index(self, repo_path: Path) -> QModelIndex:
+        return self._find_index_by_key(str(repo_path), QModelIndex())
+
+    def _find_index_by_key(self, key: str, parent: QModelIndex) -> QModelIndex:
+        for row in range(self._proxy.rowCount(parent)):
+            index = self._proxy.index(row, 0, parent)
+            if index.data(NODE_KEY_ROLE) == key:
+                return index
+            found = self._find_index_by_key(key, index)
+            if found.isValid():
+                return found
+        return QModelIndex()
+
+    def current_repo_path(self) -> Path | None:
+        index = self.currentIndex()
+        while index.isValid():
+            key = index.data(NODE_KEY_ROLE)
+            folder = index.data(FOLDER_PATH_ROLE)
+            if key is not None and folder is not None and key == folder:
+                return Path(key)
+            index = index.parent()
+        return None
+
+    def expand_repo(self, repo_path: Path) -> None:
+        index = self.find_repo_index(repo_path)
+        if not index.isValid():
+            return
+        applog.log(f"Expand Repo: {repo_path}", level=applog.LogLevel.INFO)
+        self.expand_index_recursive(index)
+
+    def collapse_repo(self, repo_path: Path) -> None:
+        index = self.find_repo_index(repo_path)
+        if not index.isValid():
+            return
+        applog.log(f"Collapse Repo: {repo_path}", level=applog.LogLevel.INFO)
+        self.collapse_index_recursive(index)
+
+    def expand_index_recursive(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        self._programmatic_change = True
+        self.expand(index)
+        self._expand_all_descendants(index)
+        self._programmatic_change = False
+        self._settings.set_collapsed_node_keys(self._collect_collapsed_keys(QModelIndex()))
+
+    def collapse_index_recursive(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        self._programmatic_change = True
+        self._collapse_all_descendants(index)
+        self.collapse(index)
+        self._programmatic_change = False
+        self._settings.set_collapsed_node_keys(self._collect_collapsed_keys(QModelIndex()))
+
+    def expand_current_repo(self) -> None:
+        repo_path = self.current_repo_path()
+        if repo_path is not None:
+            self.expand_repo(repo_path)
+
+    def collapse_current_repo(self) -> None:
+        repo_path = self.current_repo_path()
+        if repo_path is not None:
+            self.collapse_repo(repo_path)
 
     def _collect_collapsed_keys(self, parent: QModelIndex) -> set[str]:
         keys: set[str] = set()

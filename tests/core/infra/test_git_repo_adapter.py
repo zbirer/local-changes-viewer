@@ -289,3 +289,98 @@ def test_branch_status_default_branch_queried_live_from_remote(tmp_path: Path):
     status = GitRepoAdapter(local_path).get_branch_status()
 
     assert status.default_branch == "main"
+
+
+def _init_repo_with_pushed_commit(tmp_path: Path) -> tuple[Path, git.Repo]:
+    remote_bare = tmp_path / "remote.git"
+    git.Repo.init(remote_bare, bare=True)
+
+    local_path = tmp_path / "local_repo"
+    repo = _init_repo_with_commit(local_path)
+    repo.create_remote("origin", str(remote_bare))
+    repo.git.push("--set-upstream", "origin", "main")
+    return local_path, repo
+
+
+def test_list_changes_excludes_unpushed_commit_by_default(tmp_path: Path):
+    local_path, repo = _init_repo_with_pushed_commit(tmp_path)
+    (local_path / "committed.txt").write_text("changed but committed\n")
+    repo.index.add(["committed.txt"])
+    repo.index.commit("local only commit")
+
+    changes = GitRepoAdapter(local_path).list_changes()
+
+    assert changes == []
+
+
+def test_list_changes_includes_unpushed_commit_when_requested(tmp_path: Path):
+    local_path, repo = _init_repo_with_pushed_commit(tmp_path)
+    (local_path / "committed.txt").write_text("changed but committed\n")
+    repo.index.add(["committed.txt"])
+    repo.index.commit("local only commit")
+
+    changes = GitRepoAdapter(local_path).list_changes(include_unpushed_commits=True)
+
+    match = next(c for c in changes if c.path == Path("committed.txt"))
+    assert match.change_type == ChangeType.MODIFIED
+    assert match.is_unpushed_commit is True
+
+
+def test_list_changes_includes_commit_message_for_unpushed_commit(tmp_path: Path):
+    local_path, repo = _init_repo_with_pushed_commit(tmp_path)
+    (local_path / "committed.txt").write_text("changed but committed\n")
+    repo.index.add(["committed.txt"])
+    repo.index.commit("local only commit")
+
+    changes = GitRepoAdapter(local_path).list_changes(include_unpushed_commits=True)
+
+    match = next(c for c in changes if c.path == Path("committed.txt"))
+    assert match.commit_message == "local only commit"
+
+
+def test_list_changes_does_not_duplicate_file_already_dirty_in_working_tree(tmp_path: Path):
+    local_path, repo = _init_repo_with_pushed_commit(tmp_path)
+    (local_path / "committed.txt").write_text("committed change\n")
+    repo.index.add(["committed.txt"])
+    repo.index.commit("local only commit")
+    (local_path / "committed.txt").write_text("uncommitted change on top\n")
+
+    changes = GitRepoAdapter(local_path).list_changes(include_unpushed_commits=True)
+
+    matches = [c for c in changes if c.path == Path("committed.txt")]
+    assert len(matches) == 1
+    assert matches[0].is_unpushed_commit is False
+
+
+def test_list_changes_returns_no_unpushed_commits_when_branch_has_no_upstream(tmp_path: Path):
+    repo = _init_repo_with_commit(tmp_path)
+    (tmp_path / "committed.txt").write_text("changed but committed\n")
+    repo.index.add(["committed.txt"])
+    repo.index.commit("local only commit")
+
+    changes = GitRepoAdapter(tmp_path).list_changes(include_unpushed_commits=True)
+
+    assert changes == []
+
+
+def test_compute_diff_for_unpushed_commit_diffs_against_upstream(tmp_path: Path):
+    local_path, repo = _init_repo_with_pushed_commit(tmp_path)
+    (local_path / "committed.txt").write_text("changed but committed\n")
+    repo.index.add(["committed.txt"])
+    repo.index.commit("local only commit")
+
+    change = FileChange(
+        path=Path("committed.txt"),
+        change_type=ChangeType.MODIFIED,
+        is_unpushed_commit=True,
+    )
+    diff = GitRepoAdapter(local_path).compute_diff(change)
+
+    assert diff.new_ref == "HEAD"
+    added_lines = [
+        line.text
+        for hunk in diff.hunks
+        for line in hunk.lines
+        if line.kind == DiffLineKind.ADDED
+    ]
+    assert "changed but committed" in added_lines

@@ -33,6 +33,10 @@ Full feature list: [`docs/spec.md`](docs/spec.md). Architecture/design:
 ```bash
 git clone <this-repo-url>
 cd local-changes-viewer
+.venv/bin/python -c "from local_changes_viewer.main import main; main()"
+
+.venv/bin/pyinstaller packaging/local-changes-viewer.spec --noconfirm
+
 
 python3 -m venv .venv
 source .venv/bin/activate

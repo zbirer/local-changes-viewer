@@ -58,7 +58,6 @@ query($owner: String!, $repo: String!, $branch: String!) {
         state
         url
         comments { totalCount }
-        reviewComments { totalCount }
       }
     }
   }
@@ -354,7 +353,7 @@ class GitHubClient:
             state=pr["state"].lower(),
             url=pr["url"],
             comment_count=pr["comments"]["totalCount"],
-            review_comment_count=pr["reviewComments"]["totalCount"],
+            review_comment_count=0,
             repository=f"{owner}/{repo}",
         )
 

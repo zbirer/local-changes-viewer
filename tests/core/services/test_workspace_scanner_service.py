@@ -28,14 +28,18 @@ class FakeGitRepoAdapter:
         branch_status: BranchStatus,
         remote_url: str | None = None,
         worktrees: list[Path] | None = None,
+        unpushed_changes: list[FileChange] | None = None,
     ) -> None:
         self.repo_path = repo_path
         self._changes = changes
         self._branch_status = branch_status
         self._remote_url = remote_url
         self._worktrees = worktrees or []
+        self._unpushed_changes = unpushed_changes or []
 
-    def list_changes(self) -> list[FileChange]:
+    def list_changes(self, include_unpushed_commits: bool = False) -> list[FileChange]:
+        if include_unpushed_commits:
+            return self._changes + self._unpushed_changes
         return self._changes
 
     def get_branch_status(self) -> BranchStatus:
@@ -83,9 +87,94 @@ def test_scan_builds_workspace_from_multiple_repos(tmp_path: Path):
     assert repo_b_result.branch_status.behind == 2
 
 
+def test_scan_with_profile_repo_names_only_scans_matching_repos(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    repo_b = tmp_path / "repo_b"
+    fixtures = {
+        repo_a: FakeGitRepoAdapter(
+            repo_a, [FileChange(path=Path("f1.py"), change_type=ChangeType.MODIFIED)], _branch()
+        ),
+        repo_b: FakeGitRepoAdapter(
+            repo_b, [FileChange(path=Path("f2.py"), change_type=ChangeType.ADDED)], _branch()
+        ),
+    }
+
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a, repo_b]),
+        adapter_factory=lambda path: fixtures[path],
+    )
+
+    workspace = service.scan(tmp_path, profile_repo_names={"repo_a"})
+
+    assert {r.name for r in workspace.repositories} == {"repo_a"}
+
+
+def test_scan_with_profile_repo_names_keeps_worktree_of_matching_parent(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    repo_b = tmp_path / "repo_b"
+    worktree = tmp_path / "repo_a" / ".worktrees" / "feature-x"
+    worktree.mkdir(parents=True)
+    fixtures = {
+        repo_a: FakeGitRepoAdapter(repo_a, [], _branch(), worktrees=[worktree]),
+        repo_b: FakeGitRepoAdapter(repo_b, [], _branch()),
+        worktree: FakeGitRepoAdapter(
+            worktree,
+            [FileChange(path=Path("f.py"), change_type=ChangeType.MODIFIED)],
+            _branch("feature-x"),
+        ),
+    }
+
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a, repo_b]),
+        adapter_factory=lambda path: fixtures[path],
+    )
+
+    workspace = service.scan(tmp_path, profile_repo_names={"repo_a"})
+
+    assert {r.name for r in workspace.repositories} == {"repo_a", "feature-x"}
+
+
+def test_scan_with_profile_repo_names_skips_github_fetch_for_inherited_worktree(
+    tmp_path: Path,
+):
+    repo_a = tmp_path / "repo_a"
+    worktree = tmp_path / "repo_a" / ".worktrees" / "feature-x"
+    worktree.mkdir(parents=True)
+    fixtures = {
+        repo_a: FakeGitRepoAdapter(
+            repo_a,
+            [],
+            _branch(),
+            worktrees=[worktree],
+            remote_url="git@github.com:getexpain/repo_a.git",
+        ),
+        worktree: FakeGitRepoAdapter(
+            worktree,
+            [FileChange(path=Path("f.py"), change_type=ChangeType.MODIFIED)],
+            _branch("feature-x"),
+            remote_url="git@github.com:getexpain/repo_a.git",
+        ),
+    }
+
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: fixtures[path],
+    )
+    github_client = RecordingGitHubClient()
+
+    workspace = service.scan(
+        tmp_path, github_client=github_client, profile_repo_names={"repo_a"}
+    )
+
+    assert github_client.calls == [("getexpain", "repo_a", "main")]
+    worktree_result = next(r for r in workspace.repositories if r.name == "feature-x")
+    assert worktree_result.pull_request is None
+
+
 def test_scan_includes_linked_worktrees_as_separate_repos(tmp_path: Path):
     repo_a = tmp_path / "repo_a"
     worktree = tmp_path / "repo_a" / ".worktrees" / "feature-x"
+    worktree.mkdir(parents=True)
     fixtures = {
         repo_a: FakeGitRepoAdapter(
             repo_a,
@@ -115,6 +204,7 @@ def test_scan_includes_linked_worktrees_as_separate_repos(tmp_path: Path):
 def test_scan_records_logical_parent_for_sibling_directory_worktree(tmp_path: Path):
     repo_a = tmp_path / "repo_a"
     worktree = tmp_path / "repo_a-worktrees" / "feature-x"
+    worktree.mkdir(parents=True)
     fixtures = {
         repo_a: FakeGitRepoAdapter(repo_a, [], _branch(), worktrees=[worktree]),
         worktree: FakeGitRepoAdapter(
@@ -147,6 +237,23 @@ def test_scan_skips_repo_when_listing_worktrees_fails(tmp_path: Path):
     service = WorkspaceScannerService(
         filesystem_scanner=FakeFileSystemScanner([repo_a]),
         adapter_factory=lambda path: RaisingWorktreeAdapter(repo_a, [], _branch()),
+    )
+
+    workspace = service.scan(tmp_path)
+
+    assert {r.name for r in workspace.repositories} == {"repo_a"}
+
+
+def test_scan_skips_stale_worktree_paths_that_no_longer_exist(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    stale_worktree = tmp_path / "repo_a-worktrees" / "deleted-feature"
+    fixtures = {
+        repo_a: FakeGitRepoAdapter(repo_a, [], _branch(), worktrees=[stale_worktree]),
+    }
+
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: fixtures[path],
     )
 
     workspace = service.scan(tmp_path)
@@ -196,12 +303,62 @@ def test_scan_includes_ignored_files_when_requested(tmp_path: Path):
     assert paths == {Path("kept.py"), Path("ignored.log")}
 
 
+def test_scan_excludes_unpushed_commits_by_default(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a,
+        [FileChange(path=Path("kept.py"), change_type=ChangeType.MODIFIED)],
+        _branch(),
+        unpushed_changes=[
+            FileChange(
+                path=Path("unpushed.py"),
+                change_type=ChangeType.MODIFIED,
+                is_unpushed_commit=True,
+            )
+        ],
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+
+    workspace = service.scan(tmp_path)
+
+    paths = {c.path for c in workspace.repositories[0].changes}
+    assert paths == {Path("kept.py")}
+
+
+def test_scan_includes_unpushed_commits_when_requested(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a,
+        [FileChange(path=Path("kept.py"), change_type=ChangeType.MODIFIED)],
+        _branch(),
+        unpushed_changes=[
+            FileChange(
+                path=Path("unpushed.py"),
+                change_type=ChangeType.MODIFIED,
+                is_unpushed_commit=True,
+            )
+        ],
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+
+    workspace = service.scan(tmp_path, include_unpushed_commits=True)
+
+    paths = {c.path for c in workspace.repositories[0].changes}
+    assert paths == {Path("kept.py"), Path("unpushed.py")}
+
+
 def test_scan_skips_repo_that_fails_to_read(tmp_path: Path):
     repo_a = tmp_path / "repo_a"
     repo_broken = tmp_path / "repo_broken"
 
     class BrokenAdapter:
-        def list_changes(self):
+        def list_changes(self, include_unpushed_commits: bool = False):
             raise RuntimeError("corrupt repo")
 
         def get_branch_status(self):
@@ -296,7 +453,7 @@ def test_scan_does_not_call_on_repo_ready_for_broken_repo(tmp_path: Path):
     repo_broken = tmp_path / "repo_broken"
 
     class BrokenAdapter:
-        def list_changes(self):
+        def list_changes(self, include_unpushed_commits: bool = False):
             raise RuntimeError("corrupt repo")
 
         def get_branch_status(self):

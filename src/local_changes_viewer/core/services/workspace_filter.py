@@ -9,6 +9,8 @@ from local_changes_viewer.core.domain.workspace import Workspace
 
 
 def _is_inside_filtered_folder(change: FileChange, rules: list[FolderFilterRule]) -> bool:
+    if not change.is_directory and any(rule.matches_path(change.path.as_posix()) for rule in rules):
+        return True
     parts = change.path.parts if change.is_directory else change.path.parts[:-1]
     for folder_name in parts:
         for rule in rules:
