@@ -9,15 +9,49 @@ across many repos at once instead of one project at a time.
 
 ## Features (v1)
 
-- Recursively discovers every git repo under a folder and shows their changes in one tree
+### Multi-repo scanning
+
+- Recursively discovers every git repo under a folder, including nested worktrees, and shows
+  their changes in one tree
+- Background scanning and lazy diff loading — stays responsive on folders with many repos
+- Watches the workspace for file-system changes and auto-refreshes the tree
+- Manual "Refresh" (whole workspace) and "Refresh Repo" (single repo) actions
+- Auto-refresh on a configurable timer
+- Optional GitHub PR/branch-status lookup per repo (skipped for repos only pulled in via
+  worktree-parent inheritance, to save API calls)
+
+### Change tree & diffs
+
 - Groups changes by Modified / Added / Deleted / Renamed / Untracked / Ignored
+- Optionally shows files changed by local commits not yet pushed upstream, in their own color
 - Side-by-side **and** unified diff views, with a toggle between them
 - Syntax-highlighted diffs (via Pygments), with word-level highlighting inside changed lines
-- Search/filter, collapse/expand, ignored-files toggle, whitespace-ignore toggle
-- "Ignore MD files" and "Hide repos without changes" toggles, plus custom folder-name filter
-  rules (contains/equals), all under the **Settings** menu
-- Background scanning and lazy diff loading — stays responsive on folders with many repos
-- Remembers your last-opened folder, window layout, and view preferences
+- In-place file editing from the side-by-side view, with save support
+- Copy diff / file path / file name to clipboard, open in default editor, reveal in Finder
+
+### Filtering & organization
+
+- Search/filter the tree by repo and/or file name
+- Collapse/expand all, expand/collapse current repo, expand only changed repos
+- "Ignore MD files", "Show ignored files", "Hide repos without changes", and
+  "Ignore whitespace" toggles
+- Custom folder-name filter rules (contains/equals/exact file path), manageable from a dialog
+  or added directly from the tree's right-click menu ("Filter Out This Folder/File")
+- Profiles to scope the workspace to a named subset of repos, with a menu to add/remove the
+  current repo from any profile
+
+### GitHub integration
+
+- Connect/disconnect a GitHub account
+- "My Open Pull Requests" panel and dialog, with checks/review status
+- Approved PRs highlighted in the tree
+
+### App behavior & preferences
+
+- Remembers your last-opened folder, window layout, splitter sizes, and view preferences
+- Adjustable diff font size, toggleable line numbers
+- Configurable log level and an in-app log viewer, copyable to clipboard
+- Persistent "Scanning…" status bar indicator for the duration of a scan
 
 Full feature list: [`docs/spec.md`](docs/spec.md). Architecture/design:
 [`docs/architecture.md`](docs/architecture.md).
@@ -28,19 +62,17 @@ Full feature list: [`docs/spec.md`](docs/spec.md). Architecture/design:
 - Python 3.11+
 - `git` installed and on your `PATH`
 
-## Running from source
+## Running from source (not pre-compiled)
+
+If you don't have the packaged `.app` bundle, run it straight from the Python source with a
+virtualenv:
 
 ```bash
 git clone <this-repo-url>
 cd local-changes-viewer
-.venv/bin/python -c "from local_changes_viewer.main import main; main()"
-
-.venv/bin/pyinstaller packaging/local-changes-viewer.spec --noconfirm
-
 
 python3 -m venv .venv
 source .venv/bin/activate
-
 pip install -e ".[dev]"
 
 python -m local_changes_viewer
@@ -58,17 +90,20 @@ The GUI layer is verified manually — see [`docs/implementation-plan.md`](docs/
 pytest
 ```
 
-## Building a standalone macOS app
+## Compiling a standalone macOS app
 
 v1 packages as a standalone `.app` bundle via [PyInstaller](https://pyinstaller.org/):
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
-pyinstaller packaging/local-changes-viewer.spec
+
+pyinstaller packaging/local-changes-viewer.spec --noconfirm
 ```
 
 The built app is placed under `dist/local-changes-viewer.app`. Double-click to run it — it does
-not require the venv or Python to be active.
+not require the venv or Python to be active, and can be moved/distributed on its own.
 
 ## Project structure
 
@@ -89,23 +124,3 @@ local-changes-viewer/
 See [`docs/architecture.md`](docs/architecture.md) for the full layering rationale (business
 logic is isolated from GitPython/filesystem details and from the GUI).
 
-## Tech stack
-
-| Concern         | Choice                    |
-|-----------------|---------------------------|
-| GUI             | PySide6 (Qt for Python)   |
-| Git access      | GitPython                 |
-| Diff highlighting | Pygments                |
-| Settings        | Qt `QSettings`            |
-| Packaging       | PyInstaller               |
-| Tests           | pytest                    |
-
-## Contributing
-
-This project is under active initial development against the plan in
-[`docs/implementation-plan.md`](docs/implementation-plan.md). Issues/PRs welcome once v1 is
-further along.
-
-## License
-
-No license file yet — all rights reserved until one is added.

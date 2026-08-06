@@ -145,9 +145,22 @@ class GitRepoAdapter:
                 short_hexsha=commit.hexsha[:8],
                 message=commit.message.strip().splitlines()[0] if commit.message.strip() else "",
                 committed_datetime=commit.committed_datetime,
+                branch_name=self._get_branch_for_commit(commit.hexsha),
+                full_message=commit.message.strip(),
             )
             for commit in commits
         ]
+
+    def _get_branch_for_commit(self, hexsha: str) -> str:
+        try:
+            output = self._repo.git.branch("--contains", hexsha, "--format=%(refname:short)")
+        except git.GitCommandError:
+            return ""
+        for line in output.splitlines():
+            name = line.strip()
+            if name:
+                return name
+        return ""
 
     def get_commit_files(self, commit_hexsha: str) -> list[FileChange]:
         output = self._repo.git.show(

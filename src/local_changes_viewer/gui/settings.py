@@ -183,6 +183,16 @@ class AppSettings:
         else:
             self._settings.setValue("active_profile_name", name)
 
+    def tooltip_font_size(self) -> int:
+        value = self._settings.value("tooltip_font_size", 0)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def set_tooltip_font_size(self, points: int) -> None:
+        self._settings.setValue("tooltip_font_size", points)
+
     def collapsed_node_keys(self) -> set[str]:
         value = self._settings.value("collapsed_node_keys", [])
         applog.log(

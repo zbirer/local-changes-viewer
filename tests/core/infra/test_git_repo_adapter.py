@@ -384,3 +384,43 @@ def test_compute_diff_for_unpushed_commit_diffs_against_upstream(tmp_path: Path)
         if line.kind == DiffLineKind.ADDED
     ]
     assert "changed but committed" in added_lines
+
+
+def test_get_recent_commits_returns_newest_first_with_limit(tmp_path: Path, repo: git.Repo):
+    for i in range(3):
+        (tmp_path / "committed.txt").write_text(f"content {i}\n")
+        repo.index.add(["committed.txt"])
+        repo.index.commit(f"commit {i}")
+
+    commits = GitRepoAdapter(tmp_path).get_recent_commits(limit=2)
+
+    assert [c.message for c in commits] == ["commit 2", "commit 1"]
+    assert all(len(c.short_hexsha) == 8 for c in commits)
+
+
+def test_get_commit_files_lists_changed_paths(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "new_file.txt").write_text("new\n")
+    repo.index.add(["new_file.txt"])
+    commit = repo.index.commit("add new file")
+
+    changes = GitRepoAdapter(tmp_path).get_commit_files(commit.hexsha)
+
+    assert any(
+        c.path == Path("new_file.txt") and c.change_type == ChangeType.ADDED for c in changes
+    )
+
+
+def test_get_commit_file_diff_shows_added_content(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "new_file.txt").write_text("hello\n")
+    repo.index.add(["new_file.txt"])
+    commit = repo.index.commit("add new file")
+
+    diff = GitRepoAdapter(tmp_path).get_commit_file_diff(commit.hexsha, Path("new_file.txt"))
+
+    added_lines = [
+        line.text
+        for hunk in diff.hunks
+        for line in hunk.lines
+        if line.kind == DiffLineKind.ADDED
+    ]
+    assert "hello" in added_lines

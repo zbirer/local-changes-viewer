@@ -11,6 +11,7 @@ from PySide6.QtGui import (
     QKeySequence,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QInputDialog,
     QLabel,
@@ -40,6 +41,7 @@ from local_changes_viewer.core.services.diff_formatting import format_unified_di
 from local_changes_viewer.core.services.file_info import detect_encoding, detect_line_ending
 from local_changes_viewer.core.services.workspace_filter import filter_workspace
 from local_changes_viewer.gui import applog, github_auth
+from local_changes_viewer.gui.commit_log_dialog import CommitLogDialog
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
 from local_changes_viewer.gui.github_connect_dialog import GitHubConnectDialog
@@ -262,6 +264,10 @@ class MainWindow(QMainWindow):
         log_level_action.triggered.connect(self._on_configure_log_level)
         settings_menu.addAction(log_level_action)
 
+        tooltip_font_size_action = QAction("Tooltip Font Size…", self)
+        tooltip_font_size_action.triggered.connect(self._on_configure_tooltip_font_size)
+        settings_menu.addAction(tooltip_font_size_action)
+
         manage_folder_filters_action = QAction("Filtered Folders…", self)
         manage_folder_filters_action.triggered.connect(self._on_manage_folder_filters)
         settings_menu.addAction(manage_folder_filters_action)
@@ -346,9 +352,6 @@ class MainWindow(QMainWindow):
         toggle_time_filter_action.triggered.connect(self._on_toggle_time_filter)
         actions_menu.addAction(toggle_time_filter_action)
 
-        self._scan_status_label = QLabel("")
-        self.statusBar().addPermanentWidget(self._scan_status_label)
-
         self._folder_status_label = QLabel("No folder open")
         self.statusBar().addPermanentWidget(self._folder_status_label)
 
@@ -393,6 +396,7 @@ class MainWindow(QMainWindow):
         self._apply_auto_refresh_interval(self._settings.auto_refresh_minutes())
         self._use_file_watcher_action.setChecked(self._settings.use_file_watcher())
         self._disconnect_github_action.setEnabled(self._settings.github_username() is not None)
+        self._apply_tooltip_font_size(self._settings.tooltip_font_size())
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._diff_view.has_unsaved_edits():
@@ -604,6 +608,28 @@ class MainWindow(QMainWindow):
         applog.log(f"Set log level: {level_name}", level=applog.LogLevel.INFO)
         self._settings.set_log_level(level_name)
         applog.set_level(applog.level_from_name(level_name))
+
+    def _on_configure_tooltip_font_size(self) -> None:
+        current = self._settings.tooltip_font_size() or 9
+        size, ok = QInputDialog.getInt(
+            self,
+            "Tooltip Font Size",
+            "Tooltip font size in points (0 = system default):",
+            current,
+            0,
+            36,
+        )
+        if not ok:
+            return
+        applog.log(f"Set tooltip font size: {size}", level=applog.LogLevel.INFO)
+        self._settings.set_tooltip_font_size(size)
+        self._apply_tooltip_font_size(size)
+
+    def _apply_tooltip_font_size(self, size: int) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.setStyleSheet(f"QToolTip {{ font-size: {size}pt; }}" if size > 0 else "")
 
     def _github_log(self, message: str) -> None:
         applog.log(f"GitHub: {message}", level=applog.LogLevel.INFO)
@@ -1021,6 +1047,9 @@ class MainWindow(QMainWindow):
                 menu.addAction(
                     "Refresh Repo", lambda: self._on_refresh_repo(Path(folder_path))
                 )
+                menu.addAction(
+                    "Show Log", lambda: self._on_show_log(Path(folder_path))
+                )
             if not index.parent().isValid():
                 repo_name = Path(folder_path).name
                 menu.addSeparator()
@@ -1075,6 +1104,11 @@ class MainWindow(QMainWindow):
             return
         self._on_folder_filter_rules_changed([*self._folder_filter_rules, rule])
         self.statusBar().showMessage(status_message, 3000)
+
+    def _on_show_log(self, repo_path: Path) -> None:
+        applog.log(f"Show Log: {repo_path}", level=applog.LogLevel.INFO)
+        dialog = CommitLogDialog(repo_path, parent=self)
+        dialog.exec()
 
     def _on_refresh_repo(self, repo_path: Path) -> None:
         existing_repo = next(
@@ -1154,9 +1188,8 @@ class MainWindow(QMainWindow):
         )
         self._incremental_scan = auto_refresh or not rebuild
         self._scan_in_progress = True
-        self._scan_status_label.setText("Scanning…")
         if not self._incremental_scan:
-            self.statusBar().showMessage("Starting scan…")
+            self.statusBar().showMessage("Scanning: Starting scan…")
             self._workspace = Workspace(root_path=Path(folder), repositories=[])
             self._refresh_display()
             self._scan_refresh_timer.start()
@@ -1186,8 +1219,7 @@ class MainWindow(QMainWindow):
 
     def _on_scan_progress(self, message: str) -> None:
         applog.log(message, level=applog.LogLevel.DEBUG)
-        self.statusBar().showMessage(message)
-        self._scan_status_label.setText(f"Scanning: {message}")
+        self.statusBar().showMessage(f"Scanning: {message}")
 
     def _on_scan_log_message(self, message: str) -> None:
         applog.log(message, level=applog.LogLevel.WARNING)
@@ -1209,7 +1241,6 @@ class MainWindow(QMainWindow):
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._scan_refresh_timer.stop()
         self._scan_in_progress = False
-        self._scan_status_label.setText("")
         self._workspace = workspace
         self._refresh_display(preserve_tree=self._incremental_scan)
         self._incremental_scan = False
@@ -1258,6 +1289,5 @@ class MainWindow(QMainWindow):
     def _on_scan_error(self, message: str) -> None:
         self._scan_refresh_timer.stop()
         self._scan_in_progress = False
-        self._scan_status_label.setText("")
         applog.log(f"Scan failed: {message}", level=applog.LogLevel.ERROR)
         self.statusBar().showMessage(f"Scan failed: {message}", 5000)
