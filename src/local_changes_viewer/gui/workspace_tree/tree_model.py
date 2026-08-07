@@ -48,6 +48,9 @@ class RepoTreeModel(QStandardItemModel):
         roots, children_by_parent = self._partition(workspace.repositories)
         self._sync_level(root, roots, children_by_parent)
 
+    def has_rows(self) -> bool:
+        return self.invisibleRootItem().rowCount() > 0
+
     def _sync_level(
         self,
         container_item: QStandardItem,

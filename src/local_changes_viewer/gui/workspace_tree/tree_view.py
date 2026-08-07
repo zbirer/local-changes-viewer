@@ -181,6 +181,9 @@ class RepoTreeView(QTreeView):
         self._model.update_workspace(workspace)
         self._programmatic_change = False
 
+    def has_rows(self) -> bool:
+        return self._model.has_rows()
+
     def highlight_repo(self, repo_path: Path) -> None:
         self._model.set_repo_highlighted(repo_path, True)
 

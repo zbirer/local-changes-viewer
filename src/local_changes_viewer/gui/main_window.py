@@ -1354,7 +1354,9 @@ class MainWindow(QMainWindow):
         self._workspace = workspace
         self._showing_stale_cache = False
         self._update_status_extra_label()
-        self._refresh_display(preserve_tree=self._incremental_scan)
+        self._refresh_display(
+            preserve_tree=self._incremental_scan or self._tree_view.has_rows()
+        )
         self._incremental_scan = False
         self._tree_view.clear_repo_highlights()
         if self._use_file_watcher_action.isChecked():
