@@ -28,6 +28,8 @@ class ScanWorker(QRunnable):
         is_cancelled: Callable[[], bool] | None = None,
         profile_repo_names: set[str] | None = None,
         include_unpushed_commits: bool = False,
+        dirty_paths: set[Path] | None = None,
+        service: WorkspaceScannerService | None = None,
     ) -> None:
         super().__init__()
         self._root = root
@@ -37,7 +39,11 @@ class ScanWorker(QRunnable):
         self._is_cancelled = is_cancelled
         self._profile_repo_names = profile_repo_names
         self._include_unpushed_commits = include_unpushed_commits
-        self._service = WorkspaceScannerService()
+        self._dirty_paths = dirty_paths
+        # A shared service instance (kept alive across scans by the caller) is
+        # what makes the cross-scan repo/PR caching in WorkspaceScannerService
+        # possible; falling back to a fresh instance just disables caching.
+        self._service = service or WorkspaceScannerService()
         self.signals = ScanWorkerSignals()
 
     def run(self) -> None:
@@ -53,6 +59,7 @@ class ScanWorker(QRunnable):
                 is_cancelled=self._is_cancelled,
                 profile_repo_names=self._profile_repo_names,
                 include_unpushed_commits=self._include_unpushed_commits,
+                dirty_paths=self._dirty_paths,
             )
         except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
             self.signals.error.emit(str(exc))

@@ -17,6 +17,7 @@ from local_changes_viewer.core.infra.github_client import (
 )
 
 _MAX_PARALLEL_REPO_SCANS = 8
+_PR_REFETCH_INTERVAL_SECONDS = 60.0
 
 
 class WorkspaceScannerService:
@@ -27,6 +28,8 @@ class WorkspaceScannerService:
     ) -> None:
         self._filesystem_scanner = filesystem_scanner or FileSystemScanner()
         self._adapter_factory = adapter_factory or GitRepoAdapter
+        self._repo_cache: dict[Path, Repository] = {}
+        self._pr_fetched_at: dict[Path, float] = {}
 
     def scan(
         self,
@@ -40,6 +43,7 @@ class WorkspaceScannerService:
         is_cancelled: Callable[[], bool] | None = None,
         profile_repo_names: set[str] | None = None,
         include_unpushed_commits: bool = False,
+        dirty_paths: set[Path] | None = None,
     ) -> Workspace:
         on_progress = on_progress or (lambda _message: None)
         on_repo_ready = on_repo_ready or (lambda _repo: None)
@@ -91,6 +95,7 @@ class WorkspaceScannerService:
                     is_cancelled,
                     include_unpushed_commits,
                     profile_repo_names is not None and repo_path.name not in profile_repo_names,
+                    dirty_paths,
                 ),
                 repo_paths,
             )
@@ -109,6 +114,8 @@ class WorkspaceScannerService:
         on_progress(
             f"Scan finished in {total_seconds:.2f}s — {len(repositories)}/{total} repos scanned"
         )
+
+        self._repo_cache = {repo.path: repo for repo in repositories}
 
         return Workspace(root_path=root, repositories=repositories)
 
@@ -143,6 +150,8 @@ class WorkspaceScannerService:
             nested_worktree_paths,
             None,
             include_unpushed_commits,
+            False,
+            None,
         )
         return repo
 
@@ -182,44 +191,60 @@ class WorkspaceScannerService:
         is_cancelled: Callable[[], bool] | None = None,
         include_unpushed_commits: bool = False,
         skip_github_fetch: bool = False,
+        dirty_paths: set[Path] | None = None,
     ) -> tuple[Repository | None, float]:
         on_log = on_log or (lambda _message: None)
         is_cancelled = is_cancelled or (lambda: False)
         started_at = time.monotonic()
         if is_cancelled():
             return None, 0.0
-        try:
-            adapter = self._adapter_factory(repo_path)
-            changes = adapter.list_changes(include_unpushed_commits=include_unpushed_commits)
-            branch_status = adapter.get_branch_status()
-        except Exception as exc:
-            on_log(f"Skipping repo {repo_path}: failed to read git state: {exc}\n{traceback.format_exc()}")
-            return None, time.monotonic() - started_at
 
-        if not include_ignored:
-            changes = [c for c in changes if c.change_type != ChangeType.IGNORED]
+        adapter = self._adapter_factory(repo_path)
+        cached_repo = self._repo_cache.get(repo_path)
+        reuse_cached_git_state = (
+            dirty_paths is not None and repo_path not in dirty_paths and cached_repo is not None
+        )
 
-        if nested_worktree_paths:
-            # git status reports a nested worktree checkout as a single untracked
-            # directory entry (it never descends into another git repo), which
-            # would otherwise surface as a spurious change for a folder that's
-            # actually displayed separately as its own repo.
-            repo_path_resolved = repo_path.resolve()
-            worktree_paths_resolved = [p.resolve() for p in nested_worktree_paths]
-            changes = [
-                c
-                for c in changes
-                if not self._change_covers_worktree(
-                    repo_path_resolved / c.path, worktree_paths_resolved
-                )
-            ]
+        if reuse_cached_git_state:
+            changes = cached_repo.changes
+            branch_status = cached_repo.branch_status
+        else:
+            try:
+                changes = adapter.list_changes(include_unpushed_commits=include_unpushed_commits)
+                branch_status = adapter.get_branch_status()
+            except Exception as exc:
+                on_log(f"Skipping repo {repo_path}: failed to read git state: {exc}\n{traceback.format_exc()}")
+                return None, time.monotonic() - started_at
+
+            if not include_ignored:
+                changes = [c for c in changes if c.change_type != ChangeType.IGNORED]
+
+            if nested_worktree_paths:
+                # git status reports a nested worktree checkout as a single untracked
+                # directory entry (it never descends into another git repo), which
+                # would otherwise surface as a spurious change for a folder that's
+                # actually displayed separately as its own repo.
+                repo_path_resolved = repo_path.resolve()
+                worktree_paths_resolved = [p.resolve() for p in nested_worktree_paths]
+                changes = [
+                    c
+                    for c in changes
+                    if not self._change_covers_worktree(
+                        repo_path_resolved / c.path, worktree_paths_resolved
+                    )
+                ]
 
         git_scan_ms = (time.monotonic() - started_at) * 1000
         pull_request = None
         if github_client is not None and not is_cancelled() and not skip_github_fetch:
             github_started_at = time.monotonic()
             pull_request = self._fetch_pull_request(
-                adapter, branch_status.branch_name, github_client, on_log, previous_pull_request
+                repo_path,
+                adapter,
+                branch_status.branch_name,
+                github_client,
+                on_log,
+                previous_pull_request,
             )
             github_fetch_ms = (time.monotonic() - github_started_at) * 1000
             on_log(
@@ -258,8 +283,9 @@ class WorkspaceScannerService:
             for worktree_path in worktree_paths
         )
 
-    @staticmethod
     def _fetch_pull_request(
+        self,
+        repo_path: Path,
         adapter: GitRepoAdapter,
         branch_name: str,
         github_client: GitHubClient,
@@ -274,6 +300,18 @@ class WorkspaceScannerService:
                 )
                 return prev_pr
 
+            last_fetched_at = self._pr_fetched_at.get(repo_path)
+            if (
+                branch_name == prev_branch
+                and last_fetched_at is not None
+                and (time.monotonic() - last_fetched_at) < _PR_REFETCH_INTERVAL_SECONDS
+            ):
+                on_log(
+                    f"Reusing cached PR for {prev_pr.repository} (fetched "
+                    f"{time.monotonic() - last_fetched_at:.0f}s ago, within TTL)"
+                )
+                return prev_pr
+
         remote_url = adapter.get_remote_url("origin")
         if remote_url is None:
             return None
@@ -281,6 +319,7 @@ class WorkspaceScannerService:
         if owner_repo is None:
             return None
         owner, repo_name = owner_repo
+        self._pr_fetched_at[repo_path] = time.monotonic()
         try:
             return github_client.find_pull_request(owner, repo_name, branch_name)
         except GitHubError as exc:

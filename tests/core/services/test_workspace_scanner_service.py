@@ -36,13 +36,17 @@ class FakeGitRepoAdapter:
         self._remote_url = remote_url
         self._worktrees = worktrees or []
         self._unpushed_changes = unpushed_changes or []
+        self.list_changes_calls = 0
+        self.get_branch_status_calls = 0
 
     def list_changes(self, include_unpushed_commits: bool = False) -> list[FileChange]:
+        self.list_changes_calls += 1
         if include_unpushed_commits:
             return self._changes + self._unpushed_changes
         return self._changes
 
     def get_branch_status(self) -> BranchStatus:
+        self.get_branch_status_calls += 1
         return self._branch_status
 
     def get_remote_url(self, name: str = "origin") -> str | None:
@@ -602,3 +606,91 @@ def test_scan_always_fetches_when_no_previous_pull_requests_given(tmp_path: Path
 
     assert github_client.calls == [("getexpain", "repo_a", "main")]
     assert workspace.repositories[0].pull_request is fresh_pr
+
+
+def test_scan_reuses_cached_changes_for_repo_not_in_dirty_paths(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    repo_b = tmp_path / "repo_b"
+    adapter_a = FakeGitRepoAdapter(
+        repo_a, [FileChange(path=Path("f1.py"), change_type=ChangeType.MODIFIED)], _branch()
+    )
+    adapter_b = FakeGitRepoAdapter(
+        repo_b, [FileChange(path=Path("f2.py"), change_type=ChangeType.ADDED)], _branch()
+    )
+    fixtures = {repo_a: adapter_a, repo_b: adapter_b}
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a, repo_b]),
+        adapter_factory=lambda path: fixtures[path],
+    )
+
+    service.scan(tmp_path)
+    assert adapter_a.list_changes_calls == 1
+    assert adapter_b.list_changes_calls == 1
+
+    workspace = service.scan(tmp_path, dirty_paths={repo_b})
+
+    assert adapter_a.list_changes_calls == 1
+    assert adapter_a.get_branch_status_calls == 1
+    assert adapter_b.list_changes_calls == 2
+    repo_a_result = next(r for r in workspace.repositories if r.name == "repo_a")
+    assert repo_a_result.changes[0].path == Path("f1.py")
+
+
+def test_scan_rescans_repo_in_dirty_paths(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter_a = FakeGitRepoAdapter(
+        repo_a, [FileChange(path=Path("f1.py"), change_type=ChangeType.MODIFIED)], _branch()
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter_a,
+    )
+
+    service.scan(tmp_path)
+    service.scan(tmp_path, dirty_paths={repo_a})
+
+    assert adapter_a.list_changes_calls == 2
+    assert adapter_a.get_branch_status_calls == 2
+
+
+def test_scan_with_dirty_paths_none_rescans_everything(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter_a = FakeGitRepoAdapter(
+        repo_a, [FileChange(path=Path("f1.py"), change_type=ChangeType.MODIFIED)], _branch()
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter_a,
+    )
+
+    service.scan(tmp_path)
+    service.scan(tmp_path, dirty_paths=None)
+
+    assert adapter_a.list_changes_calls == 2
+    assert adapter_a.get_branch_status_calls == 2
+
+
+def test_scan_reuses_open_pr_within_ttl_window(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter_a = FakeGitRepoAdapter(
+        repo_a, [], _branch("main"), remote_url="git@github.com:getexpain/repo_a.git"
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter_a,
+    )
+    fresh_pr = _pr("open")
+    github_client = RecordingGitHubClient(pull_request=fresh_pr)
+
+    first_workspace = service.scan(tmp_path, github_client=github_client)
+    fetched_pr = first_workspace.repositories[0].pull_request
+
+    previous_pull_requests = {repo_a: (fetched_pr, "main")}
+    second_workspace = service.scan(
+        tmp_path,
+        github_client=github_client,
+        previous_pull_requests=previous_pull_requests,
+    )
+
+    assert github_client.calls == [("getexpain", "repo_a", "main")]
+    assert second_workspace.repositories[0].pull_request is fetched_pr

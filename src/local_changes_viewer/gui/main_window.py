@@ -40,6 +40,9 @@ from local_changes_viewer.core.infra.github_client import (
 from local_changes_viewer.core.services.diff_formatting import format_unified_diff
 from local_changes_viewer.core.services.file_info import detect_encoding, detect_line_ending
 from local_changes_viewer.core.services.workspace_filter import filter_workspace
+from local_changes_viewer.core.services.workspace_scanner_service import (
+    WorkspaceScannerService,
+)
 from local_changes_viewer.gui import applog, github_auth
 from local_changes_viewer.gui.commit_log_dialog import CommitLogDialog
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
@@ -102,6 +105,9 @@ class MainWindow(QMainWindow):
         self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
         self._file_watcher = WorkspaceFileWatcher(self)
         self._file_watcher.changed.connect(self._on_file_watcher_changed)
+        # Kept alive across scans so WorkspaceScannerService's internal repo/PR
+        # cache can actually skip work on unchanged repos between refreshes.
+        self._scanner_service = WorkspaceScannerService()
         self._my_pull_requests_dialog: MyPullRequestsDialog | None = None
         self._pr_panel = PullRequestsPanel()
         self._pr_panel.hide()
@@ -570,7 +576,8 @@ class MainWindow(QMainWindow):
 
     def _on_auto_refresh_timeout(self) -> None:
         if self._root_folder and not self._scan_in_progress:
-            self._start_scan(self._root_folder, auto_refresh=True)
+            dirty_paths = self._collect_dirty_paths()
+            self._start_scan(self._root_folder, auto_refresh=True, dirty_paths=dirty_paths)
 
     def _on_use_file_watcher_toggled(self, checked: bool) -> None:
         applog.log(f"Watch for file changes: {checked}", level=applog.LogLevel.INFO)
@@ -589,7 +596,15 @@ class MainWindow(QMainWindow):
     def _on_file_watcher_changed(self) -> None:
         if self._root_folder and not self._scan_in_progress:
             applog.log("File change detected, refreshing", level=applog.LogLevel.DEBUG)
-            self._start_scan(self._root_folder, auto_refresh=True)
+            dirty_paths = self._collect_dirty_paths()
+            self._start_scan(self._root_folder, auto_refresh=True, dirty_paths=dirty_paths)
+
+    def _collect_dirty_paths(self) -> set[Path] | None:
+        if self._workspace is None:
+            return None
+        return self._file_watcher.dirty_repo_roots(
+            repo_paths=[r.path for r in self._workspace.repositories]
+        )
 
     def _on_configure_log_level(self) -> None:
         levels = [level.name for level in applog.LogLevel]
@@ -1181,7 +1196,14 @@ class MainWindow(QMainWindow):
         self._folder_status_label.setText(f"Folder: {folder}")
         self._start_scan(folder)
 
-    def _start_scan(self, folder: str, *, auto_refresh: bool = False, rebuild: bool = True) -> None:
+    def _start_scan(
+        self,
+        folder: str,
+        *,
+        auto_refresh: bool = False,
+        rebuild: bool = True,
+        dirty_paths: set[Path] | None = None,
+    ) -> None:
         applog.log(
             f"Starting scan of {folder}" + (" (auto-refresh)" if auto_refresh else ""),
             level=applog.LogLevel.INFO,
@@ -1209,6 +1231,8 @@ class MainWindow(QMainWindow):
             is_cancelled=self._shutdown_requested.is_set,
             profile_repo_names=set(active_profile.repo_names) if active_profile else None,
             include_unpushed_commits=self._include_unpushed_commits_action.isChecked(),
+            dirty_paths=dirty_paths,
+            service=self._scanner_service,
         )
         worker.signals.progress.connect(self._on_scan_progress)
         worker.signals.repo_ready.connect(self._on_repo_ready)

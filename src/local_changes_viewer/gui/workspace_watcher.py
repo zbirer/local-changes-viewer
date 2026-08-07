@@ -45,7 +45,8 @@ class WorkspaceFileWatcher(QObject):
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.setInterval(_DEBOUNCE_MS)
-        self._debounce_timer.timeout.connect(self.changed.emit)
+        self._debounce_timer.timeout.connect(self._on_debounce_timeout)
+        self._dirty_paths: set[Path] = set()
 
     def set_watch_paths(self, watch_paths: list[Path]) -> None:
         """Applies a precomputed path list; callers walk directories off-thread first."""
@@ -60,6 +61,24 @@ class WorkspaceFileWatcher(QObject):
         existing = self._watcher.directories()
         if existing:
             self._watcher.removePaths(existing)
+        self._dirty_paths.clear()
 
-    def _on_directory_changed(self, _path: str) -> None:
+    def dirty_repo_roots(self, repo_paths: list[Path]) -> set[Path]:
+        """Maps paths that fired since the previous `changed` emit up to their
+        owning repo root (whichever `repo_paths` entry is a parent of, or equal
+        to, the fired path)."""
+        dirty_roots: set[Path] = set()
+        for dirty_path in self._dirty_paths:
+            for repo_path in repo_paths:
+                if dirty_path == repo_path or repo_path in dirty_path.parents:
+                    dirty_roots.add(repo_path)
+                    break
+        return dirty_roots
+
+    def _on_directory_changed(self, path: str) -> None:
+        self._dirty_paths.add(Path(path))
         self._debounce_timer.start()
+
+    def _on_debounce_timeout(self) -> None:
+        self.changed.emit()
+        self._dirty_paths.clear()
