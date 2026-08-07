@@ -7,6 +7,7 @@ from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.pull_request import PullRequestInfo
 from local_changes_viewer.core.domain.repository import BranchStatus
 from local_changes_viewer.core.infra.github_client import GitHubError
+from local_changes_viewer.core.services import workspace_scanner_service as wss
 from local_changes_viewer.core.services.workspace_scanner_service import (
     WorkspaceScannerService,
 )
@@ -407,7 +408,7 @@ def test_scan_reports_progress_for_discovery_and_each_repo(tmp_path: Path):
     messages: list[str] = []
     service.scan(tmp_path, on_progress=messages.append)
 
-    assert len(messages) == 5
+    assert len(messages) == 6
     assert messages[0] == "Discovering git repositories…"
     assert re.fullmatch(
         r"Found 2 repositories in \d+\.\d{2}s — scanning \(up to 2 in parallel\)…",
@@ -416,7 +417,12 @@ def test_scan_reports_progress_for_discovery_and_each_repo(tmp_path: Path):
     assert re.fullmatch(r"Scanned 1/2: repo_a… \(\d+\.\d{2}s\)", messages[2])
     assert re.fullmatch(r"Scanned 2/2: repo_b… \(\d+\.\d{2}s\)", messages[3])
     assert re.fullmatch(
-        r"Scan finished in \d+\.\d{2}s — 2/2 repos scanned", messages[4]
+        r"Repo scan phase done in \d+\.\d{2}s — git \d+\.\d{2}s \(aggregate\), "
+        r"GitHub fetch \d+\.\d{2}s \(aggregate\)",
+        messages[4],
+    )
+    assert re.fullmatch(
+        r"Scan finished in \d+\.\d{2}s — 2/2 repos scanned", messages[5]
     )
 
 
@@ -694,3 +700,83 @@ def test_scan_reuses_open_pr_within_ttl_window(tmp_path: Path):
 
     assert github_client.calls == [("getexpain", "repo_a", "main")]
     assert second_workspace.repositories[0].pull_request is fetched_pr
+
+
+def test_scan_does_not_refetch_pr_within_ttl_when_previous_lookup_found_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression test for the runaway-refresh bug: a branch with no open PR
+    used to be re-queried on *every* scan (the old cached-PR reuse only ever
+    applied when a previous PR object existed), which hammered GitHub every
+    ~2s while a busy file watcher kept triggering auto-refresh scans."""
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a, [], _branch("main"), remote_url="git@github.com:getexpain/repo_a.git"
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+    github_client = RecordingGitHubClient(pull_request=None)
+    clock = [1_000.0]
+    monkeypatch.setattr(wss.time, "monotonic", lambda: clock[0])
+
+    first = service.scan(tmp_path, github_client=github_client)
+    assert first.repositories[0].pull_request is None
+    assert len(github_client.calls) == 1
+
+    clock[0] += 10.0  # well inside the 60s TTL
+    second = service.scan(tmp_path, github_client=github_client)
+
+    assert second.repositories[0].pull_request is None
+    assert len(github_client.calls) == 1  # not re-fetched
+
+
+def test_scan_refetches_pr_once_ttl_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a, [], _branch("main"), remote_url="git@github.com:getexpain/repo_a.git"
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+    github_client = RecordingGitHubClient(pull_request=None)
+    clock = [1_000.0]
+    monkeypatch.setattr(wss.time, "monotonic", lambda: clock[0])
+
+    service.scan(tmp_path, github_client=github_client)
+    assert len(github_client.calls) == 1
+
+    clock[0] += wss._PR_REFETCH_INTERVAL_SECONDS + 1.0
+    service.scan(tmp_path, github_client=github_client)
+
+    assert len(github_client.calls) == 2
+
+
+def test_scan_refetches_pr_immediately_when_branch_changes_within_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a, [], _branch("main"), remote_url="git@github.com:getexpain/repo_a.git"
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+    github_client = RecordingGitHubClient(pull_request=None)
+    clock = [1_000.0]
+    monkeypatch.setattr(wss.time, "monotonic", lambda: clock[0])
+
+    service.scan(tmp_path, github_client=github_client)
+    assert len(github_client.calls) == 1
+
+    clock[0] += 1.0  # still well inside the TTL
+    adapter._branch_status = _branch("feature-x")
+    service.scan(tmp_path, github_client=github_client)
+
+    assert len(github_client.calls) == 2
+    assert github_client.calls[1] == ("getexpain", "repo_a", "feature-x")

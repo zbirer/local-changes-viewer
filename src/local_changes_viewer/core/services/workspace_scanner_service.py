@@ -17,6 +17,17 @@ from local_changes_viewer.core.infra.github_client import (
 )
 
 _MAX_PARALLEL_REPO_SCANS = 8
+
+# Caches the outcome of a GitHub PR lookup per repo (including a "no open PR"
+# result) for this long, keyed by branch. MainWindow keeps a single
+# WorkspaceScannerService alive across scans (see ScanWorker), so this cache
+# lives on the instance rather than at module scope — a module-level cache
+# would leak across service instances and break test isolation. Without this,
+# a branch with no open PR gets re-queried on every single refresh (e.g. every
+# couple of seconds while a busy file watcher keeps triggering auto-refresh
+# scans), hammering the GitHub API. Keyed by repo_path with the branch name
+# stored alongside the cached value; a branch change invalidates the entry
+# immediately regardless of how fresh it is.
 _PR_REFETCH_INTERVAL_SECONDS = 60.0
 
 
@@ -29,7 +40,7 @@ class WorkspaceScannerService:
         self._filesystem_scanner = filesystem_scanner or FileSystemScanner()
         self._adapter_factory = adapter_factory or GitRepoAdapter
         self._repo_cache: dict[Path, Repository] = {}
-        self._pr_fetched_at: dict[Path, float] = {}
+        self._pr_fetch_cache: dict[Path, tuple[str, PullRequestInfo | None, float]] = {}
 
     def scan(
         self,
@@ -77,11 +88,14 @@ class WorkspaceScannerService:
             f"(up to {min(_MAX_PARALLEL_REPO_SCANS, total)} in parallel)…"
         )
         repositories: list[Repository] = []
+        total_git_scan_seconds = 0.0
+        total_github_fetch_seconds = 0.0
 
         # Each repo scan is I/O-bound (shells out to git), so scanning repos in
         # parallel cuts wall-clock time roughly by the pool size. executor.map
         # yields results in submission order even though work completes out of
         # order, keeping progress messages and results deterministic.
+        git_scan_phase_started_at = time.monotonic()
         with ThreadPoolExecutor(max_workers=min(_MAX_PARALLEL_REPO_SCANS, total)) as executor:
             results = executor.map(
                 lambda repo_path: self._scan_repo(
@@ -102,13 +116,22 @@ class WorkspaceScannerService:
             for index, (repo_path, timed_repo) in enumerate(zip(repo_paths, results), start=1):
                 if is_cancelled():
                     break
-                repo, repo_seconds = timed_repo
+                repo, git_scan_seconds, github_fetch_seconds = timed_repo
+                total_git_scan_seconds += git_scan_seconds
+                total_github_fetch_seconds += github_fetch_seconds
+                repo_seconds = git_scan_seconds + github_fetch_seconds
                 on_progress(
                     f"Scanned {index}/{total}: {repo_path.name}… ({repo_seconds:.2f}s)"
                 )
                 if repo is not None:
                     repositories.append(repo)
                     on_repo_ready(repo)
+        git_scan_phase_seconds = time.monotonic() - git_scan_phase_started_at
+        on_progress(
+            f"Repo scan phase done in {git_scan_phase_seconds:.2f}s — git "
+            f"{total_git_scan_seconds:.2f}s (aggregate), GitHub fetch "
+            f"{total_github_fetch_seconds:.2f}s (aggregate)"
+        )
 
         total_seconds = time.monotonic() - scan_started_at
         on_progress(
@@ -140,7 +163,7 @@ class WorkspaceScannerService:
             on_log(f"{repo_path.name}: failed to list worktrees: {exc}")
             nested_worktree_paths = []
 
-        repo, _ = self._scan_repo(
+        repo, _, _ = self._scan_repo(
             repo_path,
             include_ignored,
             github_client,
@@ -192,12 +215,12 @@ class WorkspaceScannerService:
         include_unpushed_commits: bool = False,
         skip_github_fetch: bool = False,
         dirty_paths: set[Path] | None = None,
-    ) -> tuple[Repository | None, float]:
+    ) -> tuple[Repository | None, float, float]:
         on_log = on_log or (lambda _message: None)
         is_cancelled = is_cancelled or (lambda: False)
         started_at = time.monotonic()
         if is_cancelled():
-            return None, 0.0
+            return None, 0.0, 0.0
 
         adapter = self._adapter_factory(repo_path)
         cached_repo = self._repo_cache.get(repo_path)
@@ -214,7 +237,7 @@ class WorkspaceScannerService:
                 branch_status = adapter.get_branch_status()
             except Exception as exc:
                 on_log(f"Skipping repo {repo_path}: failed to read git state: {exc}\n{traceback.format_exc()}")
-                return None, time.monotonic() - started_at
+                return None, time.monotonic() - started_at, 0.0
 
             if not include_ignored:
                 changes = [c for c in changes if c.change_type != ChangeType.IGNORED]
@@ -234,8 +257,9 @@ class WorkspaceScannerService:
                     )
                 ]
 
-        git_scan_ms = (time.monotonic() - started_at) * 1000
+        git_scan_seconds = time.monotonic() - started_at
         pull_request = None
+        github_fetch_seconds = 0.0
         if github_client is not None and not is_cancelled() and not skip_github_fetch:
             github_started_at = time.monotonic()
             pull_request = self._fetch_pull_request(
@@ -246,9 +270,10 @@ class WorkspaceScannerService:
                 on_log,
                 previous_pull_request,
             )
-            github_fetch_ms = (time.monotonic() - github_started_at) * 1000
+            github_fetch_seconds = time.monotonic() - github_started_at
             on_log(
-                f"{repo_path.name}: git scan {git_scan_ms:.0f}ms, github fetch {github_fetch_ms:.0f}ms"
+                f"{repo_path.name}: git scan {git_scan_seconds * 1000:.0f}ms, "
+                f"github fetch {github_fetch_seconds * 1000:.0f}ms"
             )
         elif skip_github_fetch:
             on_log(
@@ -263,7 +288,7 @@ class WorkspaceScannerService:
             pull_request=pull_request,
             logical_parent_path=logical_parent_path,
         )
-        return repo, time.monotonic() - started_at
+        return repo, git_scan_seconds, github_fetch_seconds
 
     @staticmethod
     def _repo_in_profile(
@@ -290,38 +315,48 @@ class WorkspaceScannerService:
         branch_name: str,
         github_client: GitHubClient,
         on_log: Callable[[str], None],
-        previous_pull_request: tuple[PullRequestInfo, str] | None = None,
+        previous_pull_request: tuple[PullRequestInfo | None, str] | None = None,
     ):
+        # TTL cache first: applies whether or not there's an open PR, so a
+        # branch with no PR at all stops being re-queried on every refresh
+        # (previously only a *found* PR was ever reused — see module docstring
+        # above _PR_REFETCH_INTERVAL_SECONDS). A branch change bypasses the
+        # cache outright.
+        cached = self._pr_fetch_cache.get(repo_path)
+        if cached is not None:
+            cached_branch, cached_pr, fetched_at = cached
+            if (
+                cached_branch == branch_name
+                and (time.monotonic() - fetched_at) < _PR_REFETCH_INTERVAL_SECONDS
+            ):
+                return cached_pr
+
         if previous_pull_request is not None:
             prev_pr, prev_branch = previous_pull_request
-            if prev_pr.state in ("merged", "closed") and branch_name == prev_branch:
+            if (
+                prev_pr is not None
+                and prev_pr.state in ("merged", "closed")
+                and branch_name == prev_branch
+            ):
                 on_log(
                     f"Reusing cached PR for {prev_pr.repository} (terminal state {prev_pr.state})"
                 )
-                return prev_pr
-
-            last_fetched_at = self._pr_fetched_at.get(repo_path)
-            if (
-                branch_name == prev_branch
-                and last_fetched_at is not None
-                and (time.monotonic() - last_fetched_at) < _PR_REFETCH_INTERVAL_SECONDS
-            ):
-                on_log(
-                    f"Reusing cached PR for {prev_pr.repository} (fetched "
-                    f"{time.monotonic() - last_fetched_at:.0f}s ago, within TTL)"
-                )
+                self._pr_fetch_cache[repo_path] = (branch_name, prev_pr, time.monotonic())
                 return prev_pr
 
         remote_url = adapter.get_remote_url("origin")
         if remote_url is None:
+            self._pr_fetch_cache[repo_path] = (branch_name, None, time.monotonic())
             return None
         owner_repo = parse_github_owner_repo(remote_url)
         if owner_repo is None:
+            self._pr_fetch_cache[repo_path] = (branch_name, None, time.monotonic())
             return None
         owner, repo_name = owner_repo
-        self._pr_fetched_at[repo_path] = time.monotonic()
         try:
-            return github_client.find_pull_request(owner, repo_name, branch_name)
+            pull_request = github_client.find_pull_request(owner, repo_name, branch_name)
         except GitHubError as exc:
             on_log(f"Failed to fetch GitHub PR status for {owner}/{repo_name}: {exc}")
-            return None
+            pull_request = None
+        self._pr_fetch_cache[repo_path] = (branch_name, pull_request, time.monotonic())
+        return pull_request

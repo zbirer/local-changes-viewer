@@ -1,4 +1,5 @@
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, Qt, QThreadPool, QTimer, QUrl
@@ -39,6 +40,7 @@ from local_changes_viewer.core.infra.github_client import (
 )
 from local_changes_viewer.core.services.diff_formatting import format_unified_diff
 from local_changes_viewer.core.services.file_info import detect_encoding, detect_line_ending
+from local_changes_viewer.core.services.workspace_cache import load_workspace, save_workspace
 from local_changes_viewer.core.services.workspace_filter import filter_workspace
 from local_changes_viewer.core.services.workspace_scanner_service import (
     WorkspaceScannerService,
@@ -77,10 +79,18 @@ from local_changes_viewer.gui.workspace_tree.tree_model import (
 )
 from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
 
+# A busy workspace (many repos + a fast file watcher) can fire an auto-refresh
+# scan every couple of seconds; if the previous scan just finished, skip this
+# one rather than piling another full 27-repo git+GitHub scan on top of it.
+_MIN_AUTO_REFRESH_INTERVAL_SECONDS = 5.0
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        # Used to log how long it takes from process start until the folder
+        # tree is first painted (from cache, when a matching cache exists).
+        self._app_started_at = time.monotonic()
         self.setWindowTitle("local-changes-viewer")
         self.resize(1200, 800)
 
@@ -100,6 +110,17 @@ class MainWindow(QMainWindow):
         self._scan_refresh_timer.timeout.connect(self._refresh_display)
         self._incremental_scan = False
         self._scan_in_progress = False
+        # True only while __init__ is replaying persisted settings via
+        # setChecked(); handlers that would kick off a scan or a tree rebuild
+        # check this and bail out, so restoring N toggle settings can never
+        # start N redundant scans on top of the one _restore_last_folder()
+        # already started (see _restore_window_state / D1).
+        self._restoring_settings = False
+        self._scan_started_at = 0.0
+        self._current_scan_label = "startup"
+        self._startup_scan_pending = True
+        self._last_scan_finished_at = 0.0
+        self._showing_stale_cache = False
         self._auto_refresh_minutes = 0
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
@@ -371,7 +392,9 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._status_extra_label)
 
         self._restore_last_folder()
+        self._restoring_settings = True
         self._restore_window_state()
+        self._restoring_settings = False
         self._auto_connect_github()
 
     def _restore_last_folder(self) -> None:
@@ -444,11 +467,15 @@ class MainWindow(QMainWindow):
 
     def _on_include_ignored_toggled(self, checked: bool) -> None:
         applog.log(f"Show ignored files: {checked}", level=applog.LogLevel.INFO)
+        if self._restoring_settings:
+            return
         if self._root_folder:
             self._start_scan(self._root_folder)
 
     def _on_include_unpushed_commits_toggled(self, checked: bool) -> None:
         applog.log(f"Show committed but not pushed files: {checked}", level=applog.LogLevel.INFO)
+        if self._restoring_settings:
+            return
         if self._root_folder:
             self._start_scan(self._root_folder)
 
@@ -523,6 +550,8 @@ class MainWindow(QMainWindow):
         action = self.sender()
         name = action.text() if action is not None else "display filter"
         applog.log(f"{name}: {checked}", level=applog.LogLevel.INFO)
+        if self._restoring_settings:
+            return
         self._refresh_display()
 
     def _on_toggle_time_filter(self) -> None:
@@ -566,6 +595,8 @@ class MainWindow(QMainWindow):
 
     def _update_status_extra_label(self) -> None:
         parts = []
+        if self._showing_stale_cache:
+            parts.append("Showing cached results — rescanning…")
         if self._active_profile_name:
             parts.append(f"Profile: {self._active_profile_name}")
         if self._auto_refresh_minutes:
@@ -1196,6 +1227,20 @@ class MainWindow(QMainWindow):
         self._folder_status_label.setText(f"Folder: {folder}")
         self._start_scan(folder)
 
+    def _load_matching_cached_workspace(self, folder: str) -> Workspace | None:
+        """Loads the on-disk workspace cache for an instant cold-start paint.
+
+        Only usable for the folder it was captured for — a stale cache from a
+        previous root would show the wrong repos, so any mismatch (including a
+        missing/corrupt cache) is treated the same as "no cache".
+        """
+        cached = load_workspace()
+        if cached is None:
+            return None
+        if cached.root_path.resolve() != Path(folder).resolve():
+            return None
+        return cached
+
     def _start_scan(
         self,
         folder: str,
@@ -1204,23 +1249,58 @@ class MainWindow(QMainWindow):
         rebuild: bool = True,
         dirty_paths: set[Path] | None = None,
     ) -> None:
+        if auto_refresh:
+            since_last_scan = time.monotonic() - self._last_scan_finished_at
+            if since_last_scan < _MIN_AUTO_REFRESH_INTERVAL_SECONDS:
+                applog.log(
+                    f"Skipping auto-refresh scan: previous scan finished {since_last_scan:.1f}s "
+                    f"ago (< {_MIN_AUTO_REFRESH_INTERVAL_SECONDS:.0f}s minimum)",
+                    level=applog.LogLevel.DEBUG,
+                )
+                return
         applog.log(
             f"Starting scan of {folder}" + (" (auto-refresh)" if auto_refresh else ""),
             level=applog.LogLevel.INFO,
         )
+        self._scan_started_at = time.monotonic()
+        if auto_refresh:
+            self._current_scan_label = "auto-refresh"
+        elif self._startup_scan_pending:
+            self._current_scan_label = "startup"
+        else:
+            self._current_scan_label = "manual"
+        self._startup_scan_pending = False
         self._incremental_scan = auto_refresh or not rebuild
         self._scan_in_progress = True
         if not self._incremental_scan:
             self.statusBar().showMessage("Scanning: Starting scan…")
-            self._workspace = Workspace(root_path=Path(folder), repositories=[])
-            self._refresh_display()
+            cached_workspace = (
+                self._load_matching_cached_workspace(folder) if self._workspace is None else None
+            )
+            if cached_workspace is not None:
+                applog.log(
+                    f"Using cached workspace for {folder} while rescanning",
+                    level=applog.LogLevel.INFO,
+                )
+                self._workspace = cached_workspace
+                self._showing_stale_cache = True
+                self._update_status_extra_label()
+                self._refresh_display()
+                applog.log(
+                    f"First tree painted from cache in "
+                    f"{(time.monotonic() - self._app_started_at) * 1000:.0f}ms since app start "
+                    "(startup)",
+                    level=applog.LogLevel.DEBUG,
+                )
+            else:
+                self._workspace = Workspace(root_path=Path(folder), repositories=[])
+                self._refresh_display()
             self._scan_refresh_timer.start()
-        previous_pull_requests: dict[Path, tuple[PullRequestInfo, str]] | None = None
+        previous_pull_requests: dict[Path, tuple[PullRequestInfo | None, str]] | None = None
         if auto_refresh and self._workspace is not None:
             previous_pull_requests = {
                 repo.path: (repo.pull_request, repo.branch_status.branch_name)
                 for repo in self._workspace.repositories
-                if repo.pull_request is not None
             }
         active_profile = self._active_profile()
         worker = ScanWorker(
@@ -1265,21 +1345,39 @@ class MainWindow(QMainWindow):
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._scan_refresh_timer.stop()
         self._scan_in_progress = False
+        self._last_scan_finished_at = time.monotonic()
+        elapsed_seconds = time.monotonic() - self._scan_started_at
+        applog.log(
+            f"Total scan {elapsed_seconds * 1000:.0f}ms ({self._current_scan_label})",
+            level=applog.LogLevel.DEBUG,
+        )
         self._workspace = workspace
+        self._showing_stale_cache = False
+        self._update_status_extra_label()
         self._refresh_display(preserve_tree=self._incremental_scan)
         self._incremental_scan = False
         self._tree_view.clear_repo_highlights()
         if self._use_file_watcher_action.isChecked():
             self._refresh_watch_paths([r.path for r in workspace.repositories])
+        # Cache the freshly scanned workspace so the next cold start can paint
+        # the tree immediately instead of showing nothing for ~30s (D3).
+        save_workspace(workspace)
         repo_count = len(workspace.repositories)
         change_count = sum(len(r.changes) for r in workspace.repositories)
-        message = f"Done — {repo_count} repositories, {change_count} changed files"
+        message = (
+            f"Done — {repo_count} repositories, {change_count} changed files "
+            f"({elapsed_seconds:.1f}s)"
+        )
         applog.log(message, level=applog.LogLevel.INFO)
-        self.statusBar().showMessage(message, 5000)
+        # timeout=0 keeps this visible until the next status message (e.g. the
+        # next "Scanning: ..." update) replaces it, instead of vanishing after
+        # a fixed delay — total scan time should stay legible, not flash by.
+        self.statusBar().showMessage(message, 0)
 
     def _refresh_display(self, *, preserve_tree: bool = False) -> None:
         if self._workspace is None:
             return
+        refresh_started_at = time.monotonic()
         rules_desc = ", ".join(f"{r.mode.value}:{r.text!r}" for r in self._folder_filter_rules)
         applog.log(
             f"Applying folder filter rules ({len(self._folder_filter_rules)}): [{rules_desc}]",
@@ -1309,9 +1407,15 @@ class MainWindow(QMainWindow):
         self._aggregate_list.set_workspace(display_workspace)
         change_count = sum(len(r.changes) for r in display_workspace.repositories)
         self._summary_label.setText(f"Total changed files: {change_count}")
+        refresh_ms = (time.monotonic() - refresh_started_at) * 1000
+        applog.log(
+            f"_refresh_display took {refresh_ms:.0f}ms (preserve_tree={preserve_tree})",
+            level=applog.LogLevel.DEBUG,
+        )
 
     def _on_scan_error(self, message: str) -> None:
         self._scan_refresh_timer.stop()
         self._scan_in_progress = False
+        self._last_scan_finished_at = time.monotonic()
         applog.log(f"Scan failed: {message}", level=applog.LogLevel.ERROR)
         self.statusBar().showMessage(f"Scan failed: {message}", 5000)

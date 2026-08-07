@@ -21,7 +21,13 @@ _IGNORED_DIR_NAMES = {
     ".vscode",
 }
 
-_DEBOUNCE_MS = 400
+# A busy workspace (many repos under active development, e.g. build output or
+# a running dev server touching files) can emit directoryChanged bursts for
+# seconds at a time; 400ms wasn't enough to let that settle, so `changed` kept
+# re-firing every ~2s and each one triggered a full rescan. 2000ms is enough
+# for a typical burst to go quiet before we react to it (paired with the
+# minimum-interval guard between auto-refresh scans in MainWindow).
+_DEBOUNCE_MS = 2000
 
 
 def collect_watch_paths(repo_paths: list[Path]) -> list[Path]:
