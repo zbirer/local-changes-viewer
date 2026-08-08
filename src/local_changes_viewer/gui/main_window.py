@@ -107,7 +107,11 @@ class MainWindow(QMainWindow):
         self._shutdown_requested = threading.Event()
         self._scan_refresh_timer = QTimer(self)
         self._scan_refresh_timer.setInterval(150)
-        self._scan_refresh_timer.timeout.connect(self._refresh_display)
+        # Must update in place (preserve_tree=True), never clear: this timer
+        # fires ~100x during a single scan, and clearing/rebuilding the tree
+        # on every tick destroys expansion/scroll state mid-scan (and, worse,
+        # briefly renders zero rows -- see _on_scan_refresh_tick).
+        self._scan_refresh_timer.timeout.connect(self._on_scan_refresh_tick)
         self._incremental_scan = False
         self._scan_in_progress = False
         # True only while __init__ is replaying persisted settings via
@@ -1330,17 +1334,30 @@ class MainWindow(QMainWindow):
 
     def _on_repo_ready(self, repo: Repository) -> None:
         # Rebuilding the tree (expandAll + restore-collapsed-state) is O(current
-        # repo count), so appending it here without refreshing keeps repo arrival
-        # cheap; the periodic timer coalesces the actual tree rebuilds instead of
-        # doing one per repo.
+        # repo count), so accumulating it here without refreshing keeps repo
+        # arrival cheap; the periodic timer coalesces the actual tree rebuilds
+        # instead of doing one per repo.
         # Incremental scans (auto-refresh, or manual refresh with an already-loaded
         # workspace) leave self._workspace (and the displayed tree) untouched until
         # the full result is ready, so nothing to accumulate here.
         if self._incremental_scan:
             self._tree_view.highlight_repo(repo.path)
             return
-        if self._workspace is not None:
-            self._workspace.repositories.append(repo)
+        if self._workspace is None:
+            return
+        # A non-incremental (startup/manual) scan starts from a cached
+        # workspace that may already list this exact repo path, so this must
+        # merge by path rather than blindly append: appending created two
+        # Repository entries for the same path, and RepoTreeModel._partition
+        # then infers each one is the other's parent (a path is trivially
+        # relative_to itself), knocking both out of the top-level `roots`
+        # list -- with every repo duplicated that way, the entire tree
+        # renders as empty until the scan finishes and replaces the list.
+        for index, existing in enumerate(self._workspace.repositories):
+            if existing.path == repo.path:
+                self._workspace.repositories[index] = repo
+                return
+        self._workspace.repositories.append(repo)
 
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._scan_refresh_timer.stop()
@@ -1375,6 +1392,15 @@ class MainWindow(QMainWindow):
         # next "Scanning: ..." update) replaces it, instead of vanishing after
         # a fixed delay — total scan time should stay legible, not flash by.
         self.statusBar().showMessage(message, 0)
+
+    def _on_scan_refresh_tick(self) -> None:
+        # _refresh_display is keyword-only on preserve_tree, so the QTimer
+        # can't connect to it directly with the right default -- this tick
+        # must always preserve the tree (never clear()+rebuild), since
+        # clearing destroys expansion/scroll state mid-scan and, combined
+        # with a workspace that transiently has zero top-level repos (see
+        # _on_repo_ready), would otherwise flash the tree empty ~100x/scan.
+        self._refresh_display(preserve_tree=True)
 
     def _refresh_display(self, *, preserve_tree: bool = False) -> None:
         if self._workspace is None:

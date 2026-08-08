@@ -211,6 +211,113 @@ def test_on_workspace_ready_preserves_tree_in_place_when_tree_already_has_rows(
         window.close()
 
 
+def test_scan_refresh_tick_does_not_empty_tree_while_repos_reappear(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the mid-scan empty-tree bug: on startup the tree
+    paints from the on-disk cache, then the background rescan re-discovers
+    repos already present in that cache via _on_repo_ready. Before the fix,
+    _on_repo_ready blind-appended instead of merging by path, so the
+    workspace ended up with two Repository entries per path; RepoTreeModel
+    ._partition then treated each duplicate as the other's parent (a path is
+    trivially relative_to itself), which knocked every top-level repo out of
+    `roots` -- with all of them duplicated, the tree rendered as completely
+    empty. On top of that the 150ms scan-refresh timer called
+    _refresh_display() with preserve_tree=False (its default), i.e. a full
+    clear()+rebuild on every tick, which is what actually painted that empty
+    state to screen ~100x/scan. Both must be fixed: _on_repo_ready merges by
+    path (no duplicate entries reach _partition), and the timer preserves
+    the tree in place (no clear() at all, so even a transient anomaly
+    wouldn't flash blank)."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: None)
+    monkeypatch.setattr(window, "_refresh_watch_paths", lambda repo_paths: None)
+
+    cached_workspace = Workspace(
+        root_path=tmp_path,
+        repositories=[
+            _repo("repo_a", [FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)]),
+            _repo("repo_b", [FileChange(path=Path("b.py"), change_type=ChangeType.MODIFIED)]),
+        ],
+    )
+    window._workspace = cached_workspace
+    window._incremental_scan = False
+    window._refresh_display()  # initial paint from cache (mirrors _start_scan L1288/1297)
+
+    root_item = window._tree_view._model.invisibleRootItem()
+    assert root_item.rowCount() == 2
+    existing_repo_a_item = root_item.child(0)
+    existing_repo_b_item = root_item.child(1)
+
+    # The rescan re-discovers repos already present in the cached workspace.
+    # Iterate a snapshot: window._workspace IS cached_workspace, and
+    # _on_repo_ready mutates that same list, so iterating the live list
+    # directly here would observe its own in-loop mutations.
+    for repo in list(cached_workspace.repositories):
+        window._on_repo_ready(repo)
+
+    # This is exactly what the 150ms scan-refresh timer now invokes on every
+    # tick (previously it invoked _refresh_display() directly, defaulting to
+    # preserve_tree=False).
+    window._on_scan_refresh_tick()
+
+    root_item = window._tree_view._model.invisibleRootItem()
+    try:
+        assert root_item.rowCount() == 2, (
+            f"expected 2 repo rows to survive the tick, tree has {root_item.rowCount()}"
+        )
+        # Same QStandardItem instances survive: proof the in-place
+        # update_workspace()/_sync_level() diff ran, not a clear()+rebuild.
+        assert root_item.child(0) is existing_repo_a_item
+        assert root_item.child(1) is existing_repo_b_item
+    finally:
+        window.close()
+
+
+def test_on_repo_ready_merges_by_path_instead_of_duplicating(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_on_repo_ready must replace the existing Repository entry for a path
+    that's already in self._workspace.repositories (e.g. one carried over
+    from the cached workspace a non-incremental scan starts from), never
+    append a second entry for the same path -- see the empty-tree bug
+    explained in test_scan_refresh_tick_does_not_empty_tree_while_repos_reappear."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+
+    original_repo_a = _repo(
+        "repo_a", [FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)]
+    )
+    repo_b = _repo("repo_b", [FileChange(path=Path("b.py"), change_type=ChangeType.MODIFIED)])
+    window._workspace = Workspace(root_path=tmp_path, repositories=[original_repo_a, repo_b])
+    window._incremental_scan = False
+
+    rescanned_repo_a = _repo(
+        "repo_a",
+        [
+            FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED),
+            FileChange(path=Path("new.py"), change_type=ChangeType.ADDED),
+        ],
+    )
+
+    try:
+        window._on_repo_ready(rescanned_repo_a)
+
+        assert len(window._workspace.repositories) == 2
+        by_path = {r.path: r for r in window._workspace.repositories}
+        assert by_path[original_repo_a.path] is rescanned_repo_a
+        assert by_path[repo_b.path] is repo_b
+
+        # A genuinely new repo path still appends rather than being dropped.
+        new_repo = _repo("repo_c", [])
+        window._on_repo_ready(new_repo)
+        assert len(window._workspace.repositories) == 3
+        assert window._workspace.repositories[-1] is new_repo
+    finally:
+        window.close()
+
+
 def test_on_workspace_ready_rebuilds_when_tree_is_empty(
     qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
