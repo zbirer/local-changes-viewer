@@ -14,6 +14,7 @@ from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.repository import BranchStatus, Repository
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.gui.main_window import MainWindow
+from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 
 _BRANCH = BranchStatus(branch_name="main", ahead=0, behind=0)
 
@@ -316,6 +317,98 @@ def test_on_repo_ready_merges_by_path_instead_of_duplicating(
         assert window._workspace.repositories[-1] is new_repo
     finally:
         window.close()
+
+
+def test_on_dead_repo_removes_repo_whose_directory_no_longer_exists(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_on_dead_repo is the removal counterpart to _on_repo_ready's
+    merge-by-path (e3aac9b): once WorkspaceScannerService has positively
+    confirmed a repo's directory is gone (git.exc.NoSuchPathError, surfaced
+    as the "dead" scan trigger), the stale entry it carried over from a
+    cached workspace must actually leave the merged tree instead of
+    surviving every subsequent scan forever."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+
+    repo_a = _repo("repo_a", [FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)])
+    repo_gone = _repo(
+        "repo_gone", [FileChange(path=Path("g.py"), change_type=ChangeType.MODIFIED)]
+    )
+    window._workspace = Workspace(root_path=tmp_path, repositories=[repo_a, repo_gone])
+    window._incremental_scan = False
+
+    try:
+        window._on_dead_repo(repo_gone.path)
+
+        assert window._workspace.repositories == [repo_a]
+    finally:
+        window.close()
+
+
+def test_repo_absent_from_partial_scan_results_is_retained(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for e3aac9b: a scan that only reports a subset of
+    repos (dirty-gated repos, a partial/in-progress scan, cache hits) must
+    NOT cause the untouched repos to disappear from the merged workspace.
+    Only an explicit _on_dead_repo call (a positive "this repo is gone"
+    signal from the scanner) may remove a repo -- mere absence from this
+    scan's on_repo_ready calls must never be treated the same way, or the
+    tree would flicker empty exactly like the bug e3aac9b fixed."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+
+    repo_a = _repo("repo_a", [FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)])
+    repo_b = _repo("repo_b", [FileChange(path=Path("b.py"), change_type=ChangeType.MODIFIED)])
+    window._workspace = Workspace(root_path=tmp_path, repositories=[repo_a, repo_b])
+    window._incremental_scan = False
+
+    # This scan only reports repo_b (e.g. repo_a wasn't dirty and was served
+    # from cache, or the scan is still in progress); repo_a is never passed
+    # to _on_repo_ready or _on_dead_repo at all this round.
+    rescanned_repo_b = _repo(
+        "repo_b",
+        [
+            FileChange(path=Path("b.py"), change_type=ChangeType.MODIFIED),
+            FileChange(path=Path("new.py"), change_type=ChangeType.ADDED),
+        ],
+    )
+
+    try:
+        window._on_repo_ready(rescanned_repo_b)
+
+        by_path = {r.path: r for r in window._workspace.repositories}
+        assert len(window._workspace.repositories) == 2
+        assert by_path[repo_a.path] is repo_a
+        assert by_path[repo_b.path] is rescanned_repo_b
+    finally:
+        window.close()
+
+
+def test_diff_worker_reports_plain_english_message_with_clicked_file_for_missing_repo(
+    qapp, tmp_path: Path
+) -> None:
+    """GitRepoAdapter's underlying git.Repo(repo_path) raises
+    git.exc.NoSuchPathError when the repo's directory is gone from disk (a
+    worktree the user deleted outside the app); NoSuchPathError.__str__
+    returns only the bare path, which used to surface verbatim as e.g.
+    "Diff failed: /Users/.../EH-9952-retain-consent" with no explanation of
+    what happened or which file the user clicked. DiffWorker must turn that
+    into a plain-English message that names both."""
+    repo_path = tmp_path / "deleted-worktree"  # never created -- genuinely does not exist
+    change = FileChange(path=Path("some/file.py"), change_type=ChangeType.MODIFIED)
+    worker = DiffWorker(repo_path, change)
+
+    errors: list[str] = []
+    worker.signals.error.connect(errors.append)
+    worker.run()
+
+    assert len(errors) == 1
+    message = errors[0]
+    assert "no longer exists" in message
+    assert str(repo_path) in message
+    assert str(change.path) in message
 
 
 def test_on_workspace_ready_rebuilds_when_tree_is_empty(

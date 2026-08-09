@@ -13,6 +13,7 @@ from local_changes_viewer.core.services.workspace_scanner_service import (
 class ScanWorkerSignals(QObject):
     workspace_ready = Signal(object)  # Workspace
     repo_ready = Signal(object)  # Repository
+    dead_repo = Signal(object)  # Path -- scanner positively confirmed this repo is gone
     error = Signal(str)
     progress = Signal(str)
     log_message = Signal(str)
@@ -56,6 +57,7 @@ class ScanWorker(QRunnable):
                 include_ignored=self._include_ignored,
                 on_progress=self.signals.progress.emit,
                 on_repo_ready=self.signals.repo_ready.emit,
+                on_dead_repo=self.signals.dead_repo.emit,
                 github_client=self._github_client,
                 on_log=self.signals.log_message.emit,
                 previous_pull_requests=self._previous_pull_requests,

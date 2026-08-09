@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 
 import pytest
+from git.exc import NoSuchPathError
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.pull_request import PullRequestInfo
@@ -381,6 +382,64 @@ def test_scan_skips_repo_that_fails_to_read(tmp_path: Path):
 
     workspace = service.scan(tmp_path)
 
+    assert {r.name for r in workspace.repositories} == {"repo_a"}
+
+
+def test_scan_calls_on_dead_repo_when_directory_no_longer_exists(tmp_path: Path):
+    """When a repo's directory has been deleted from disk (e.g. a worktree
+    the user removed outside the app), GitRepoAdapter's construction raises
+    git.exc.NoSuchPathError. This is the one positive "the repo is gone"
+    signal that must flow through as the on_dead_repo callback, distinct
+    from every other failure -- see test_scan_does_not_call_on_dead_repo_for_
+    transient_git_error below for the case that must NOT fire it."""
+    repo_a = tmp_path / "repo_a"
+    repo_gone = tmp_path / "repo_gone"
+
+    def factory(path: Path):
+        if path == repo_gone:
+            raise NoSuchPathError(str(path))
+        return FakeGitRepoAdapter(path, [], _branch())
+
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a, repo_gone]),
+        adapter_factory=factory,
+    )
+
+    dead_paths: list[Path] = []
+    workspace = service.scan(tmp_path, on_dead_repo=dead_paths.append)
+
+    assert dead_paths == [repo_gone]
+    assert {r.name for r in workspace.repositories} == {"repo_a"}
+
+
+def test_scan_does_not_call_on_dead_repo_for_transient_git_error(tmp_path: Path):
+    """A repo that fails to read for any other reason (corrupt state, a
+    flaky `git status` invocation, ...) must be skipped for this scan without
+    being flagged as permanently gone -- only git.exc.NoSuchPathError does
+    that. Regression guard: on_dead_repo firing here would let a single
+    transient failure permanently evict a repo from the merged workspace."""
+    repo_a = tmp_path / "repo_a"
+    repo_broken = tmp_path / "repo_broken"
+
+    class BrokenAdapter:
+        def list_changes(self, include_unpushed_commits: bool = False):
+            raise RuntimeError("corrupt repo")
+
+        def get_branch_status(self):
+            raise RuntimeError("corrupt repo")
+
+    good_adapter = FakeGitRepoAdapter(repo_a, [], _branch())
+    factory = {repo_a: good_adapter, repo_broken: BrokenAdapter()}
+
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a, repo_broken]),
+        adapter_factory=lambda path: factory[path],
+    )
+
+    dead_paths: list[Path] = []
+    workspace = service.scan(tmp_path, on_dead_repo=dead_paths.append)
+
+    assert dead_paths == []
     assert {r.name for r in workspace.repositories} == {"repo_a"}
 
 

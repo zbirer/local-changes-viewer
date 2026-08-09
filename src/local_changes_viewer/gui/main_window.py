@@ -655,7 +655,7 @@ class MainWindow(QMainWindow):
             repo_path, change, ignore_whitespace=self._ignore_whitespace_action.isChecked()
         )
         worker.signals.diff_ready.connect(self._on_diff_ready)
-        worker.signals.error.connect(self._on_diff_error)
+        worker.signals.error.connect(lambda message: self._on_diff_error(message, change.path))
         self._thread_pool.start(worker)
 
     def _on_diff_ready(self, change: FileChange, diff) -> None:
@@ -664,8 +664,8 @@ class MainWindow(QMainWindow):
             abs_path = self._editable_path(self._selected_repo_path, change)
             self._diff_view.set_diff(diff, str(change.path), abs_path)
 
-    def _on_diff_error(self, message: str) -> None:
-        applog.log(f"Diff failed: {message}", level=applog.LogLevel.ERROR)
+    def _on_diff_error(self, message: str, file_path: Path) -> None:
+        applog.log(f"Diff failed for {file_path}: {message}", level=applog.LogLevel.ERROR)
         self.statusBar().showMessage(f"Diff failed: {message}", 5000)
 
     def _on_file_saved(self, file_path: str) -> None:
@@ -1482,6 +1482,7 @@ class MainWindow(QMainWindow):
         )
         worker.signals.progress.connect(self._on_scan_progress)
         worker.signals.repo_ready.connect(self._on_repo_ready)
+        worker.signals.dead_repo.connect(self._on_dead_repo)
         worker.signals.workspace_ready.connect(self._on_workspace_ready)
         worker.signals.error.connect(self._on_scan_error)
         worker.signals.log_message.connect(self._on_scan_log_message)
@@ -1524,6 +1525,23 @@ class MainWindow(QMainWindow):
                 self._workspace.repositories[index] = repo
                 return
         self._workspace.repositories.append(repo)
+
+    def _on_dead_repo(self, repo_path: Path) -> None:
+        # Companion to _on_repo_ready's merge-by-path logic (e3aac9b): the
+        # merge exists so a scan that legitimately reports only a subset
+        # (dirty-gated repos, a partial/in-progress scan, cache hits) doesn't
+        # wipe out the rest of the tree. That means mere absence from a
+        # scan's results must NEVER remove a repo here -- only a scanner
+        # trigger of "dead" does, which WorkspaceScannerService only emits
+        # once GitPython has positively confirmed the directory no longer
+        # exists (git.exc.NoSuchPathError), never on a transient git error.
+        if self._incremental_scan:
+            return
+        if self._workspace is None:
+            return
+        self._workspace.repositories = [
+            repo for repo in self._workspace.repositories if repo.path != repo_path
+        ]
 
     def _on_workspace_ready(self, workspace: Workspace) -> None:
         self._scan_refresh_timer.stop()

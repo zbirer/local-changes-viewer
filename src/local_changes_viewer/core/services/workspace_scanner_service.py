@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from git.exc import NoSuchPathError
+
 from local_changes_viewer.core.domain.file_change import ChangeType
 from local_changes_viewer.core.domain.pull_request import PullRequestInfo
 from local_changes_viewer.core.domain.repository import Repository
@@ -91,11 +93,13 @@ class WorkspaceScannerService:
         dirty_paths: set[Path] | None = None,
         force_full_rescan: bool = False,
         on_debug: Callable[[str], None] | None = None,
+        on_dead_repo: Callable[[Path], None] | None = None,
     ) -> Workspace:
         on_progress = on_progress or (lambda _message: None)
         on_repo_ready = on_repo_ready or (lambda _repo: None)
         on_log = on_log or (lambda _message: None)
         on_debug = on_debug or (lambda _message: None)
+        on_dead_repo = on_dead_repo or (lambda _path: None)
         is_cancelled = is_cancelled or (lambda: False)
 
         scan_started_at = time.monotonic()
@@ -208,6 +212,16 @@ class WorkspaceScannerService:
                 if repo is not None:
                     repositories.append(repo)
                     on_repo_ready(repo)
+                elif trigger == "dead":
+                    # A positive signal from _scan_repo that this path's
+                    # directory is gone (git.exc.NoSuchPathError), not merely
+                    # a repo this particular scan happened not to touch. Only
+                    # this case may remove the repo from a merged workspace
+                    # (see MainWindow._on_dead_repo) -- a "cached"/"error"
+                    # trigger must never trigger removal, or the merge-by-path
+                    # fix from e3aac9b regresses back to flickering the tree
+                    # empty on every transient git failure.
+                    on_dead_repo(repo_path)
         on_debug(f"Scan decisions: {rescanned_count} rescanned, {cached_count} served from cache")
         git_scan_phase_seconds = time.monotonic() - git_scan_phase_started_at
         on_progress(
@@ -313,7 +327,27 @@ class WorkspaceScannerService:
         if is_cancelled():
             return None, 0.0, 0.0, "cancelled", 0.0
 
-        adapter = self._adapter_factory(repo_path)
+        try:
+            adapter = self._adapter_factory(repo_path)
+        except NoSuchPathError:
+            # git.Repo(repo_path) raises this (a subclass of OSError whose
+            # __str__ returns only the bare path) the moment the directory
+            # is gone from disk -- e.g. a worktree the user deleted outside
+            # the app. This is a positive "the repo is gone" signal, distinct
+            # from every other exception below: it is the only trigger value
+            # scan() acts on to remove the repo from a merged workspace (see
+            # the "dead" handling in scan() and MainWindow._on_dead_repo). A
+            # single clean line here, not the ~30-line traceback the generic
+            # branch below logs, since this is an expected, recoverable case.
+            on_log(f"Repo directory no longer exists, removing from workspace: {repo_path}")
+            return None, time.monotonic() - started_at, 0.0, "dead", 0.0
+        except Exception as exc:
+            on_log(
+                f"Skipping repo {repo_path}: failed to read git state: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            return None, time.monotonic() - started_at, 0.0, "error", 0.0
+
         cached_repo = self._repo_cache.get(repo_path)
         last_real_scan_at = self._last_real_scan_at.get(repo_path)
         cache_age_seconds = (
@@ -348,6 +382,12 @@ class WorkspaceScannerService:
             try:
                 changes = adapter.list_changes(include_unpushed_commits=include_unpushed_commits)
                 branch_status = adapter.get_branch_status()
+            except NoSuchPathError:
+                # Same positive "gone" signal as the adapter-construction
+                # guard above, for the (rare) case the directory disappears
+                # between constructing the adapter and reading git state.
+                on_log(f"Repo directory no longer exists, removing from workspace: {repo_path}")
+                return None, time.monotonic() - started_at, 0.0, "dead", cache_age_seconds
             except Exception as exc:
                 on_log(f"Skipping repo {repo_path}: failed to read git state: {exc}\n{traceback.format_exc()}")
                 return None, time.monotonic() - started_at, 0.0, trigger, cache_age_seconds
