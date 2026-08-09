@@ -4,7 +4,8 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QSettings
+from PySide6.QtGui import QCursor, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 import local_changes_viewer.gui.settings as settings_module
@@ -114,3 +115,124 @@ def test_row_actions_overlay_shown_for_repo_root_hidden_otherwise(
     assert file_index.isValid()
     view._update_row_actions_widget(file_index)
     assert view._row_actions_widget.isHidden()
+
+
+def _send_mouse_move(view: RepoTreeView, pos: QPoint) -> None:
+    """Drives the view's real hover entry point (viewportEvent's MouseMove
+    branch) rather than calling the private _update_row_actions_widget
+    helper directly -- the whole point of these tests is to prove the
+    overlay is now hover-driven, not selection-driven."""
+    global_pos = view.viewport().mapToGlobal(pos)
+    event = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(pos),
+        QPointF(global_pos),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(view.viewport(), event)
+
+
+def _send_leave(view: RepoTreeView) -> None:
+    QApplication.sendEvent(view.viewport(), QEvent(QEvent.Type.Leave))
+
+
+def test_hovering_repo_root_row_shows_overlay(qapp, isolated_settings: Path) -> None:
+    repo_path = Path("/repos/example-repo")
+    view = _tree_view(isolated_settings)
+    view.set_workspace(_workspace_with_one_repo(repo_path))
+
+    repo_index = view.find_repo_index(repo_path)
+    assert repo_index.isValid()
+    rect = view.visualRect(repo_index)
+    assert not rect.isEmpty()
+
+    _send_mouse_move(view, rect.center())
+
+    assert not view._row_actions_widget.isHidden()
+    assert view._hovered_index == repo_index
+
+
+def test_hovering_non_repo_root_row_hides_overlay(qapp, isolated_settings: Path) -> None:
+    repo_path = Path("/repos/example-repo")
+    view = _tree_view(isolated_settings)
+    view.set_workspace(_workspace_with_one_repo(repo_path))
+
+    repo_index = view.find_repo_index(repo_path)
+    assert repo_index.isValid()
+    _send_mouse_move(view, view.visualRect(repo_index).center())
+    assert not view._row_actions_widget.isHidden()
+
+    file_index = view._proxy.index(0, 0, repo_index)
+    assert file_index.isValid()
+    file_rect = view.visualRect(file_index)
+    assert not file_rect.isEmpty()
+
+    _send_mouse_move(view, file_rect.center())
+
+    assert view._row_actions_widget.isHidden()
+
+
+def test_current_changed_alone_does_not_show_overlay(qapp, isolated_settings: Path) -> None:
+    """Selecting/clicking a repo-root row must not, by itself, reveal the
+    overlay -- only hovering it does. This is the bug the hover feature
+    fixes: previously currentChanged drove the overlay directly."""
+    repo_path = Path("/repos/example-repo")
+    view = _tree_view(isolated_settings)
+    view.set_workspace(_workspace_with_one_repo(repo_path))
+
+    repo_index = view.find_repo_index(repo_path)
+    assert repo_index.isValid()
+
+    view.setCurrentIndex(repo_index)
+
+    assert view._row_actions_widget.isHidden()
+
+
+def test_leaving_viewport_hides_overlay(
+    qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path = Path("/repos/example-repo")
+    view = _tree_view(isolated_settings)
+    view.set_workspace(_workspace_with_one_repo(repo_path))
+
+    repo_index = view.find_repo_index(repo_path)
+    assert repo_index.isValid()
+    _send_mouse_move(view, view.visualRect(repo_index).center())
+    assert not view._row_actions_widget.isHidden()
+
+    # Cursor is nowhere near the overlay -- comfortably outside its bounds.
+    overlay_rect = view._row_actions_widget.geometry()
+    outside_local = QPoint(overlay_rect.right() + 500, overlay_rect.bottom() + 500)
+    outside_global = view.viewport().mapToGlobal(outside_local)
+    monkeypatch.setattr(QCursor, "pos", staticmethod(lambda: outside_global))
+
+    _send_leave(view)
+
+    assert view._row_actions_widget.isHidden()
+    assert not view._hovered_index.isValid()
+
+
+def test_overlay_stays_visible_when_cursor_over_overlay_widget(
+    qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The overlay sits on top of its row, so moving the mouse from the row
+    onto the R/+/- buttons makes the viewport see a Leave event. The overlay
+    must NOT hide in that case, or the buttons become unclickable."""
+    repo_path = Path("/repos/example-repo")
+    view = _tree_view(isolated_settings)
+    view.set_workspace(_workspace_with_one_repo(repo_path))
+
+    repo_index = view.find_repo_index(repo_path)
+    assert repo_index.isValid()
+    _send_mouse_move(view, view.visualRect(repo_index).center())
+    assert not view._row_actions_widget.isHidden()
+
+    overlay_center_local = view._row_actions_widget.geometry().center()
+    overlay_center_global = view.viewport().mapToGlobal(overlay_center_local)
+    monkeypatch.setattr(QCursor, "pos", staticmethod(lambda: overlay_center_global))
+
+    _send_leave(view)
+
+    assert not view._row_actions_widget.isHidden()

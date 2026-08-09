@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QModelIndex, QSortFilterProxyModel, Qt, Signal
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QHBoxLayout, QToolButton, QToolTip, QTreeView, QWidget
 
 from local_changes_viewer.gui import applog
@@ -74,11 +75,14 @@ class RepoTreeView(QTreeView):
         self._proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.setModel(self._proxy)
         self.setHeaderHidden(True)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         self.collapsed.connect(self._on_collapsed)
         self.expanded.connect(self._on_expanded)
         self.selectionModel().currentChanged.connect(self._on_current_changed)
 
         self._row_actions_index = QModelIndex()
+        self._hovered_index = QModelIndex()
         self._row_actions_widget = QWidget(self.viewport())
         row_actions_layout = QHBoxLayout(self._row_actions_widget)
         row_actions_layout.setContentsMargins(0, 0, 0, 0)
@@ -124,7 +128,7 @@ class RepoTreeView(QTreeView):
             self.collapse_index_recursive(self._row_actions_index)
 
     def _on_row_actions_scroll(self, _value: int) -> None:
-        self._update_row_actions_widget(self._row_actions_index)
+        self._update_row_actions_widget(self._hovered_index)
 
     def _update_row_actions_widget(self, index: QModelIndex) -> None:
         is_repo_root = (
@@ -150,6 +154,24 @@ class RepoTreeView(QTreeView):
         self._row_actions_widget.show()
         self._row_actions_widget.raise_()
 
+    def _update_hovered_index(self, index: QModelIndex) -> None:
+        if index == self._hovered_index:
+            return
+        self._hovered_index = index
+        self._update_row_actions_widget(index)
+
+    def _cursor_over_row_actions(self) -> bool:
+        """True while the cursor sits over the overlay widget itself (or one
+        of its R/+/- buttons). The overlay is a child widget stacked on top
+        of its row, so moving onto it makes it -- not the row underneath --
+        the widget under the cursor; without this check, the viewport's Leave
+        handling below would hide the overlay out from under the cursor
+        before a click on a button could land."""
+        if self._row_actions_widget.isHidden():
+            return False
+        local_pos = self.viewport().mapFromGlobal(QCursor.pos())
+        return self._row_actions_widget.geometry().contains(local_pos)
+
     def viewportEvent(self, event) -> bool:
         if event.type() == QEvent.Type.ToolTip:
             index = self.indexAt(event.pos())
@@ -160,9 +182,18 @@ class RepoTreeView(QTreeView):
             else:
                 QToolTip.hideText()
             return True
+        if event.type() == QEvent.Type.MouseMove:
+            self._update_hovered_index(self.indexAt(event.position().toPoint()))
+        elif event.type() == QEvent.Type.Leave:
+            if not self._cursor_over_row_actions():
+                self._update_hovered_index(QModelIndex())
         return super().viewportEvent(event)
 
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        # Selection must never drive the row-actions overlay -- only hover
+        # does (see viewportEvent's MouseMove/Leave handling above). This
+        # handler only updates selection-driven signals (file_selected,
+        # scope_changed).
         if self._programmatic_change:
             return
         change = current.data(FILE_CHANGE_ROLE)
@@ -170,19 +201,16 @@ class RepoTreeView(QTreeView):
         if change is not None and repo_path is not None:
             self.file_selected.emit(repo_path, change)
             self.scope_changed.emit(Path(repo_path), change.path.parent)
-            self._update_row_actions_widget(current)
             return
 
         key = current.data(NODE_KEY_ROLE)
         if key is None:
-            self._update_row_actions_widget(current)
             return
         if "::" in key:
             repo_str, prefix_str = key.split("::", maxsplit=1)
             self.scope_changed.emit(Path(repo_str), Path(prefix_str))
         else:
             self.scope_changed.emit(Path(key), None)
-        self._update_row_actions_widget(current)
 
     def set_workspace(self, workspace) -> None:
         self._programmatic_change = True
@@ -394,21 +422,21 @@ class RepoTreeView(QTreeView):
     def _on_collapsed(self, index: QModelIndex) -> None:
         key = index.data(NODE_KEY_ROLE)
         if key is None or self._programmatic_change:
-            self._update_row_actions_widget(self._row_actions_index)
+            self._update_row_actions_widget(self._hovered_index)
             return
         applog.log(f"Collapsed folder: {key}", level=applog.LogLevel.INFO)
         keys = self._settings.collapsed_node_keys()
         keys.add(key)
         self._settings.set_collapsed_node_keys(keys)
-        self._update_row_actions_widget(self._row_actions_index)
+        self._update_row_actions_widget(self._hovered_index)
 
     def _on_expanded(self, index: QModelIndex) -> None:
         key = index.data(NODE_KEY_ROLE)
         if key is None or self._programmatic_change:
-            self._update_row_actions_widget(self._row_actions_index)
+            self._update_row_actions_widget(self._hovered_index)
             return
         applog.log(f"Expanded folder: {key}", level=applog.LogLevel.INFO)
         keys = self._settings.collapsed_node_keys()
         keys.discard(key)
         self._settings.set_collapsed_node_keys(keys)
-        self._update_row_actions_widget(self._row_actions_index)
+        self._update_row_actions_widget(self._hovered_index)
