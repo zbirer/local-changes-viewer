@@ -105,6 +105,11 @@ class MainWindow(QMainWindow):
         self._selected_change: FileChange | None = None
         self._selected_repo_path: Path | None = None
         self._thread_pool = QThreadPool.globalInstance()
+        # Guards _on_refresh_repo against a double-click (or a context-menu
+        # click plus a row-button click) firing two concurrent
+        # RepoRefreshWorker runs for the same repo -- the worker itself has
+        # no such guard.
+        self._refreshing_repo_paths: set[Path] = set()
         self._shutdown_requested = threading.Event()
         self._scan_refresh_timer = QTimer(self)
         self._scan_refresh_timer.setInterval(150)
@@ -148,6 +153,7 @@ class MainWindow(QMainWindow):
 
         self._tree_view = RepoTreeView(self._settings)
         self._tree_view.file_selected.connect(self._on_file_selected)
+        self._tree_view.refresh_repo_requested.connect(self._on_refresh_repo)
         self._tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree_view.customContextMenuRequested.connect(self._on_tree_context_menu)
         self._filter_box = QLineEdit()
@@ -1301,6 +1307,13 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_refresh_repo(self, repo_path: Path) -> None:
+        if repo_path in self._refreshing_repo_paths:
+            # Already refreshing this repo (e.g. a double-click on the row's
+            # refresh button, or the button plus the context-menu action) --
+            # RepoRefreshWorker itself has no reentrancy guard, so avoid
+            # starting a second concurrent scan of the same repo.
+            return
+        self._refreshing_repo_paths.add(repo_path)
         existing_repo = next(
             (r for r in (self._workspace.repositories if self._workspace else []) if r.path == repo_path),
             None,
@@ -1326,11 +1339,18 @@ class MainWindow(QMainWindow):
         worker.signals.repo_ready.connect(
             lambda repo: self._on_repo_refreshed(repo_path, repo)
         )
-        worker.signals.error.connect(self._on_scan_error)
+        worker.signals.error.connect(
+            lambda message: self._on_refresh_repo_error(repo_path, message)
+        )
         worker.signals.log_message.connect(self._on_scan_log_message)
         self._thread_pool.start(worker)
 
+    def _on_refresh_repo_error(self, repo_path: Path, message: str) -> None:
+        self._refreshing_repo_paths.discard(repo_path)
+        self._on_scan_error(message)
+
     def _on_repo_refreshed(self, repo_path: Path, repo: Repository | None) -> None:
+        self._refreshing_repo_paths.discard(repo_path)
         if self._workspace is None:
             return
         if repo is None:

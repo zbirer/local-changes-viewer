@@ -61,6 +61,7 @@ class _WorkspaceFilterProxyModel(QSortFilterProxyModel):
 class RepoTreeView(QTreeView):
     file_selected = Signal(object, object)  # repo_path: Path, change: FileChange
     scope_changed = Signal(object, object)  # repo_path: Path | None, prefix: Path | None
+    refresh_repo_requested = Signal(object)  # repo_path: Path
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
@@ -82,6 +83,11 @@ class RepoTreeView(QTreeView):
         row_actions_layout = QHBoxLayout(self._row_actions_widget)
         row_actions_layout.setContentsMargins(0, 0, 0, 0)
         row_actions_layout.setSpacing(2)
+        self._refresh_button = QToolButton(self._row_actions_widget)
+        self._refresh_button.setText("R")
+        self._refresh_button.setToolTip("Refresh this repo")
+        self._refresh_button.setAutoRaise(True)
+        self._refresh_button.setFixedSize(18, 18)
         self._expand_button = QToolButton(self._row_actions_widget)
         self._expand_button.setText("+")
         self._expand_button.setToolTip("Expand All")
@@ -92,13 +98,22 @@ class RepoTreeView(QTreeView):
         self._collapse_button.setToolTip("Collapse All")
         self._collapse_button.setAutoRaise(True)
         self._collapse_button.setFixedSize(18, 18)
+        row_actions_layout.addWidget(self._refresh_button)
         row_actions_layout.addWidget(self._expand_button)
         row_actions_layout.addWidget(self._collapse_button)
         self._row_actions_widget.hide()
+        self._refresh_button.clicked.connect(self._on_row_refresh_clicked)
         self._expand_button.clicked.connect(self._on_row_expand_clicked)
         self._collapse_button.clicked.connect(self._on_row_collapse_clicked)
         self.verticalScrollBar().valueChanged.connect(self._on_row_actions_scroll)
         self.horizontalScrollBar().valueChanged.connect(self._on_row_actions_scroll)
+
+    def _on_row_refresh_clicked(self) -> None:
+        if not self._row_actions_index.isValid():
+            return
+        folder_path = self._row_actions_index.data(FOLDER_PATH_ROLE)
+        if folder_path is not None:
+            self.refresh_repo_requested.emit(Path(folder_path))
 
     def _on_row_expand_clicked(self) -> None:
         if self._row_actions_index.isValid():
