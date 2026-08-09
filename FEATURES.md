@@ -18,15 +18,36 @@ stripping the tests off a covered one, breaks the build.
 ## When you change code
 
 - **Changed behavior?** Update the affected block here in the same commit.
-- **Added a feature?** Add a block, with a test. The ratchet will not accept a
-  new `TESTS: NONE`.
+- **Added a feature?** Add a block, with a test, under the category it best
+  fits, and renumber so numbering stays sequential from F1 in document order.
+  The ratchet will not accept a new `TESTS: NONE`.
 - **Moved a file?** Update its `WHERE:` anchor.
 - **Renamed a test?** Update every block citing it.
+- **Reorganized categories, or moved a block to a different one?** Keep every
+  block's `### F<n>.` heading sequential (F1…F84) in document order — a block
+  that changes position gets renumbered to match, even if nothing else about
+  it changed.
 
-`WHERE:` line numbers drift and are advisory — the gate checks the *file* exists,
-not the line. `TESTS:` entries are checked exactly and must name real tests.
+`WHERE:` line numbers drift and are advisory — the gate checks the *file*
+exists, not the line. `TESTS:` entries are checked exactly and must name real
+tests.
+
+## Categories
+
+- [Workspace Tree & Navigation](#workspace-tree--navigation) — F1–F16
+- [Scanning, Refresh & Caching](#scanning-refresh--caching) — F17–F28
+- [Filtering](#filtering) — F29–F36
+- [Profiles](#profiles) — F37–F43
+- [Git Change Detection](#git-change-detection) — F44–F52
+- [GitHub Integration & Pull Requests](#github-integration--pull-requests) — F53–F64
+- [Diff Viewing & Editing](#diff-viewing--editing) — F65–F76
+- [Settings, Persistence & Logging](#settings-persistence--logging) — F77–F84
 
 ---
+
+## Workspace Tree & Navigation
+
+The folder-tree view of scanned repos: how rows render, expand/collapse, and get filtered or acted on.
 
 ### F1. Open a folder to scan for git repos
 WHAT: Actions > Open Folder… lets the user pick the root directory to scan.
@@ -108,6 +129,10 @@ WHAT: Right-clicking a folder or repo-root row offers folder-scoped actions; onl
 WHERE: `src/local_changes_viewer/gui/main_window.py:1225`
 TESTS: NONE
 
+## Scanning, Refresh & Caching
+
+How the app discovers repos, rescans them, and reuses cached state for fast startup and refresh.
+
 ### F17. Startup scan discovers git repos under the chosen root, with progress messages
 WHAT: Opening a folder walks it for git repos and streams progress ("Found N repos…", "Scanned i/N…") to the status bar.
 WHERE: `src/local_changes_viewer/core/services/workspace_scanner_service.py:79`
@@ -168,6 +193,10 @@ WHAT: After every scan the workspace is saved to disk (schema-versioned; a misma
 WHERE: `src/local_changes_viewer/core/services/workspace_cache.py`
 TESTS: `tests/core/services/test_workspace_cache.py::test_round_trip_preserves_workspace_with_multiple_repos_and_changes`, `tests/core/services/test_workspace_cache.py::test_diff_is_dropped_on_save_and_loads_back_as_none`, `tests/core/services/test_workspace_cache.py::test_load_workspace_returns_none_when_file_does_not_exist`, `tests/core/services/test_workspace_cache.py::test_load_workspace_returns_none_on_malformed_json`, `tests/core/services/test_workspace_cache.py::test_load_workspace_returns_none_on_version_mismatch`, `tests/core/services/test_workspace_cache.py::test_save_workspace_swallows_errors_when_write_fails`
 
+## Filtering
+
+Rules that narrow which folders, files, and repos show up in the tree.
+
 ### F29. Filtered Folders… dialog manages contains/equals folder-name filter rules
 WHAT: A dialog to add and remove named folder filter rules that hide matching files from every repo's change list.
 WHERE: `src/local_changes_viewer/gui/folder_filter_dialog.py`
@@ -208,6 +237,10 @@ WHAT: Limits the visible changes to files whose mtime is within the last N minut
 WHERE: `src/local_changes_viewer/core/services/workspace_filter.py:36`
 TESTS: `tests/core/services/test_workspace_filter.py::test_max_age_minutes_zero_shows_all_changes`, `tests/core/services/test_workspace_filter.py::test_max_age_minutes_filters_out_old_files`, `tests/core/services/test_workspace_filter.py::test_max_age_minutes_includes_change_when_file_missing`
 
+## Profiles
+
+Named subsets of repos that can be switched between and managed independently of the folder filters.
+
 ### F37. Profiles restrict the displayed tree to a named subset of repos
 WHAT: An active profile hides every repo not in its list; a nested worktree still shows if its logical parent is in the profile.
 WHERE: `src/local_changes_viewer/core/services/workspace_filter.py:45`
@@ -228,204 +261,220 @@ WHAT: With a profile active the scan skips git and GitHub work entirely for repo
 WHERE: `src/local_changes_viewer/core/services/workspace_scanner_service.py:108`
 TESTS: `tests/core/services/test_workspace_scanner_service.py::test_scan_with_profile_repo_names_only_scans_matching_repos`, `tests/core/services/test_workspace_scanner_service.py::test_scan_with_profile_repo_names_keeps_worktree_of_matching_parent`, `tests/core/services/test_workspace_scanner_service.py::test_scan_with_profile_repo_names_skips_github_fetch_for_inherited_worktree`
 
-### F41. Detects modified/untracked/added/deleted/renamed/ignored files via git status
-WHAT: The core change detection: every git status code maps to a ChangeType shown in the tree.
-WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:29`
-TESTS: `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_modified_file`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_untracked_file`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_added_staged_file`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_deleted_file`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_renamed_staged_file`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_empty_for_clean_repo`
-
-### F42. Untracked/ignored directories, including symlinked ones, report as a single directory entry
-WHAT: An untracked or ignored folder — even a symlink pointing at one — shows as one directory row instead of being descended into.
-WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:43`
-TESTS: `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_untracked_directory_as_single_directory_entry`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_classifies_symlinked_directory_as_directory`
-
-### F43. Branch name plus ahead/behind-vs-upstream counts shown per repo
-WHAT: Each repo reports its current branch and how many commits it is ahead of and behind its upstream.
-WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:121`
-TESTS: `tests/core/infra/test_git_repo_adapter.py::test_branch_status_with_no_upstream`, `tests/core/infra/test_git_repo_adapter.py::test_branch_status_ahead_and_behind`
-
-### F44. Repo tooltip shows a guessed local parent branch and the remote default branch
-WHAT: Best-effort "parent of branch" (nearest merge-base among local branches) and the remote's default branch name.
-WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:245`
-TESTS: `tests/core/infra/test_git_repo_adapter.py::test_branch_status_finds_local_parent_branch`, `tests/core/infra/test_git_repo_adapter.py::test_branch_status_parent_branch_none_when_no_other_branches`, `tests/core/infra/test_git_repo_adapter.py::test_branch_status_default_branch_falls_back_to_init_default_branch_config`, `tests/core/infra/test_git_repo_adapter.py::test_branch_status_default_branch_queried_live_from_remote`
-
-### F45. Full-context unified diff computed for any change type
-WHAT: Selecting a modified, deleted, untracked, renamed, or unpushed-commit file computes its diff against the right ref.
-WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:269`
-TESTS: `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_for_modified_file`, `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_for_deleted_file`, `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_for_untracked_file`, `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_for_renamed_file`, `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_for_unpushed_commit_diffs_against_upstream`
-
-### F46. "Ignore whitespace" setting recomputes the diff ignoring whitespace-only changes
-WHAT: Toggling this setting re-diffs the current file with git's --ignore-all-space.
-WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:273`
-TESTS: `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_ignore_whitespace`
-
-### F47. Linked worktrees are discovered and excluded from their parent's own change list
-WHAT: A worktree checkout under a repo does not show as a spurious untracked-directory change on the parent; it is shown separately instead.
-WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:217`
-TESTS: `tests/core/infra/test_git_repo_adapter.py::test_list_worktrees_returns_linked_worktree_paths`, `tests/core/infra/test_git_repo_adapter.py::test_list_worktrees_returns_empty_list_when_no_linked_worktrees`
-
-### F48. "Show Log" dialog: browse recent commits, per-commit changed files, per-file diff
-WHAT: A repo-root context action opens a dialog listing recent commits (count adjustable via slider), the files each commit touched, and each file's diff.
-WHERE: `src/local_changes_viewer/gui/commit_log_dialog.py`
-TESTS: `tests/core/infra/test_git_repo_adapter.py::test_get_recent_commits_returns_newest_first_with_limit`, `tests/core/infra/test_git_repo_adapter.py::test_get_commit_files_lists_changed_paths`, `tests/core/infra/test_git_repo_adapter.py::test_get_commit_file_diff_shows_added_content`
-
-### F49. Repo discovery is limited to immediate children and never descends into a found repo
-WHAT: Scanning a root treats the root itself as a repo if it is one, otherwise scans only its direct subdirectories, and never looks for repos within repos.
-WHERE: `src/local_changes_viewer/core/infra/filesystem_scanner.py`
-TESTS: `tests/core/infra/test_filesystem_scanner.py::test_finds_repo_at_root`, `tests/core/infra/test_filesystem_scanner.py::test_root_itself_is_a_repo`, `tests/core/infra/test_filesystem_scanner.py::test_does_not_descend_past_immediate_children`, `tests/core/infra/test_filesystem_scanner.py::test_finds_multiple_sibling_repos`, `tests/core/infra/test_filesystem_scanner.py::test_does_not_look_inside_a_found_repo_for_further_repos`, `tests/core/infra/test_filesystem_scanner.py::test_ignores_folders_without_git`, `tests/core/infra/test_filesystem_scanner.py::test_detects_git_as_file_for_submodules`, `tests/core/infra/test_filesystem_scanner.py::test_returns_empty_list_when_no_repos_found`
-
-### F50. Connect to GitHub… dialog authenticates and stores credentials
-WHAT: A dialog collects a username and personal access token, validates it against GitHub's own reported login, and stores it for reuse.
-WHERE: `src/local_changes_viewer/gui/github_connect_dialog.py`
-TESTS: NONE
-
-### F51. Disconnect GitHub clears stored credentials
-WHAT: GitHub > Disconnect GitHub removes the stored token and username.
-WHERE: `src/local_changes_viewer/gui/main_window.py:879`
-TESTS: NONE
-
-### F52. Auto-reconnects to GitHub on launch using stored credentials
-WHAT: If a username and token were previously saved, the app reconnects silently at startup and shows a status message.
-WHERE: `src/local_changes_viewer/gui/main_window.py:833`
-TESTS: NONE
-
-### F53. Repo row and tooltip can show its associated GitHub PR, resolved by branch name
-WHAT: If the current branch has an open, closed, or merged PR on GitHub, its number and state show in the row and tooltip.
-WHERE: `src/local_changes_viewer/core/infra/github_client.py:344`
-TESTS: `tests/core/infra/test_github_client.py::test_find_pull_request_returns_none_when_no_matches`, `tests/core/infra/test_github_client.py::test_find_pull_request_returns_info_when_found`, `tests/core/infra/test_github_client.py::test_find_pull_request_lowercases_merged_state`, `tests/core/infra/test_github_client.py::test_find_pull_request_raises_github_error_on_graphql_errors`
-
-### F54. PR lookups are cached with a TTL, and a terminal-state PR is reused across refreshes
-WHAT: A branch's PR result is cached for 60s to avoid re-querying GitHub every refresh; a merged or closed PR for an unchanged branch is reused indefinitely.
-WHERE: `src/local_changes_viewer/core/services/workspace_scanner_service.py:469`
-TESTS: `tests/core/services/test_workspace_scanner_service.py::test_scan_reuses_cached_pr_for_terminal_state_and_unchanged_branch`, `tests/core/services/test_workspace_scanner_service.py::test_scan_still_fetches_when_previous_pr_is_open`, `tests/core/services/test_workspace_scanner_service.py::test_scan_still_fetches_when_branch_changed`, `tests/core/services/test_workspace_scanner_service.py::test_scan_reuses_open_pr_within_ttl_window`, `tests/core/services/test_workspace_scanner_service.py::test_scan_refetches_pr_once_ttl_expires`, `tests/core/services/test_workspace_scanner_service.py::test_scan_refetches_pr_immediately_when_branch_changes_within_ttl`
-
-### F55. GitHub fetch errors degrade gracefully instead of failing the scan
-WHAT: A PR-lookup failure (GraphQL or HTTP error) is logged and treated as "no PR", never crashing or aborting the workspace scan.
-WHERE: `src/local_changes_viewer/core/services/workspace_scanner_service.py:514`
-TESTS: `tests/core/services/test_workspace_scanner_service.py::test_scan_routes_github_pr_fetch_error_through_on_log_not_an_exception`
-
-### F56. "My Open Pull Requests…" dialog and dockable PRs panel list the user's own open PRs
-WHAT: Lists every open PR authored by the connected user across every GitHub-remote repo currently in the tree, grouped by repo.
-WHERE: `src/local_changes_viewer/gui/my_pull_requests_dialog.py`
-TESTS: `tests/core/infra/test_github_client.py::test_list_authored_open_pull_requests_empty_pairs_returns_empty_list`, `tests/core/infra/test_github_client.py::test_list_authored_open_pull_requests_returns_matches_filtered_by_author`, `tests/core/infra/test_github_client.py::test_list_authored_open_pull_requests_skips_repo_on_error`
-
-### F57. Each PR row shows approval, unresolved threads, last reviewer, changed files, checks state
-WHAT: Per-PR columns summarizing review status, refreshable individually.
-WHERE: `src/local_changes_viewer/core/infra/github_client.py:146`
-TESTS: `tests/core/infra/test_github_client.py::test_get_pull_request_review_status_returns_none_reviewer_when_no_reviews`
-
-### F58. Double-click or right-click a PR row opens it in browser, or shows Info / Open Issues
-WHAT: Double-click opens the PR URL; right-click offers Refresh, Info, Open Issues, and Copy URL. Info shows title, branches, status, dates, and last commenter; Open Issues lists unresolved review threads plus general comments.
-WHERE: `src/local_changes_viewer/core/infra/github_client.py:245`
-TESTS: `tests/core/infra/test_github_client.py::test_get_pull_request_details_returns_open_status_and_last_comment_writer`, `tests/core/infra/test_github_client.py::test_get_pull_request_details_reports_draft_status_and_no_comments`, `tests/core/infra/test_github_client.py::test_get_pull_request_open_threads_returns_only_unresolved_review_comments`, `tests/core/infra/test_github_client.py::test_get_pull_request_open_threads_returns_issue_comments`, `tests/core/infra/test_github_client.py::test_get_pull_request_open_threads_maps_review_states_to_comment_types`, `tests/core/infra/test_github_client.py::test_get_pull_request_open_threads_sorts_across_categories_newest_first`, `tests/core/infra/test_github_client.py::test_get_pull_request_open_threads_returns_empty_list_when_nothing_open`
-
-### F59. "Open All" and "Copy All URLs" for a PR repository group
-WHAT: Right-clicking a repo group in the PR list opens every one of its PRs in the browser, or copies all their URLs.
-WHERE: `src/local_changes_viewer/gui/my_pull_requests_dialog.py:229`
-TESTS: NONE
-
-### F60. Recognizes https, ssh, and git@ GitHub remote URL forms
-WHAT: Parses an origin remote URL into (owner, repo) across GitHub's various URL styles, including SSH host aliases.
-WHERE: `src/local_changes_viewer/core/infra/github_client.py:68`
-TESTS: `tests/core/infra/test_github_client.py::test_parse_github_owner_repo`
-
-### F61. Token validation surfaces authentication errors
-WHAT: get_authenticated_login confirms a token works and raises a GitHubError with detail on HTTP failure.
-WHERE: `src/local_changes_viewer/core/infra/github_client.py:142`
-TESTS: `tests/core/infra/test_github_client.py::test_get_authenticated_login`, `tests/core/infra/test_github_client.py::test_get_authenticated_login_raises_github_error_on_http_error`
-
-### F62. Unified diff view with syntax highlighting and a toggleable line-number gutter
-WHAT: The default diff view renders +/-/context lines with language-aware syntax coloring and old/new line numbers in a gutter.
-WHERE: `src/local_changes_viewer/gui/diff_view/unified_view.py`
-TESTS: NONE
-
-### F63. Side-by-side diff view with syncable left/right scrolling
-WHAT: An alternate two-pane diff view whose scroll can be locked together via "Sync side-by-side scroll".
-WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py`
-TESTS: NONE
-
-### F64. Long unchanged context runs fold to a "click to expand" marker
-WHAT: A big run of unchanged context lines collapses to one clickable marker line in both diff views; clicking expands it.
-WHERE: `src/local_changes_viewer/core/services/context_folding.py`
-TESTS: `tests/core/services/test_context_folding.py::test_short_context_run_stays_visible`, `tests/core/services/test_context_folding.py::test_long_context_run_between_changes_folds_middle_keeping_margins`, `tests/core/services/test_context_folding.py::test_long_context_run_at_file_start_has_no_head_margin`, `tests/core/services/test_context_folding.py::test_long_context_run_at_file_end_has_no_tail_margin`
-
-### F65. Side-by-side pairs removed and added lines row-by-row for substitutions
-WHAT: In side-by-side view a run of removed lines lines up against a same-length run of added lines row by row; uneven runs leave the shorter side blank.
-WHERE: `src/local_changes_viewer/core/services/diff_pairing.py`
-TESTS: `tests/core/services/test_diff_pairing.py::test_pairs_context_line_on_both_sides`, `tests/core/services/test_diff_pairing.py::test_pairs_equal_length_removed_and_added_runs_row_by_row`, `tests/core/services/test_diff_pairing.py::test_pairs_unequal_length_runs_leaving_unmatched_side_none`, `tests/core/services/test_diff_pairing.py::test_pair_substitution_indices_matches_same_row_removed_added`
-
-### F66. Intraline diff highlights the exact changed substring within a modified line
-WHAT: Within a paired removed/added line, only the actually-changed word or substring is highlighted, not the whole line.
-WHERE: `src/local_changes_viewer/core/services/intraline_diff.py`
-TESTS: `tests/core/services/test_intraline_diff.py::test_single_word_change_in_long_line_highlights_only_that_word`, `tests/core/services/test_intraline_diff.py::test_identical_text_produces_no_ranges`, `tests/core/services/test_intraline_diff.py::test_completely_different_text_covers_whole_string`
-
-### F67. Diff toolbar: view-mode toggle, prev/next hunk, refresh, line numbers, font size
-WHAT: Toggle side-by-side/unified, jump between changed hunks, force-reload the diff, toggle gutters, and zoom in and out, also via View menu and Ctrl+= / Ctrl+-.
-WHERE: `src/local_changes_viewer/gui/diff_view/diff_view_widget.py`
-TESTS: NONE
-
-### F68. In-place file editing from the side-by-side view, with save and discard-on-navigate
-WHAT: An Edit toggle makes the right pane of side-by-side view editable, preserving original encoding and line endings; Save writes it back; navigating away or closing with unsaved edits prompts to discard.
-WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:236`
-TESTS: NONE
-
-### F69. File-info status label shows detected encoding and line-ending
-WHAT: Selecting a file shows its detected text encoding (UTF-8, UTF-8 BOM, Latin-1, Binary, Unknown) and line-ending style (LF, CRLF, Mixed, N-A) in the status bar.
-WHERE: `src/local_changes_viewer/core/services/file_info.py`
-TESTS: `tests/core/services/test_file_info.py::test_detects_lf`, `tests/core/services/test_file_info.py::test_detects_crlf`, `tests/core/services/test_file_info.py::test_detects_mixed_line_endings`, `tests/core/services/test_file_info.py::test_detects_utf8`, `tests/core/services/test_file_info.py::test_detects_utf8_bom`, `tests/core/services/test_file_info.py::test_detects_binary`, `tests/core/services/test_file_info.py::test_detects_latin1_fallback`
-
-### F70. "Copy Diff" copies the unified diff text to the clipboard
-WHAT: Copies the selected file's diff, formatted as a standard unified-diff text block, to the clipboard.
-WHERE: `src/local_changes_viewer/core/services/diff_formatting.py`
-TESTS: `tests/core/services/test_diff_formatting.py::test_formats_hunks_with_correct_prefixes`, `tests/core/services/test_diff_formatting.py::test_includes_file_header_when_file_path_given`
-
-### F71. Copy File Path / Copy File Name / Open in Default Editor / Reveal in Finder
-WHAT: Four Actions-menu commands operating on the currently selected file.
-WHERE: `src/local_changes_viewer/gui/main_window.py:1194`
-TESTS: NONE
-
-### F72. "Always reload fresh diff" setting bypasses the per-selection diff cache
-WHAT: When enabled, selecting a file always re-reads its diff from disk instead of reusing a previously computed one.
-WHERE: `src/local_changes_viewer/gui/main_window.py:289`
-TESTS: NONE
-
-### F73. Diff view mode, window geometry, and splitter sizes persist across restarts
-WHAT: The unified/side-by-side choice, window size and position, and the main splitter's pane sizes are restored on next launch.
-WHERE: `src/local_changes_viewer/gui/main_window.py:420`
-TESTS: NONE
-
-### F74. Settings-menu toggles persist and restore without re-triggering a scan or refresh
-WHAT: All checkable Settings-menu items are saved and restored, and restoring them at startup must not fire a redundant scan or display refresh.
-WHERE: `src/local_changes_viewer/gui/settings.py`
-TESTS: `tests/gui/test_main_window.py::test_only_one_scan_starts_during_window_init`, `tests/gui/test_main_window.py::test_display_filter_toggle_does_not_refresh_during_settings_restore`
-
-### F75. Log Level… dialog sets and persists app log verbosity
-WHAT: Choose ERROR, WARNING, INFO, DEBUG, or VERBOSE; persists and takes effect immediately.
-WHERE: `src/local_changes_viewer/gui/applog.py`
-TESTS: NONE
-
-### F76. Tooltip Font Size… dialog sets and persists the app-wide tooltip font size
-WHAT: Sets a custom point size for all Qt tooltips app-wide; 0 means system default.
-WHERE: `src/local_changes_viewer/gui/main_window.py:808`
-TESTS: NONE
-
-### F77. Help menu: dialogs documenting Settings, Actions, PR panel, and toolbar buttons
-WHAT: Four static help dialogs describing menu items and toolbar buttons.
-WHERE: `src/local_changes_viewer/gui/help_dialog.py`
-TESTS: NONE
-
-### F78. Profiles… dialog manages named profiles
+### F41. Profiles… dialog manages named profiles
 WHAT: A dialog for creating, renaming, and deleting named profiles and checking which discovered repos belong to each.
 WHERE: `src/local_changes_viewer/gui/profile_dialog.py`
 TESTS: NONE
 
-### F79. Repo context-menu "Add to Profile" toggle and "New Profile…" shortcut
+### F42. Repo context-menu "Add to Profile" toggle and "New Profile…" shortcut
 WHAT: Right-clicking a repo root can add or remove it from any existing profile, or create a new profile seeded with it.
 WHERE: `src/local_changes_viewer/gui/main_window.py:1148`
 TESTS: NONE
 
-### F80. Active profile switch via View > Profile submenu, shown in the status bar
+### F43. Active profile switch via View > Profile submenu, shown in the status bar
 WHAT: A radio-style submenu of "No Profile" plus each defined profile; the active one's name shows in the status bar.
 WHERE: `src/local_changes_viewer/gui/main_window.py:1116`
+TESTS: NONE
+
+## Git Change Detection
+
+Reading a repo's actual git state: changed files, branch status, diffs, and commit history.
+
+### F44. Detects modified/untracked/added/deleted/renamed/ignored files via git status
+WHAT: The core change detection: every git status code maps to a ChangeType shown in the tree.
+WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:29`
+TESTS: `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_modified_file`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_untracked_file`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_added_staged_file`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_deleted_file`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_renamed_staged_file`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_empty_for_clean_repo`
+
+### F45. Untracked/ignored directories, including symlinked ones, report as a single directory entry
+WHAT: An untracked or ignored folder — even a symlink pointing at one — shows as one directory row instead of being descended into.
+WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:43`
+TESTS: `tests/core/infra/test_git_repo_adapter.py::test_list_changes_detects_untracked_directory_as_single_directory_entry`, `tests/core/infra/test_git_repo_adapter.py::test_list_changes_classifies_symlinked_directory_as_directory`
+
+### F46. Branch name plus ahead/behind-vs-upstream counts shown per repo
+WHAT: Each repo reports its current branch and how many commits it is ahead of and behind its upstream.
+WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:121`
+TESTS: `tests/core/infra/test_git_repo_adapter.py::test_branch_status_with_no_upstream`, `tests/core/infra/test_git_repo_adapter.py::test_branch_status_ahead_and_behind`
+
+### F47. Repo tooltip shows a guessed local parent branch and the remote default branch
+WHAT: Best-effort "parent of branch" (nearest merge-base among local branches) and the remote's default branch name.
+WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:245`
+TESTS: `tests/core/infra/test_git_repo_adapter.py::test_branch_status_finds_local_parent_branch`, `tests/core/infra/test_git_repo_adapter.py::test_branch_status_parent_branch_none_when_no_other_branches`, `tests/core/infra/test_git_repo_adapter.py::test_branch_status_default_branch_falls_back_to_init_default_branch_config`, `tests/core/infra/test_git_repo_adapter.py::test_branch_status_default_branch_queried_live_from_remote`
+
+### F48. Full-context unified diff computed for any change type
+WHAT: Selecting a modified, deleted, untracked, renamed, or unpushed-commit file computes its diff against the right ref.
+WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:269`
+TESTS: `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_for_modified_file`, `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_for_deleted_file`, `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_for_untracked_file`, `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_for_renamed_file`, `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_for_unpushed_commit_diffs_against_upstream`
+
+### F49. "Ignore whitespace" setting recomputes the diff ignoring whitespace-only changes
+WHAT: Toggling this setting re-diffs the current file with git's --ignore-all-space.
+WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:273`
+TESTS: `tests/core/infra/test_git_repo_adapter.py::test_compute_diff_ignore_whitespace`
+
+### F50. Linked worktrees are discovered and excluded from their parent's own change list
+WHAT: A worktree checkout under a repo does not show as a spurious untracked-directory change on the parent; it is shown separately instead.
+WHERE: `src/local_changes_viewer/core/infra/git_repo_adapter.py:217`
+TESTS: `tests/core/infra/test_git_repo_adapter.py::test_list_worktrees_returns_linked_worktree_paths`, `tests/core/infra/test_git_repo_adapter.py::test_list_worktrees_returns_empty_list_when_no_linked_worktrees`
+
+### F51. "Show Log" dialog: browse recent commits, per-commit changed files, per-file diff
+WHAT: A repo-root context action opens a dialog listing recent commits (count adjustable via slider), the files each commit touched, and each file's diff.
+WHERE: `src/local_changes_viewer/gui/commit_log_dialog.py`
+TESTS: `tests/core/infra/test_git_repo_adapter.py::test_get_recent_commits_returns_newest_first_with_limit`, `tests/core/infra/test_git_repo_adapter.py::test_get_commit_files_lists_changed_paths`, `tests/core/infra/test_git_repo_adapter.py::test_get_commit_file_diff_shows_added_content`
+
+### F52. Repo discovery is limited to immediate children and never descends into a found repo
+WHAT: Scanning a root treats the root itself as a repo if it is one, otherwise scans only its direct subdirectories, and never looks for repos within repos.
+WHERE: `src/local_changes_viewer/core/infra/filesystem_scanner.py`
+TESTS: `tests/core/infra/test_filesystem_scanner.py::test_finds_repo_at_root`, `tests/core/infra/test_filesystem_scanner.py::test_root_itself_is_a_repo`, `tests/core/infra/test_filesystem_scanner.py::test_does_not_descend_past_immediate_children`, `tests/core/infra/test_filesystem_scanner.py::test_finds_multiple_sibling_repos`, `tests/core/infra/test_filesystem_scanner.py::test_does_not_look_inside_a_found_repo_for_further_repos`, `tests/core/infra/test_filesystem_scanner.py::test_ignores_folders_without_git`, `tests/core/infra/test_filesystem_scanner.py::test_detects_git_as_file_for_submodules`, `tests/core/infra/test_filesystem_scanner.py::test_returns_empty_list_when_no_repos_found`
+
+## GitHub Integration & Pull Requests
+
+Connecting to GitHub and surfacing pull-request state for the repos in the tree.
+
+### F53. Connect to GitHub… dialog authenticates and stores credentials
+WHAT: A dialog collects a username and personal access token, validates it against GitHub's own reported login, and stores it for reuse.
+WHERE: `src/local_changes_viewer/gui/github_connect_dialog.py`
+TESTS: NONE
+
+### F54. Disconnect GitHub clears stored credentials
+WHAT: GitHub > Disconnect GitHub removes the stored token and username.
+WHERE: `src/local_changes_viewer/gui/main_window.py:879`
+TESTS: NONE
+
+### F55. Auto-reconnects to GitHub on launch using stored credentials
+WHAT: If a username and token were previously saved, the app reconnects silently at startup and shows a status message.
+WHERE: `src/local_changes_viewer/gui/main_window.py:833`
+TESTS: NONE
+
+### F56. Repo row and tooltip can show its associated GitHub PR, resolved by branch name
+WHAT: If the current branch has an open, closed, or merged PR on GitHub, its number and state show in the row and tooltip.
+WHERE: `src/local_changes_viewer/core/infra/github_client.py:344`
+TESTS: `tests/core/infra/test_github_client.py::test_find_pull_request_returns_none_when_no_matches`, `tests/core/infra/test_github_client.py::test_find_pull_request_returns_info_when_found`, `tests/core/infra/test_github_client.py::test_find_pull_request_lowercases_merged_state`, `tests/core/infra/test_github_client.py::test_find_pull_request_raises_github_error_on_graphql_errors`
+
+### F57. PR lookups are cached with a TTL, and a terminal-state PR is reused across refreshes
+WHAT: A branch's PR result is cached for 60s to avoid re-querying GitHub every refresh; a merged or closed PR for an unchanged branch is reused indefinitely.
+WHERE: `src/local_changes_viewer/core/services/workspace_scanner_service.py:469`
+TESTS: `tests/core/services/test_workspace_scanner_service.py::test_scan_reuses_cached_pr_for_terminal_state_and_unchanged_branch`, `tests/core/services/test_workspace_scanner_service.py::test_scan_still_fetches_when_previous_pr_is_open`, `tests/core/services/test_workspace_scanner_service.py::test_scan_still_fetches_when_branch_changed`, `tests/core/services/test_workspace_scanner_service.py::test_scan_reuses_open_pr_within_ttl_window`, `tests/core/services/test_workspace_scanner_service.py::test_scan_refetches_pr_once_ttl_expires`, `tests/core/services/test_workspace_scanner_service.py::test_scan_refetches_pr_immediately_when_branch_changes_within_ttl`
+
+### F58. GitHub fetch errors degrade gracefully instead of failing the scan
+WHAT: A PR-lookup failure (GraphQL or HTTP error) is logged and treated as "no PR", never crashing or aborting the workspace scan.
+WHERE: `src/local_changes_viewer/core/services/workspace_scanner_service.py:514`
+TESTS: `tests/core/services/test_workspace_scanner_service.py::test_scan_routes_github_pr_fetch_error_through_on_log_not_an_exception`
+
+### F59. "My Open Pull Requests…" dialog and dockable PRs panel list the user's own open PRs
+WHAT: Lists every open PR authored by the connected user across every GitHub-remote repo currently in the tree, grouped by repo.
+WHERE: `src/local_changes_viewer/gui/my_pull_requests_dialog.py`
+TESTS: `tests/core/infra/test_github_client.py::test_list_authored_open_pull_requests_empty_pairs_returns_empty_list`, `tests/core/infra/test_github_client.py::test_list_authored_open_pull_requests_returns_matches_filtered_by_author`, `tests/core/infra/test_github_client.py::test_list_authored_open_pull_requests_skips_repo_on_error`
+
+### F60. Each PR row shows approval, unresolved threads, last reviewer, changed files, checks state
+WHAT: Per-PR columns summarizing review status, refreshable individually.
+WHERE: `src/local_changes_viewer/core/infra/github_client.py:146`
+TESTS: `tests/core/infra/test_github_client.py::test_get_pull_request_review_status_returns_none_reviewer_when_no_reviews`
+
+### F61. Double-click or right-click a PR row opens it in browser, or shows Info / Open Issues
+WHAT: Double-click opens the PR URL; right-click offers Refresh, Info, Open Issues, and Copy URL. Info shows title, branches, status, dates, and last commenter; Open Issues lists unresolved review threads plus general comments.
+WHERE: `src/local_changes_viewer/core/infra/github_client.py:245`
+TESTS: `tests/core/infra/test_github_client.py::test_get_pull_request_details_returns_open_status_and_last_comment_writer`, `tests/core/infra/test_github_client.py::test_get_pull_request_details_reports_draft_status_and_no_comments`, `tests/core/infra/test_github_client.py::test_get_pull_request_open_threads_returns_only_unresolved_review_comments`, `tests/core/infra/test_github_client.py::test_get_pull_request_open_threads_returns_issue_comments`, `tests/core/infra/test_github_client.py::test_get_pull_request_open_threads_maps_review_states_to_comment_types`, `tests/core/infra/test_github_client.py::test_get_pull_request_open_threads_sorts_across_categories_newest_first`, `tests/core/infra/test_github_client.py::test_get_pull_request_open_threads_returns_empty_list_when_nothing_open`
+
+### F62. "Open All" and "Copy All URLs" for a PR repository group
+WHAT: Right-clicking a repo group in the PR list opens every one of its PRs in the browser, or copies all their URLs.
+WHERE: `src/local_changes_viewer/gui/my_pull_requests_dialog.py:229`
+TESTS: NONE
+
+### F63. Recognizes https, ssh, and git@ GitHub remote URL forms
+WHAT: Parses an origin remote URL into (owner, repo) across GitHub's various URL styles, including SSH host aliases.
+WHERE: `src/local_changes_viewer/core/infra/github_client.py:68`
+TESTS: `tests/core/infra/test_github_client.py::test_parse_github_owner_repo`
+
+### F64. Token validation surfaces authentication errors
+WHAT: get_authenticated_login confirms a token works and raises a GitHubError with detail on HTTP failure.
+WHERE: `src/local_changes_viewer/core/infra/github_client.py:142`
+TESTS: `tests/core/infra/test_github_client.py::test_get_authenticated_login`, `tests/core/infra/test_github_client.py::test_get_authenticated_login_raises_github_error_on_http_error`
+
+## Diff Viewing & Editing
+
+Rendering and interacting with a selected file's diff, including in-place editing.
+
+### F65. Unified diff view with syntax highlighting and a toggleable line-number gutter
+WHAT: The default diff view renders +/-/context lines with language-aware syntax coloring and old/new line numbers in a gutter.
+WHERE: `src/local_changes_viewer/gui/diff_view/unified_view.py`
+TESTS: NONE
+
+### F66. Side-by-side diff view with syncable left/right scrolling
+WHAT: An alternate two-pane diff view whose scroll can be locked together via "Sync side-by-side scroll".
+WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py`
+TESTS: NONE
+
+### F67. Long unchanged context runs fold to a "click to expand" marker
+WHAT: A big run of unchanged context lines collapses to one clickable marker line in both diff views; clicking expands it.
+WHERE: `src/local_changes_viewer/core/services/context_folding.py`
+TESTS: `tests/core/services/test_context_folding.py::test_short_context_run_stays_visible`, `tests/core/services/test_context_folding.py::test_long_context_run_between_changes_folds_middle_keeping_margins`, `tests/core/services/test_context_folding.py::test_long_context_run_at_file_start_has_no_head_margin`, `tests/core/services/test_context_folding.py::test_long_context_run_at_file_end_has_no_tail_margin`
+
+### F68. Side-by-side pairs removed and added lines row-by-row for substitutions
+WHAT: In side-by-side view a run of removed lines lines up against a same-length run of added lines row by row; uneven runs leave the shorter side blank.
+WHERE: `src/local_changes_viewer/core/services/diff_pairing.py`
+TESTS: `tests/core/services/test_diff_pairing.py::test_pairs_context_line_on_both_sides`, `tests/core/services/test_diff_pairing.py::test_pairs_equal_length_removed_and_added_runs_row_by_row`, `tests/core/services/test_diff_pairing.py::test_pairs_unequal_length_runs_leaving_unmatched_side_none`, `tests/core/services/test_diff_pairing.py::test_pair_substitution_indices_matches_same_row_removed_added`
+
+### F69. Intraline diff highlights the exact changed substring within a modified line
+WHAT: Within a paired removed/added line, only the actually-changed word or substring is highlighted, not the whole line.
+WHERE: `src/local_changes_viewer/core/services/intraline_diff.py`
+TESTS: `tests/core/services/test_intraline_diff.py::test_single_word_change_in_long_line_highlights_only_that_word`, `tests/core/services/test_intraline_diff.py::test_identical_text_produces_no_ranges`, `tests/core/services/test_intraline_diff.py::test_completely_different_text_covers_whole_string`
+
+### F70. Diff toolbar: view-mode toggle, prev/next hunk, refresh, line numbers, font size
+WHAT: Toggle side-by-side/unified, jump between changed hunks, force-reload the diff, toggle gutters, and zoom in and out, also via View menu and Ctrl+= / Ctrl+-.
+WHERE: `src/local_changes_viewer/gui/diff_view/diff_view_widget.py`
+TESTS: NONE
+
+### F71. In-place file editing from the side-by-side view, with save and discard-on-navigate
+WHAT: An Edit toggle makes the right pane of side-by-side view editable, preserving original encoding and line endings; Save writes it back; navigating away or closing with unsaved edits prompts to discard.
+WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:236`
+TESTS: NONE
+
+### F72. File-info status label shows detected encoding and line-ending
+WHAT: Selecting a file shows its detected text encoding (UTF-8, UTF-8 BOM, Latin-1, Binary, Unknown) and line-ending style (LF, CRLF, Mixed, N-A) in the status bar.
+WHERE: `src/local_changes_viewer/core/services/file_info.py`
+TESTS: `tests/core/services/test_file_info.py::test_detects_lf`, `tests/core/services/test_file_info.py::test_detects_crlf`, `tests/core/services/test_file_info.py::test_detects_mixed_line_endings`, `tests/core/services/test_file_info.py::test_detects_utf8`, `tests/core/services/test_file_info.py::test_detects_utf8_bom`, `tests/core/services/test_file_info.py::test_detects_binary`, `tests/core/services/test_file_info.py::test_detects_latin1_fallback`
+
+### F73. "Copy Diff" copies the unified diff text to the clipboard
+WHAT: Copies the selected file's diff, formatted as a standard unified-diff text block, to the clipboard.
+WHERE: `src/local_changes_viewer/core/services/diff_formatting.py`
+TESTS: `tests/core/services/test_diff_formatting.py::test_formats_hunks_with_correct_prefixes`, `tests/core/services/test_diff_formatting.py::test_includes_file_header_when_file_path_given`
+
+### F74. Copy File Path / Copy File Name / Open in Default Editor / Reveal in Finder
+WHAT: Four Actions-menu commands operating on the currently selected file.
+WHERE: `src/local_changes_viewer/gui/main_window.py:1194`
+TESTS: NONE
+
+### F75. "Always reload fresh diff" setting bypasses the per-selection diff cache
+WHAT: When enabled, selecting a file always re-reads its diff from disk instead of reusing a previously computed one.
+WHERE: `src/local_changes_viewer/gui/main_window.py:289`
+TESTS: NONE
+
+### F76. Diff view mode, window geometry, and splitter sizes persist across restarts
+WHAT: The unified/side-by-side choice, window size and position, and the main splitter's pane sizes are restored on next launch.
+WHERE: `src/local_changes_viewer/gui/main_window.py:420`
+TESTS: NONE
+
+## Settings, Persistence & Logging
+
+App-wide settings, restored window/view state, credential storage, and logging.
+
+### F77. Settings-menu toggles persist and restore without re-triggering a scan or refresh
+WHAT: All checkable Settings-menu items are saved and restored, and restoring them at startup must not fire a redundant scan or display refresh.
+WHERE: `src/local_changes_viewer/gui/settings.py`
+TESTS: `tests/gui/test_main_window.py::test_only_one_scan_starts_during_window_init`, `tests/gui/test_main_window.py::test_display_filter_toggle_does_not_refresh_during_settings_restore`
+
+### F78. Log Level… dialog sets and persists app log verbosity
+WHAT: Choose ERROR, WARNING, INFO, DEBUG, or VERBOSE; persists and takes effect immediately.
+WHERE: `src/local_changes_viewer/gui/applog.py`
+TESTS: NONE
+
+### F79. Tooltip Font Size… dialog sets and persists the app-wide tooltip font size
+WHAT: Sets a custom point size for all Qt tooltips app-wide; 0 means system default.
+WHERE: `src/local_changes_viewer/gui/main_window.py:808`
+TESTS: NONE
+
+### F80. Help menu: dialogs documenting Settings, Actions, PR panel, and toolbar buttons
+WHAT: Four static help dialogs describing menu items and toolbar buttons.
+WHERE: `src/local_changes_viewer/gui/help_dialog.py`
 TESTS: NONE
 
 ### F81. Last-opened root folder is remembered and reopened automatically at launch
