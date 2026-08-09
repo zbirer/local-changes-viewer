@@ -71,6 +71,27 @@ def test_hide_repos_without_changes_after_ignoring_md_files() -> None:
     assert [r.name for r in result.repositories] == ["repo_mixed"]
 
 
+def test_folder_filter_rule_equals_removes_symlinked_directory_entry() -> None:
+    # A symlinked node_modules is reported by git as a top-level, no-slash
+    # path, but classified is_directory=True by GitRepoAdapter (Part 4 of the
+    # stale-cache fix) so it goes through the is_directory branch here
+    # (change.path.parts, not parts[:-1]) and still matches the rule.
+    changes = [
+        FileChange(
+            path=Path("node_modules"),
+            change_type=ChangeType.UNTRACKED,
+            is_directory=True,
+        ),
+        FileChange(path=Path("c.py"), change_type=ChangeType.MODIFIED),
+    ]
+    workspace = Workspace(root_path=Path("/root"), repositories=[_repo("repo_a", changes)])
+    rules = [FolderFilterRule(text="node_modules", mode=FolderFilterMode.EQUALS)]
+
+    result = filter_workspace(workspace, folder_filter_rules=rules)
+
+    assert [c.path for c in result.repositories[0].changes] == [Path("c.py")]
+
+
 def test_folder_filter_rule_equals_matches_full_folder_name_only() -> None:
     changes = [
         FileChange(path=Path("build/a.py"), change_type=ChangeType.MODIFIED),

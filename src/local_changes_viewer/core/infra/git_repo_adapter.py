@@ -40,12 +40,23 @@ class GitRepoAdapter:
                 old_path = Path(old_str.strip())
                 rest = new_str
             rest = rest.strip()
+            is_directory = rest.endswith("/")
+            if not is_directory and xy in _STATUS_CODE_TO_CHANGE_TYPE:
+                # An untracked/ignored path with no trailing slash is normally
+                # a plain file — but git status never descends into a
+                # symlink even when it points at a directory (e.g. a
+                # symlinked node_modules), so it's reported the same way a
+                # file would be. Stat only here (never for tracked M/A/D/R
+                # entries, which are always files) to catch that case, so a
+                # folder-filter rule like `equals:'node_modules'` still
+                # matches it the same as a real directory.
+                is_directory = (self._repo_path / Path(rest)).is_dir()
             changes.append(
                 FileChange(
                     path=Path(rest),
                     change_type=self._classify(xy),
                     old_path=old_path,
-                    is_directory=rest.endswith("/"),
+                    is_directory=is_directory,
                 )
             )
 

@@ -1,11 +1,13 @@
 import re
+import time
 from pathlib import Path
 
 import pytest
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.pull_request import PullRequestInfo
-from local_changes_viewer.core.domain.repository import BranchStatus
+from local_changes_viewer.core.domain.repository import BranchStatus, Repository
+from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.core.infra.github_client import GitHubError
 from local_changes_viewer.core.services import workspace_scanner_service as wss
 from local_changes_viewer.core.services.workspace_scanner_service import (
@@ -674,6 +676,142 @@ def test_scan_with_dirty_paths_none_rescans_everything(tmp_path: Path):
 
     assert adapter_a.list_changes_calls == 2
     assert adapter_a.get_branch_status_calls == 2
+
+
+def test_scan_force_full_rescan_bypasses_dirty_paths_gate(tmp_path: Path):
+    # Models exactly the stale-cache bug: repo_a's files changed in place
+    # (an editor wrote an already-tracked file, which never marks the repo
+    # dirty via the file watcher — see WorkspaceFileWatcher), so dirty_paths
+    # doesn't include it. force_full_rescan is the explicit escape hatch a
+    # user-initiated refresh uses so it never reuses stale cached changes.
+    repo_a = tmp_path / "repo_a"
+    adapter_a = FakeGitRepoAdapter(
+        repo_a, [FileChange(path=Path("f1.py"), change_type=ChangeType.MODIFIED)], _branch()
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter_a,
+    )
+
+    service.scan(tmp_path)
+    assert adapter_a.list_changes_calls == 1
+
+    service.scan(tmp_path, dirty_paths=set(), force_full_rescan=True)
+
+    assert adapter_a.list_changes_calls == 2
+    assert adapter_a.get_branch_status_calls == 2
+
+
+def test_scan_age_floor_rescans_stale_repo_even_when_not_dirty(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter_a = FakeGitRepoAdapter(
+        repo_a, [FileChange(path=Path("f1.py"), change_type=ChangeType.MODIFIED)], _branch()
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter_a,
+    )
+
+    service.scan(tmp_path)
+    assert adapter_a.list_changes_calls == 1
+
+    # Simulate the repo's cache having gone stale beyond the age floor,
+    # without ever being marked dirty by the file watcher.
+    service._last_real_scan_at[repo_a] = time.monotonic() - wss._MAX_REPO_CACHE_AGE_SECONDS - 1
+
+    service.scan(tmp_path, dirty_paths=set())
+
+    assert adapter_a.list_changes_calls == 2
+
+
+def test_scan_age_floor_does_not_rescan_repo_within_max_age(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    adapter_a = FakeGitRepoAdapter(
+        repo_a, [FileChange(path=Path("f1.py"), change_type=ChangeType.MODIFIED)], _branch()
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter_a,
+    )
+
+    service.scan(tmp_path)
+    service.scan(tmp_path, dirty_paths=set())
+
+    assert adapter_a.list_changes_calls == 1
+
+
+def test_scan_age_floor_caps_rescans_per_tick(tmp_path: Path):
+    repo_paths = [tmp_path / f"repo_{i}" for i in range(6)]
+    adapters = {
+        path: FakeGitRepoAdapter(path, [], _branch()) for path in repo_paths
+    }
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner(repo_paths),
+        adapter_factory=lambda path: adapters[path],
+    )
+
+    service.scan(tmp_path)
+    for adapter in adapters.values():
+        assert adapter.list_changes_calls == 1
+
+    now = time.monotonic()
+    # Stagger staleness so ordering is deterministic: repo_0 is the
+    # least-recently-scanned (largest age), repo_5 the most recent.
+    for index, path in enumerate(repo_paths):
+        service._last_real_scan_at[path] = (
+            now - wss._MAX_REPO_CACHE_AGE_SECONDS - 100 + index
+        )
+
+    service.scan(tmp_path, dirty_paths=set())
+
+    rescanned = {path for path, adapter in adapters.items() if adapter.list_changes_calls == 2}
+    assert len(rescanned) == wss._MAX_AGE_TRIGGERED_RESCANS_PER_TICK
+    assert rescanned == set(repo_paths[: wss._MAX_AGE_TRIGGERED_RESCANS_PER_TICK])
+
+
+def test_verify_changes_against_git_reports_clean_when_matching(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    changes = [FileChange(path=Path("f1.py"), change_type=ChangeType.MODIFIED)]
+    adapter_a = FakeGitRepoAdapter(repo_a, changes, _branch())
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter_a,
+    )
+    workspace = service.scan(tmp_path)
+
+    results = service.verify_changes_against_git(workspace)
+
+    assert len(results) == 1
+    assert results[0].is_consistent
+    assert results[0].missing_from_app == []
+    assert results[0].stale_in_app == []
+
+
+def test_verify_changes_against_git_reports_discrepancy_when_cache_diverges(tmp_path: Path):
+    repo_a = tmp_path / "repo_a"
+    # git currently reports f2.py as changed (simulating an in-place edit
+    # the app never rescanned) and no longer reports f1.py.
+    adapter_a = FakeGitRepoAdapter(
+        repo_a, [FileChange(path=Path("f2.py"), change_type=ChangeType.MODIFIED)], _branch()
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter_a,
+    )
+    stale_repo = Repository(
+        path=repo_a,
+        name="repo_a",
+        branch_status=_branch(),
+        changes=[FileChange(path=Path("f1.py"), change_type=ChangeType.MODIFIED)],
+    )
+    workspace = Workspace(root_path=tmp_path, repositories=[stale_repo])
+
+    results = service.verify_changes_against_git(workspace)
+
+    assert len(results) == 1
+    assert not results[0].is_consistent
+    assert results[0].missing_from_app == [Path("f2.py")]
+    assert results[0].stale_in_app == [Path("f1.py")]
 
 
 def test_scan_reuses_open_pr_within_ttl_window(tmp_path: Path):

@@ -60,6 +60,25 @@ def test_list_changes_detects_untracked_directory_as_single_directory_entry(
     assert match.is_directory is True
 
 
+def test_list_changes_classifies_symlinked_directory_as_directory(
+    tmp_path: Path, repo: git.Repo
+):
+    # git status never descends into a symlink, even one pointing at a
+    # directory (e.g. a symlinked node_modules) — it reports the symlink's
+    # own path with no trailing slash, the same shape as an untracked file.
+    # Without stat-ing it, a folder-filter rule like equals:'node_modules'
+    # would never match it (see workspace_filter._is_inside_filtered_folder).
+    real_dir = tmp_path.parent / "external_node_modules"
+    real_dir.mkdir()
+    (tmp_path / "node_modules").symlink_to(real_dir, target_is_directory=True)
+
+    changes = GitRepoAdapter(tmp_path).list_changes()
+
+    match = next(c for c in changes if c.path == Path("node_modules"))
+    assert match.change_type == ChangeType.UNTRACKED
+    assert match.is_directory is True
+
+
 def test_list_changes_detects_added_staged_file(tmp_path: Path, repo: git.Repo):
     (tmp_path / "staged_file.txt").write_text("staged\n")
     repo.index.add(["staged_file.txt"])

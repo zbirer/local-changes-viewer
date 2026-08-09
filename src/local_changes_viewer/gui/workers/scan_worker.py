@@ -16,6 +16,7 @@ class ScanWorkerSignals(QObject):
     error = Signal(str)
     progress = Signal(str)
     log_message = Signal(str)
+    debug_message = Signal(str)
 
 
 class ScanWorker(QRunnable):
@@ -29,6 +30,7 @@ class ScanWorker(QRunnable):
         profile_repo_names: set[str] | None = None,
         include_unpushed_commits: bool = False,
         dirty_paths: set[Path] | None = None,
+        force_full_rescan: bool = False,
         service: WorkspaceScannerService | None = None,
     ) -> None:
         super().__init__()
@@ -40,6 +42,7 @@ class ScanWorker(QRunnable):
         self._profile_repo_names = profile_repo_names
         self._include_unpushed_commits = include_unpushed_commits
         self._dirty_paths = dirty_paths
+        self._force_full_rescan = force_full_rescan
         # A shared service instance (kept alive across scans by the caller) is
         # what makes the cross-scan repo/PR caching in WorkspaceScannerService
         # possible; falling back to a fresh instance just disables caching.
@@ -60,6 +63,8 @@ class ScanWorker(QRunnable):
                 profile_repo_names=self._profile_repo_names,
                 include_unpushed_commits=self._include_unpushed_commits,
                 dirty_paths=self._dirty_paths,
+                force_full_rescan=self._force_full_rescan,
+                on_debug=self.signals.debug_message.emit,
             )
         except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
             self.signals.error.emit(str(exc))

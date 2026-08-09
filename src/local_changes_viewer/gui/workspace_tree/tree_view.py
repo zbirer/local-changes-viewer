@@ -184,6 +184,27 @@ class RepoTreeView(QTreeView):
     def has_rows(self) -> bool:
         return self._model.has_rows()
 
+    def displayed_file_changes(self) -> list[tuple[Path, object]]:
+        """Walks the tree model and returns every (repo_path, FileChange)
+        currently rendered as a file row, regardless of expand/collapse state
+        or the text filter (both are view/proxy-level, not model-level).
+        Used by the "Verify Changes Against Git" consistency check to catch a
+        render-side loss — a change the scanner kept but a filter silently
+        dropped from what the user actually sees."""
+        results: list[tuple[Path, object]] = []
+
+        def _walk(item) -> None:
+            for row in range(item.rowCount()):
+                child = item.child(row)
+                change = child.data(FILE_CHANGE_ROLE)
+                repo_path_str = child.data(REPO_PATH_ROLE)
+                if change is not None and repo_path_str is not None:
+                    results.append((Path(repo_path_str), change))
+                _walk(child)
+
+        _walk(self._model.invisibleRootItem())
+        return results
+
     def highlight_repo(self, repo_path: Path) -> None:
         self._model.set_repo_highlighted(repo_path, True)
 

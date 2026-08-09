@@ -3,6 +3,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 
+from local_changes_viewer.gui import applog
+
 _IGNORED_DIR_NAMES = {
     ".git",
     "node_modules",
@@ -29,6 +31,15 @@ _IGNORED_DIR_NAMES = {
 # minimum-interval guard between auto-refresh scans in MainWindow).
 _DEBOUNCE_MS = 2000
 
+# QFileSystemWatcher backs every watched path with an OS-level handle/inotify
+# watch/kqueue descriptor; handing it an unbounded file list (a workspace with
+# many repos, each with many already-changed files) risks exhausting those
+# descriptors. This bounds the per-refresh file watch list; when the true
+# count is larger, the truncated tail simply won't get instant fileChanged
+# notification for an in-place edit (it still gets picked up by the age floor
+# in WorkspaceScannerService, just not immediately).
+_MAX_WATCHED_FILES = 2000
+
 
 def collect_watch_paths(repo_paths: list[Path]) -> list[Path]:
     watch_paths: list[Path] = []
@@ -48,6 +59,12 @@ class WorkspaceFileWatcher(QObject):
         super().__init__(parent)
         self._watcher = QFileSystemWatcher(self)
         self._watcher.directoryChanged.connect(self._on_directory_changed)
+        # directoryChanged only fires on create/delete/rename inside a watched
+        # directory — an editor that writes an already-tracked file in place
+        # (no rename, same inode) never triggers it, which is exactly how a
+        # repo's changes silently went stale forever. fileChanged closes that
+        # gap for any path currently known to be changed (see set_watched_files).
+        self._watcher.fileChanged.connect(self._on_file_changed)
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.setInterval(_DEBOUNCE_MS)
@@ -62,11 +79,35 @@ class WorkspaceFileWatcher(QObject):
         if watch_paths:
             self._watcher.addPaths([str(p) for p in watch_paths])
 
+    def set_watched_files(self, file_paths: list[Path]) -> None:
+        """Watches individual (already-changed) file paths so an in-place edit
+        to one of them marks its repo dirty immediately via fileChanged,
+        instead of waiting for the next age-floor rescan. Re-register this
+        whenever the change set is refreshed — call alongside set_watch_paths.
+        """
+        truncated = len(file_paths) > _MAX_WATCHED_FILES
+        if truncated:
+            file_paths = file_paths[:_MAX_WATCHED_FILES]
+        existing = self._watcher.files()
+        if existing:
+            self._watcher.removePaths(existing)
+        if file_paths:
+            self._watcher.addPaths([str(p) for p in file_paths])
+        if truncated:
+            applog.log(
+                f"File watcher: capped watched files at {_MAX_WATCHED_FILES} "
+                "(more changed files than that were present)",
+                level=applog.LogLevel.DEBUG,
+            )
+
     def stop(self) -> None:
         self._debounce_timer.stop()
         existing = self._watcher.directories()
         if existing:
             self._watcher.removePaths(existing)
+        existing_files = self._watcher.files()
+        if existing_files:
+            self._watcher.removePaths(existing_files)
         self._dirty_paths.clear()
 
     def dirty_repo_roots(self, repo_paths: list[Path]) -> set[Path]:
@@ -82,6 +123,12 @@ class WorkspaceFileWatcher(QObject):
         return dirty_roots
 
     def _on_directory_changed(self, path: str) -> None:
+        self._dirty_paths.add(Path(path))
+        self._debounce_timer.start()
+
+    def _on_file_changed(self, path: str) -> None:
+        # Same handling as a directory firing: mark it dirty and let the
+        # existing debounce collapse a burst of edits into one `changed` emit.
         self._dirty_paths.add(Path(path))
         self._debounce_timer.start()
 

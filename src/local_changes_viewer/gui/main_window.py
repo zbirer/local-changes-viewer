@@ -51,6 +51,7 @@ from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
 from local_changes_viewer.gui.github_connect_dialog import GitHubConnectDialog
 from local_changes_viewer.gui.help_dialog import (
+    HelpDialog,
     show_actions_help,
     show_pull_requests_help,
     show_settings_help,
@@ -191,6 +192,10 @@ class MainWindow(QMainWindow):
         open_action = QAction("Open Folder…", self)
         open_action.triggered.connect(self._on_open_folder)
         actions_menu.addAction(open_action)
+
+        verify_changes_action = QAction("Verify Changes Against Git…", self)
+        verify_changes_action.triggered.connect(self._on_verify_changes)
+        actions_menu.addAction(verify_changes_action)
 
         view_menu = self.menuBar().addMenu("View")
 
@@ -486,7 +491,128 @@ class MainWindow(QMainWindow):
     def _on_refresh(self) -> None:
         applog.log("Refresh", level=applog.LogLevel.INFO)
         if self._root_folder:
-            self._start_scan(self._root_folder, rebuild=self._workspace is None)
+            # User-initiated refresh must never reuse a repo's cached git
+            # state (Part 1 of the stale-cache fix) — an editor that writes a
+            # tracked file in place never fires the file watcher's
+            # directoryChanged signal, so relying on dirty_paths here would
+            # leave a repo showing zero changes forever, even across repeated
+            # explicit refreshes.
+            self._start_scan(
+                self._root_folder, rebuild=self._workspace is None, force_full_rescan=True
+            )
+
+    def _on_verify_changes(self) -> None:
+        """Self-check command: catches exactly the class of bug this session
+        fixed (a repo's changes silently going stale) plus a render-side
+        equivalent (a change the scanner kept but a display filter dropped
+        for no accountable reason)."""
+        applog.log("Verify changes against git", level=applog.LogLevel.INFO)
+        if self._workspace is None:
+            QMessageBox.information(self, "Verify Changes Against Git", "No workspace loaded yet.")
+            return
+
+        scan_results = self._scanner_service.verify_changes_against_git(
+            self._workspace,
+            include_ignored=self._include_ignored_action.isChecked(),
+            include_unpushed_commits=self._include_unpushed_commits_action.isChecked(),
+        )
+
+        # Recompute what should survive the currently active display filters
+        # (same call _refresh_display makes) and compare it against what the
+        # tree actually rendered, so a render-side loss is caught too, not
+        # just a scan-side one.
+        expected_workspace = filter_workspace(
+            self._workspace,
+            ignore_md_files=self._ignore_md_action.isChecked(),
+            hide_repos_without_changes=self._hide_empty_repos_action.isChecked(),
+            folder_filter_rules=self._folder_filter_rules,
+            max_age_minutes=self._time_filter_minutes,
+            profile=self._active_profile(),
+        )
+        shown_paths_by_repo: dict[Path, set[Path]] = {}
+        for repo_path, change in self._tree_view.displayed_file_changes():
+            shown_paths_by_repo.setdefault(repo_path, set()).add(change.path)
+
+        render_loss_lines: list[str] = []
+        for repo in expected_workspace.repositories:
+            shown_paths = shown_paths_by_repo.get(repo.path, set())
+            for change in repo.changes:
+                if change.path in shown_paths:
+                    continue
+                reason = self._explain_missing_from_tree(repo, change)
+                render_loss_lines.append(
+                    f"<b>{repo.name}</b>: {change.path} is missing from the tree — "
+                    f"{reason or '<b>unexplained</b>'}"
+                )
+
+        scan_discrepancies = [r for r in scan_results if not r.is_consistent]
+        total_repos = len(self._workspace.repositories)
+        total_files = sum(len(r.changes) for r in self._workspace.repositories)
+
+        if not scan_discrepancies and not render_loss_lines:
+            html = f"<p>{total_repos} repos, {total_files} files, all consistent.</p>"
+        else:
+            items: list[str] = []
+            for result in scan_discrepancies:
+                if result.error is not None:
+                    items.append(
+                        f"<li><b>{result.repo_name}</b>: failed to check against "
+                        f"git — {result.error}</li>"
+                    )
+                    continue
+                for path in result.missing_from_app:
+                    items.append(
+                        f"<li><b>{result.repo_name}</b>: git reports <code>{path}</code> as "
+                        "changed but the app does not hold it — unexplained (try Refresh)</li>"
+                    )
+                for path in result.stale_in_app:
+                    items.append(
+                        f"<li><b>{result.repo_name}</b>: the app shows <code>{path}</code> as "
+                        "changed but git no longer reports it — stale (try Refresh)</li>"
+                    )
+            items.extend(f"<li>{line}</li>" for line in render_loss_lines)
+            html = (
+                f"<p>{total_repos} repos, {total_files} files — "
+                f"{len(items)} discrepancy(ies) found:</p><ul>{''.join(items)}</ul>"
+            )
+
+        HelpDialog("Verify Changes Against Git", html, self).exec()
+
+    def _explain_missing_from_tree(self, repo: Repository, change: FileChange) -> str | None:
+        """Best-effort explanation for why a change that should have survived
+        the active filters (per filter_workspace) isn't in the rendered tree
+        — mirrors the individual filter checks in workspace_filter.py plus
+        the tree model's own nested-repo suppression. Returns None ("unexplained")
+        when no known mechanism accounts for the gap — that's the signal that
+        actually matters, since it means something is genuinely inconsistent."""
+        if self._ignore_md_action.isChecked() and change.path.suffix.lower() == ".md":
+            return "hidden by the 'Ignore MD files' setting"
+
+        for rule in self._folder_filter_rules:
+            if not change.is_directory and rule.matches_path(change.path.as_posix()):
+                return f"hidden by folder filter {rule.mode.value}:{rule.text!r}"
+            parts = change.path.parts if change.is_directory else change.path.parts[:-1]
+            if any(rule.matches(folder_name) for folder_name in parts):
+                return f"hidden by folder filter {rule.mode.value}:{rule.text!r}"
+
+        if self._time_filter_minutes > 0:
+            try:
+                mtime = (repo.path / change.path).stat().st_mtime
+                age_minutes = (time.time() - mtime) / 60
+                if age_minutes > self._time_filter_minutes:
+                    return (
+                        "older than the last-commit-time filter "
+                        f"({self._time_filter_minutes} min)"
+                    )
+            except OSError:
+                pass
+
+        if change.is_directory and self._workspace is not None:
+            nested_path = repo.path / change.path
+            if any(r.path == nested_path for r in self._workspace.repositories):
+                return "shown as its own nested repository row instead"
+
+        return None
 
     def _on_file_selected(self, repo_path: Path, change: FileChange) -> None:
         if self._diff_view.discard_edits_if_any():
@@ -619,14 +745,28 @@ class MainWindow(QMainWindow):
         self._settings.set_use_file_watcher(checked)
         if checked:
             if self._workspace is not None:
-                self._refresh_watch_paths([r.path for r in self._workspace.repositories])
+                self._refresh_watch_paths(self._workspace.repositories)
         else:
             self._file_watcher.stop()
 
-    def _refresh_watch_paths(self, repo_paths: list[Path]) -> None:
+    def _refresh_watch_paths(self, repositories: list[Repository]) -> None:
+        repo_paths = [r.path for r in repositories]
         worker = WatchPathsWorker(repo_paths)
         worker.signals.finished.connect(self._file_watcher.set_watch_paths)
         self._thread_pool.start(worker)
+        # Directory watching alone (above) can't see an in-place edit to a
+        # file that's already tracked as changed — only a create/delete/
+        # rename in the directory fires directoryChanged. Watching each
+        # already-changed file individually closes that gap via fileChanged
+        # (Part 3 of the stale-cache fix). Cheap to compute directly here:
+        # no filesystem walk needed, just the paths already on `repositories`.
+        changed_file_paths = [
+            r.path / change.path
+            for r in repositories
+            for change in r.changes
+            if not change.is_directory
+        ]
+        self._file_watcher.set_watched_files(changed_file_paths)
 
     def _on_file_watcher_changed(self) -> None:
         if self._root_folder and not self._scan_in_progress:
@@ -1252,6 +1392,7 @@ class MainWindow(QMainWindow):
         auto_refresh: bool = False,
         rebuild: bool = True,
         dirty_paths: set[Path] | None = None,
+        force_full_rescan: bool = False,
     ) -> None:
         if auto_refresh:
             since_last_scan = time.monotonic() - self._last_scan_finished_at
@@ -1316,6 +1457,7 @@ class MainWindow(QMainWindow):
             profile_repo_names=set(active_profile.repo_names) if active_profile else None,
             include_unpushed_commits=self._include_unpushed_commits_action.isChecked(),
             dirty_paths=dirty_paths,
+            force_full_rescan=force_full_rescan,
             service=self._scanner_service,
         )
         worker.signals.progress.connect(self._on_scan_progress)
@@ -1323,6 +1465,7 @@ class MainWindow(QMainWindow):
         worker.signals.workspace_ready.connect(self._on_workspace_ready)
         worker.signals.error.connect(self._on_scan_error)
         worker.signals.log_message.connect(self._on_scan_log_message)
+        worker.signals.debug_message.connect(self._on_scan_debug_message)
         self._thread_pool.start(worker)
 
     def _on_scan_progress(self, message: str) -> None:
@@ -1331,6 +1474,9 @@ class MainWindow(QMainWindow):
 
     def _on_scan_log_message(self, message: str) -> None:
         applog.log(message, level=applog.LogLevel.WARNING)
+
+    def _on_scan_debug_message(self, message: str) -> None:
+        applog.log(message, level=applog.LogLevel.DEBUG)
 
     def _on_repo_ready(self, repo: Repository) -> None:
         # Rebuilding the tree (expandAll + restore-collapsed-state) is O(current
@@ -1377,7 +1523,7 @@ class MainWindow(QMainWindow):
         self._incremental_scan = False
         self._tree_view.clear_repo_highlights()
         if self._use_file_watcher_action.isChecked():
-            self._refresh_watch_paths([r.path for r in workspace.repositories])
+            self._refresh_watch_paths(workspace.repositories)
         # Cache the freshly scanned workspace so the next cold start can paint
         # the tree immediately instead of showing nothing for ~30s (D3).
         save_workspace(workspace)
