@@ -198,6 +198,21 @@ class RepoTreeModel(QStandardItemModel):
 
     @staticmethod
     def _partition(repositories: list) -> tuple[list, dict[str, list]]:
+        # De-duplicate by path up front, keeping the first-seen occurrence.
+        # Without this, two Repository objects sharing a path would each be
+        # inferred as the other's parent below (a path is trivially
+        # relative_to itself), so both would drop out of `roots` and the
+        # tree would render empty. `by_path` is derived from this same
+        # de-duplicated list so the two never disagree.
+        deduped: list = []
+        seen_paths: set[str] = set()
+        for repo in repositories:
+            path_key = str(repo.path)
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            deduped.append(repo)
+        repositories = deduped
         by_path = {str(r.path): r for r in repositories}
         parent_of: dict[str, str | None] = {}
         for repo in repositories:
@@ -208,7 +223,7 @@ class RepoTreeModel(QStandardItemModel):
 
             best_parent: str | None = None
             for other in repositories:
-                if other is repo:
+                if other is repo or other.path == repo.path:
                     continue
                 try:
                     repo.path.relative_to(other.path)
