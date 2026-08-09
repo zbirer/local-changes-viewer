@@ -332,6 +332,8 @@ class RepoTreeModel(QStandardItemModel):
                 f"\nPull request: #{pr.number} {pr.title} ({pr.state}, {comment_text})"
             )
 
+        tooltip += f"\nPath: {str(repo.path)}"
+
         return tooltip
 
     @staticmethod
