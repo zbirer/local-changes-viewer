@@ -84,8 +84,41 @@ class RepoTreeView(QTreeView):
         self._row_actions_index = QModelIndex()
         self._hovered_index = QModelIndex()
         self._row_actions_widget = QWidget(self.viewport())
+        self._row_actions_widget.setObjectName("repoRowActionsOverlay")
+        # This overlay floats directly on top of tree rows, and a row's own
+        # background can be solid blue (selected) or yellow (refresh-flash
+        # highlight, see _REFRESH_HIGHLIGHT_COLOR in tree_model.py). The
+        # buttons below use setAutoRaise(True), which makes them flat/
+        # transparent -- with no backdrop of their own, they nearly vanish
+        # against either background. Painting the overlay as an opaque green
+        # chip guarantees the R/+/- buttons stay legible no matter what row
+        # color sits underneath. WA_StyledBackground is required because a
+        # plain QWidget otherwise ignores its stylesheet's background-color.
+        self._row_actions_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._row_actions_widget.setStyleSheet(
+            "QWidget#repoRowActionsOverlay {"
+            " background-color: #2E7D32;"
+            " border-radius: 4px;"
+            "}"
+            "QWidget#repoRowActionsOverlay QToolButton {"
+            " background-color: transparent;"
+            " color: white;"
+            " font-weight: bold;"
+            " border: none;"
+            "}"
+            "QWidget#repoRowActionsOverlay QToolButton:hover {"
+            " background-color: #43A047;"
+            "}"
+            "QWidget#repoRowActionsOverlay QToolButton:pressed {"
+            " background-color: #1B5E20;"
+            "}"
+        )
         row_actions_layout = QHBoxLayout(self._row_actions_widget)
-        row_actions_layout.setContentsMargins(0, 0, 0, 0)
+        # Horizontal margin only. Vertical margin would make the chip taller
+        # than a tree row, and since the chip is centred on its row the extra
+        # height spills past the viewport's top edge on the first visible row
+        # and gets clipped. Padding sideways shows the green just as well.
+        row_actions_layout.setContentsMargins(4, 0, 4, 0)
         row_actions_layout.setSpacing(2)
         self._refresh_button = QToolButton(self._row_actions_widget)
         self._refresh_button.setText("R")

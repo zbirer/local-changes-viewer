@@ -214,6 +214,26 @@ def test_leaving_viewport_hides_overlay(
     assert not view._hovered_index.isValid()
 
 
+def test_row_actions_overlay_has_green_chip_stylesheet(qapp, isolated_settings: Path) -> None:
+    """The overlay must paint as an opaque green chip -- via a non-empty
+    stylesheet naming the chosen green plus WA_StyledBackground actually
+    enabled -- so the R/+/- buttons stay legible over both a blue-selected
+    and a yellow-flashed row background (see the comment in __init__)."""
+    view = _tree_view(isolated_settings)
+
+    stylesheet = view._row_actions_widget.styleSheet()
+    assert stylesheet
+    assert "#2E7D32" in stylesheet
+    assert view._row_actions_widget.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+    # The chip must stay exactly as tall as the buttons it wraps: it is
+    # centred on its row, so any extra height spills past the viewport's top
+    # edge on the first visible row and the chip renders clipped.
+    assert (
+        view._row_actions_widget.sizeHint().height()
+        == view._refresh_button.height()
+    )
+
+
 def test_overlay_stays_visible_when_cursor_over_overlay_widget(
     qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

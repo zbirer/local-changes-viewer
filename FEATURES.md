@@ -100,9 +100,9 @@ WHERE: `src/local_changes_viewer/gui/settings.py:196`
 TESTS: NONE
 
 ### F11. Repo-row hover buttons: Refresh / Expand All / Collapse All
-WHAT: Hovering a repo-root row reveals inline R/+/− buttons that refresh, expand, or collapse just that repo; selecting a row does not show them.
+WHAT: Hovering a repo-root row reveals inline R/+/− buttons that refresh, expand, or collapse just that repo, painted as an opaque green chip so they stay legible over a blue-selected or yellow-flashed row; selecting a row does not show them.
 WHERE: `src/local_changes_viewer/gui/workspace_tree/tree_view.py:133`
-TESTS: `tests/gui/test_tree_view.py::test_refresh_button_sits_left_of_expand_and_collapse`, `tests/gui/test_tree_view.py::test_refresh_button_click_emits_signal_with_repo_path`, `tests/gui/test_tree_view.py::test_row_actions_overlay_shown_for_repo_root_hidden_otherwise`, `tests/gui/test_tree_view.py::test_hovering_repo_root_row_shows_overlay`, `tests/gui/test_tree_view.py::test_hovering_non_repo_root_row_hides_overlay`, `tests/gui/test_tree_view.py::test_current_changed_alone_does_not_show_overlay`, `tests/gui/test_tree_view.py::test_leaving_viewport_hides_overlay`, `tests/gui/test_tree_view.py::test_overlay_stays_visible_when_cursor_over_overlay_widget`
+TESTS: `tests/gui/test_tree_view.py::test_refresh_button_sits_left_of_expand_and_collapse`, `tests/gui/test_tree_view.py::test_refresh_button_click_emits_signal_with_repo_path`, `tests/gui/test_tree_view.py::test_row_actions_overlay_shown_for_repo_root_hidden_otherwise`, `tests/gui/test_tree_view.py::test_hovering_repo_root_row_shows_overlay`, `tests/gui/test_tree_view.py::test_hovering_non_repo_root_row_hides_overlay`, `tests/gui/test_tree_view.py::test_current_changed_alone_does_not_show_overlay`, `tests/gui/test_tree_view.py::test_leaving_viewport_hides_overlay`, `tests/gui/test_tree_view.py::test_row_actions_overlay_has_green_chip_stylesheet`, `tests/gui/test_tree_view.py::test_overlay_stays_visible_when_cursor_over_overlay_widget`
 
 ### F12. Filter tree by path text box, with repo/file split syntax
 WHAT: Typing in the "Filter by path…" box filters visible rows; typing a "/" or "\" splits the query into a repo-name part and a file part.
