@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -73,6 +74,18 @@ class DiffViewWidget(QWidget):
         self._save_button.setToolTip("Save edits to the file")
         self._save_button.setEnabled(False)
         self._save_button.clicked.connect(self._on_save_clicked)
+
+        # QKeySequence.StandardKey.Save resolves to the platform's own save
+        # shortcut (Cmd+S on macOS, Ctrl+S elsewhere) rather than a
+        # hardcoded "Ctrl+S". Routed through the button's own click() --
+        # not a duplicate call to _on_save_clicked -- so there is exactly
+        # one save code path; QAbstractButton.click() on a disabled button
+        # is a no-op, and _save_button starts disabled and is only ever
+        # enabled for the duration of edit mode (see set_diff, clear_diff,
+        # _on_edit_toggled), so this is already inert outside edit mode
+        # without a separate guard here.
+        self._save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
+        self._save_shortcut.activated.connect(self._save_button.click)
 
         self._line_numbers_button = QPushButton("Line Numbers")
         self._line_numbers_button.setToolTip("Toggle line numbers")

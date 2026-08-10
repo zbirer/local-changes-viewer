@@ -424,9 +424,9 @@ WHERE: `src/local_changes_viewer/gui/diff_view/diff_view_widget.py`
 TESTS: NONE
 
 ### F71. In-place file editing from the side-by-side view, with save and discard-on-navigate
-WHAT: An Edit toggle makes the right pane of side-by-side view editable, preserving original encoding and line endings; the gutter switches to real file line numbers (1..N, live as you type) instead of diff-row numbers; Save writes it back; navigating away or closing with unsaved edits prompts to discard.
+WHAT: An Edit toggle makes the right pane of side-by-side view editable, preserving original encoding and line endings; the gutter switches to real file line numbers (1..N, live as you type) instead of diff-row numbers; Save (the toolbar button, or Cmd+S/Ctrl+S via the platform-standard save shortcut, which drives that same button) writes it back; navigating away or closing with unsaved edits prompts to discard.
 WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:352`
-TESTS: `tests/gui/test_diff_view.py::test_entering_edit_mode_shows_real_sequential_line_numbers`, `tests/gui/test_diff_view.py::test_typing_a_new_line_keeps_gutter_sequential`, `tests/gui/test_diff_view.py::test_exiting_edit_mode_restores_diff_row_line_numbers`
+TESTS: `tests/gui/test_diff_view.py::test_entering_edit_mode_shows_real_sequential_line_numbers`, `tests/gui/test_diff_view.py::test_typing_a_new_line_keeps_gutter_sequential`, `tests/gui/test_diff_view.py::test_exiting_edit_mode_restores_diff_row_line_numbers`, `tests/gui/test_diff_view.py::test_cmd_s_shortcut_saves_through_the_same_path_as_the_save_button`
 
 ### F72. File-info status label shows detected encoding and line-ending
 WHAT: Selecting a file shows its detected text encoding (UTF-8, UTF-8 BOM, Latin-1, Binary, Unknown) and line-ending style (LF, CRLF, Mixed, N-A) in the status bar.
@@ -455,13 +455,13 @@ TESTS: NONE
 
 ### F77. Ctrl+F opens an inline find bar in the edit pane
 WHAT: While editing (side-by-side view, right pane focused), Ctrl+F opens a non-modal find bar at the bottom of the view; typing searches incrementally from the cursor, Enter/Next and Shift+Enter/Prev step through matches and wrap at the document ends, a non-match turns the input red, and Escape closes the bar and returns focus to the pane. Inert outside edit mode or when focus is elsewhere.
-WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:245`
+WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:249`
 TESTS: `tests/gui/test_diff_view.py::test_ctrl_f_shows_find_bar_only_in_edit_mode`, `tests/gui/test_diff_view.py::test_find_next_advances_through_occurrences_and_wraps`, `tests/gui/test_diff_view.py::test_non_matching_search_gives_feedback_and_leaves_cursor_put`, `tests/gui/test_diff_view.py::test_escape_closes_bar_and_returns_focus_to_pane`
 
-### F78. Ctrl+G jumps to a line number in the edit pane
-WHAT: While editing (side-by-side view, right pane focused), Ctrl+G opens the same inline bar in goto-line mode; entering a number and pressing Enter moves the cursor to that line's start, centers it, and closes the bar, clamping out-of-range numbers into 1..blockCount instead of erroring. Inert outside edit mode or when focus is elsewhere.
-WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:248`
-TESTS: `tests/gui/test_diff_view.py::test_ctrl_g_shows_goto_bar_and_jumps_to_valid_line`, `tests/gui/test_diff_view.py::test_goto_out_of_range_line_clamps_instead_of_raising`
+### F78. Ctrl+G jumps to a line number in the edit pane via a popup dialog
+WHAT: While editing (side-by-side view, right pane focused), Ctrl+G opens a simple modal "Go to Line" input dialog ranged 1..blockCount (so out-of-range input is clamped by the dialog itself); accepting moves the cursor to that line's start and centers it, Cancel is a no-op. Inert outside edit mode or when focus is elsewhere.
+WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:252`
+TESTS: `tests/gui/test_diff_view.py::test_ctrl_g_opens_dialog_with_full_line_range_and_jumps_on_accept`, `tests/gui/test_diff_view.py::test_goto_dialog_cancel_leaves_cursor_untouched`
 
 ## Settings, Persistence & Logging
 

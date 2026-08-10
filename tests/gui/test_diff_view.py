@@ -1,15 +1,18 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QKeySequence, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from local_changes_viewer.core.domain.diff import DiffHunk, DiffLine, DiffLineKind, DiffResult
+from local_changes_viewer.gui.diff_view import side_by_side_view
+from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.diff_view.side_by_side_view import SideBySideView
 
 
@@ -130,7 +133,6 @@ def test_ctrl_f_shows_find_bar_only_in_edit_mode(qapp, tmp_path: Path) -> None:
     view._right.setFocus()
     QTest.keyClick(view._right, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
     assert view._bar.isVisible()
-    assert view._bar_mode == "find"
 
 
 def test_find_next_advances_through_occurrences_and_wraps(qapp, tmp_path: Path) -> None:
@@ -181,34 +183,88 @@ def test_escape_closes_bar_and_returns_focus_to_pane(qapp, tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# 7-8: Ctrl+G goto line bar.
+# 7-8: Ctrl+G goto-line popup dialog.
+#
+# QInputDialog.getInt is a static-style call (QInputDialog.getInt(...)),
+# resolved through the name `QInputDialog` in side_by_side_view's own
+# module namespace -- so it's patched there (not on the real Qt class
+# globally) via a plain SimpleNamespace stand-in exposing a fake getInt.
 # ---------------------------------------------------------------------------
 
 
-def test_ctrl_g_shows_goto_bar_and_jumps_to_valid_line(qapp, tmp_path: Path) -> None:
+def _patch_goto_dialog(monkeypatch: pytest.MonkeyPatch, line: int, ok: bool) -> list[tuple]:
+    calls: list[tuple] = []
+
+    def fake_get_int(parent, title, label, value, min_value, max_value):
+        calls.append((value, min_value, max_value))
+        return line, ok
+
+    monkeypatch.setattr(side_by_side_view, "QInputDialog", SimpleNamespace(getInt=fake_get_int))
+    return calls
+
+
+def test_ctrl_g_opens_dialog_with_full_line_range_and_jumps_on_accept(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     view = _ready_view(tmp_path, "one\ntwo\nthree\nfour\nfive")
     assert view.enter_edit_mode()
     view._right.setFocus()
+    calls = _patch_goto_dialog(monkeypatch, line=3, ok=True)
 
     QTest.keyClick(view._right, Qt.Key.Key_G, Qt.KeyboardModifier.ControlModifier)
-    assert view._bar.isVisible()
-    assert view._bar_mode == "goto"
 
-    QTest.keyClicks(view._bar_input, "3")
-    QTest.keyClick(view._bar_input, Qt.Key.Key_Return)
-
+    # value=1 (cursor starts at line 1), min=1, max=blockCount() -- the
+    # dialog's own args do the out-of-range clamping, not our arithmetic.
+    assert calls == [(1, 1, 5)]
     assert view._right.textCursor().blockNumber() == 2  # line 3, 0-indexed
-    assert not view._bar.isVisible()
 
 
-def test_goto_out_of_range_line_clamps_instead_of_raising(qapp, tmp_path: Path) -> None:
+def test_goto_dialog_cancel_leaves_cursor_untouched(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     view = _ready_view(tmp_path, "one\ntwo\nthree\nfour\nfive")
     view.enter_edit_mode()
     view._right.setFocus()
+    before_pos = view._right.textCursor().position()
+    _patch_goto_dialog(monkeypatch, line=3, ok=False)  # ok=False == Cancel
 
     QTest.keyClick(view._right, Qt.Key.Key_G, Qt.KeyboardModifier.ControlModifier)
-    QTest.keyClicks(view._bar_input, "9999")
-    QTest.keyClick(view._bar_input, Qt.Key.Key_Return)
 
-    last_block = view._right.document().blockCount() - 1
-    assert view._right.textCursor().blockNumber() == last_block
+    assert view._right.textCursor().position() == before_pos
+
+
+# ---------------------------------------------------------------------------
+# Cmd+S (Ctrl+S elsewhere) saves via the same path as the Save button.
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_s_shortcut_saves_through_the_same_path_as_the_save_button(
+    qapp, tmp_path: Path
+) -> None:
+    """Drives QKeySequence.StandardKey.Save (Cmd+S on macOS, Ctrl+S
+    elsewhere) rather than calling save_edits() or clicking the button
+    directly, to prove the shortcut actually reaches the real Save code
+    path end to end -- including writing the real file on disk and
+    preserving its original CRLF line ending, not a parallel
+    reimplementation of save."""
+    file_path = tmp_path / "sample.txt"
+    file_path.write_bytes(b"one\r\ntwo\r\nthree")
+    view = DiffViewWidget()
+    view.set_diff(_empty_diff(), str(file_path), file_path)
+    view.show()
+    QTest.qWaitForWindowExposed(view)
+
+    view._edit_button.setChecked(True)
+    assert view._side_by_side.is_editing()
+
+    right = view._side_by_side._right
+    cursor = right.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    right.setTextCursor(cursor)
+    QTest.keyClicks(right, "_edited")
+    assert right.document().isModified()
+
+    QTest.keySequence(view, QKeySequence.StandardKey.Save)
+
+    assert not right.document().isModified()
+    assert file_path.read_bytes() == b"one\r\ntwo\r\nthree_edited"

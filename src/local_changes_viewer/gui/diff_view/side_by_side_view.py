@@ -15,6 +15,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
@@ -242,6 +243,9 @@ class SideBySideView(QWidget):
         # `_editing` check in each slot is still needed on top of that
         # because the right pane keeps accepting focus while read-only in
         # diff mode, where the context alone would otherwise let it fire.
+        # Ctrl+F opens the inline find bar below; Ctrl+G opens a modal
+        # QInputDialog (see _open_goto_bar) -- only what each key *opens*
+        # differs, the scoping/guard mechanics are identical.
         self._find_shortcut = QShortcut(QKeySequence("Ctrl+F"), self._right)
         self._find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._find_shortcut.activated.connect(self._open_find_bar)
@@ -249,7 +253,6 @@ class SideBySideView(QWidget):
         self._goto_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._goto_shortcut.activated.connect(self._open_goto_bar)
 
-        self._bar_mode = "find"
         self._find_anchor: QTextCursor | None = None
         self._bar = QWidget()
         self._bar.setVisible(False)
@@ -275,10 +278,13 @@ class SideBySideView(QWidget):
         self._bar_prev_button.clicked.connect(self._find_prev)
         self._bar_close_button.clicked.connect(self._close_bar)
 
-        # A non-modal inline bar, not QInputDialog: a modal dialog would
-        # block the pane underneath it and, per spec, is effectively
-        # untestable (it steals the event loop instead of participating in
-        # the same widget tree tests can drive with QTest).
+        # The find bar stays a non-modal inline widget, not QInputDialog: a
+        # modal dialog would block the pane underneath it and is
+        # effectively untestable (it steals the event loop instead of
+        # participating in the same widget tree tests can drive with
+        # QTest) -- and find benefits from the incremental-as-you-type
+        # feedback a one-shot dialog can't give. Goto-line has neither
+        # need (see _open_goto_bar), which is why only it uses a dialog.
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -405,30 +411,11 @@ class SideBySideView(QWidget):
         # would search for "ab" starting *after* the "a" match, which can
         # skip straight past an "ab" that begins at the "a" match itself.
         self._find_anchor = self._right.textCursor()
-        self._show_bar("find")
-
-    def _open_goto_bar(self) -> None:
-        if not self._editing:
-            return
-        self._show_bar("goto")
-
-    def _show_bar(self, mode: str) -> None:
-        reopening_same_mode = self._bar.isVisible() and self._bar_mode == mode
-        self._bar_mode = mode
-        if mode == "find":
-            self._bar_label.setText("Find:")
-            self._bar_input.setPlaceholderText("Find in file…")
-            self._bar_prev_button.setVisible(True)
-            self._bar_next_button.setVisible(True)
-        else:
-            self._bar_label.setText("Go to line:")
-            self._bar_input.setPlaceholderText("Line number…")
-            self._bar_prev_button.setVisible(False)
-            self._bar_next_button.setVisible(False)
+        reopening = self._bar.isVisible()
         self._clear_bar_feedback()
         self._bar.setVisible(True)
         self._bar_input.setFocus()
-        if reopening_same_mode:
+        if reopening:
             # Ctrl+F on an already-open find bar re-focuses and selects the
             # existing query, per spec, instead of clearing it -- matches
             # how browser find bars behave on a repeat press.
@@ -436,31 +423,47 @@ class SideBySideView(QWidget):
         else:
             self._bar_input.clear()
 
+    def _open_goto_bar(self) -> None:
+        if not self._editing:
+            return
+        # The user asked for "a simple popup input dialog" here, and
+        # unlike find, a one-shot line-number prompt has no incremental
+        # feedback to show while typing that would justify occupying the
+        # view with an inline widget -- so this is a modal QInputDialog,
+        # not the find bar. Its own min/max args do the out-of-range
+        # clamping for free, instead of clamp arithmetic of our own.
+        block_count = self._right.document().blockCount()
+        current_line = self._right.textCursor().blockNumber() + 1
+        line, ok = QInputDialog.getInt(
+            self, "Go to Line", "Line number:", current_line, 1, block_count
+        )
+        if not ok:
+            return
+        block = self._right.document().findBlockByNumber(line - 1)
+        if not block.isValid():
+            return
+        cursor = QTextCursor(block)
+        self._right.setTextCursor(cursor)
+        self._right.centerCursor()
+
     def _close_bar(self) -> None:
         self._bar.setVisible(False)
         self._right.setFocus()
 
     def _reset_bar(self) -> None:
         # Leaving edit mode or navigating to a different file must not
-        # leave a find/goto bar dangling in a stale mode over the new
-        # buffer, and any find anchor from the old buffer is meaningless.
+        # leave the find bar dangling over the new buffer, and any find
+        # anchor from the old buffer is meaningless.
         self._bar.setVisible(False)
         self._find_anchor = None
 
     def _on_bar_return(self) -> None:
-        if self._bar_mode == "find":
-            self._find_next()
-        else:
-            self._do_goto()
+        self._find_next()
 
     def _on_bar_shift_return(self) -> None:
-        if self._bar_mode == "find":
-            self._find_prev()
-        # Goto mode has no "previous" concept -- Shift+Enter is a no-op.
+        self._find_prev()
 
     def _on_bar_text_changed(self, _text: str) -> None:
-        if self._bar_mode != "find":
-            return
         if not self._bar_input.text():
             self._clear_bar_feedback()
             return
@@ -501,26 +504,6 @@ class SideBySideView(QWidget):
                 # point, per spec ("leaves the cursor put").
                 self._right.setTextCursor(original_cursor)
         self._set_bar_feedback(found)
-
-    def _do_goto(self) -> None:
-        text = self._bar_input.text().strip()
-        try:
-            line = int(text)
-        except ValueError:
-            self._set_bar_feedback(False)
-            return
-        block_count = self._right.document().blockCount()
-        # Clamp rather than reject/raise on out-of-range input, per spec.
-        line = max(1, min(line, block_count))
-        block = self._right.document().findBlockByNumber(line - 1)
-        if not block.isValid():
-            self._set_bar_feedback(False)
-            return
-        cursor = QTextCursor(block)
-        self._right.setTextCursor(cursor)
-        self._right.centerCursor()
-        self._set_bar_feedback(True)
-        self._close_bar()
 
     def _set_bar_feedback(self, found: bool) -> None:
         if found:
