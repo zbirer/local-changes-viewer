@@ -24,7 +24,7 @@ stripping the tests off a covered one, breaks the build.
 - **Moved a file?** Update its `WHERE:` anchor.
 - **Renamed a test?** Update every block citing it.
 - **Reorganized categories, or moved a block to a different one?** Keep every
-  block's `### F<n>.` heading sequential (F1…F84) in document order — a block
+  block's `### F<n>.` heading sequential (F1…F86) in document order — a block
   that changes position gets renumbered to match, even if nothing else about
   it changed.
 
@@ -40,8 +40,8 @@ tests.
 - [Profiles](#profiles) — F37–F43
 - [Git Change Detection](#git-change-detection) — F44–F52
 - [GitHub Integration & Pull Requests](#github-integration--pull-requests) — F53–F64
-- [Diff Viewing & Editing](#diff-viewing--editing) — F65–F76
-- [Settings, Persistence & Logging](#settings-persistence--logging) — F77–F84
+- [Diff Viewing & Editing](#diff-viewing--editing) — F65–F78
+- [Settings, Persistence & Logging](#settings-persistence--logging) — F79–F86
 
 ---
 
@@ -424,9 +424,9 @@ WHERE: `src/local_changes_viewer/gui/diff_view/diff_view_widget.py`
 TESTS: NONE
 
 ### F71. In-place file editing from the side-by-side view, with save and discard-on-navigate
-WHAT: An Edit toggle makes the right pane of side-by-side view editable, preserving original encoding and line endings; Save writes it back; navigating away or closing with unsaved edits prompts to discard.
-WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:236`
-TESTS: NONE
+WHAT: An Edit toggle makes the right pane of side-by-side view editable, preserving original encoding and line endings; the gutter switches to real file line numbers (1..N, live as you type) instead of diff-row numbers; Save writes it back; navigating away or closing with unsaved edits prompts to discard.
+WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:352`
+TESTS: `tests/gui/test_diff_view.py::test_entering_edit_mode_shows_real_sequential_line_numbers`, `tests/gui/test_diff_view.py::test_typing_a_new_line_keeps_gutter_sequential`, `tests/gui/test_diff_view.py::test_exiting_edit_mode_restores_diff_row_line_numbers`
 
 ### F72. File-info status label shows detected encoding and line-ending
 WHAT: Selecting a file shows its detected text encoding (UTF-8, UTF-8 BOM, Latin-1, Binary, Unknown) and line-ending style (LF, CRLF, Mixed, N-A) in the status bar.
@@ -453,46 +453,56 @@ WHAT: The unified/side-by-side choice, window size and position, and the main sp
 WHERE: `src/local_changes_viewer/gui/main_window.py:420`
 TESTS: NONE
 
+### F77. Ctrl+F opens an inline find bar in the edit pane
+WHAT: While editing (side-by-side view, right pane focused), Ctrl+F opens a non-modal find bar at the bottom of the view; typing searches incrementally from the cursor, Enter/Next and Shift+Enter/Prev step through matches and wrap at the document ends, a non-match turns the input red, and Escape closes the bar and returns focus to the pane. Inert outside edit mode or when focus is elsewhere.
+WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:245`
+TESTS: `tests/gui/test_diff_view.py::test_ctrl_f_shows_find_bar_only_in_edit_mode`, `tests/gui/test_diff_view.py::test_find_next_advances_through_occurrences_and_wraps`, `tests/gui/test_diff_view.py::test_non_matching_search_gives_feedback_and_leaves_cursor_put`, `tests/gui/test_diff_view.py::test_escape_closes_bar_and_returns_focus_to_pane`
+
+### F78. Ctrl+G jumps to a line number in the edit pane
+WHAT: While editing (side-by-side view, right pane focused), Ctrl+G opens the same inline bar in goto-line mode; entering a number and pressing Enter moves the cursor to that line's start, centers it, and closes the bar, clamping out-of-range numbers into 1..blockCount instead of erroring. Inert outside edit mode or when focus is elsewhere.
+WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:248`
+TESTS: `tests/gui/test_diff_view.py::test_ctrl_g_shows_goto_bar_and_jumps_to_valid_line`, `tests/gui/test_diff_view.py::test_goto_out_of_range_line_clamps_instead_of_raising`
+
 ## Settings, Persistence & Logging
 
 App-wide settings, restored window/view state, credential storage, and logging.
 
-### F77. Settings-menu toggles persist and restore without re-triggering a scan or refresh
+### F79. Settings-menu toggles persist and restore without re-triggering a scan or refresh
 WHAT: All checkable Settings-menu items are saved and restored, and restoring them at startup must not fire a redundant scan or display refresh.
 WHERE: `src/local_changes_viewer/gui/settings.py`
 TESTS: `tests/gui/test_main_window.py::test_only_one_scan_starts_during_window_init`, `tests/gui/test_main_window.py::test_display_filter_toggle_does_not_refresh_during_settings_restore`
 
-### F78. Log Level… dialog sets and persists app log verbosity
+### F80. Log Level… dialog sets and persists app log verbosity
 WHAT: Choose ERROR, WARNING, INFO, DEBUG, or VERBOSE; persists and takes effect immediately.
 WHERE: `src/local_changes_viewer/gui/applog.py`
 TESTS: NONE
 
-### F79. Tooltip Font Size… dialog sets and persists the app-wide tooltip font size
+### F81. Tooltip Font Size… dialog sets and persists the app-wide tooltip font size
 WHAT: Sets a custom point size for all Qt tooltips app-wide; 0 means system default.
 WHERE: `src/local_changes_viewer/gui/main_window.py:808`
 TESTS: NONE
 
-### F80. Help menu: dialogs documenting Settings, Actions, PR panel, and toolbar buttons
+### F82. Help menu: dialogs documenting Settings, Actions, PR panel, and toolbar buttons
 WHAT: Four static help dialogs describing menu items and toolbar buttons.
 WHERE: `src/local_changes_viewer/gui/help_dialog.py`
 TESTS: NONE
 
-### F81. Last-opened root folder is remembered and reopened automatically at launch
+### F83. Last-opened root folder is remembered and reopened automatically at launch
 WHAT: The app reopens whatever folder was open when it last closed.
 WHERE: `src/local_changes_viewer/gui/main_window.py:415`
 TESTS: NONE
 
-### F82. GitHub credentials are stored in a local token file with restrictive permissions
+### F84. GitHub credentials are stored in a local token file with restrictive permissions
 WHAT: Tokens are written to ~/.local-changes-viewer/github_token.json chmod 0600, keyed by username, and can be deleted per user.
 WHERE: `src/local_changes_viewer/gui/github_auth.py`
 TESTS: `tests/gui/test_github_auth.py::test_set_and_get_token_round_trips`, `tests/gui/test_github_auth.py::test_get_token_returns_none_when_file_missing`, `tests/gui/test_github_auth.py::test_delete_token_removes_only_that_user`, `tests/gui/test_github_auth.py::test_delete_token_is_noop_when_user_not_present`, `tests/gui/test_github_auth.py::test_set_token_writes_file_with_restrictive_permissions`
 
-### F83. In-memory and on-disk app log, filtered by configured log level
+### F85. In-memory and on-disk app log, filtered by configured log level
 WHAT: Every logged message is kept in memory for the "App Log" copy action and appended to a log file under ~/Library/Logs/local-changes-viewer/, filtered by the current log level.
 WHERE: `src/local_changes_viewer/gui/applog.py`
 TESTS: NONE
 
-### F84. "App Log" action copies the full in-memory app log to the clipboard
+### F86. "App Log" action copies the full in-memory app log to the clipboard
 WHAT: Actions > App Log dumps every logged line to the clipboard for bug reports.
 WHERE: `src/local_changes_viewer/gui/main_window.py:1181`
 TESTS: NONE

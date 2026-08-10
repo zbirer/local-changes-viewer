@@ -2,8 +2,28 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QRect, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QTextCursor, QTextFormat
-from PySide6.QtWidgets import QHBoxLayout, QPlainTextEdit, QSplitter, QTextEdit, QWidget
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QKeySequence,
+    QPainter,
+    QShortcut,
+    QTextCursor,
+    QTextDocument,
+    QTextFormat,
+)
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QSplitter,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 from local_changes_viewer.core.domain.diff import DiffLineKind, DiffResult
 from local_changes_viewer.core.services.context_folding import FoldedRun, fold_context
@@ -53,6 +73,12 @@ class _DiffPane(QPlainTextEdit):
         self.highlighter = PygmentsHighlighter(self.document())
         self.fold_keys: list[tuple[int, int] | None] = []
         self.line_numbers: list[int | None] = []
+        # Edit mode turns this on: the gutter then paints block_number + 1
+        # directly (see paint_gutter/_lineno_for_block) instead of indexing
+        # `line_numbers`, because that list is a snapshot taken once and
+        # would desync the moment the user inserts or deletes a line --
+        # Qt's block count changes immediately but a snapshot list can't.
+        self.sequential_line_numbers = False
         self._on_marker_click = on_marker_click
         self._line_numbers_visible = True
         self._gutter = _GutterWidget(self)
@@ -84,7 +110,13 @@ class _DiffPane(QPlainTextEdit):
     def gutter_width(self) -> int:
         if not self._line_numbers_visible:
             return 0
-        digits = max((len(str(n)) for n in self.line_numbers if n is not None), default=1)
+        if self.sequential_line_numbers:
+            # line_numbers holds stale diff-row numbers in edit mode (it is
+            # never repopulated there), so width must come from the live
+            # block count instead, same source paint_gutter itself uses.
+            digits = len(str(max(self.blockCount(), 1)))
+        else:
+            digits = max((len(str(n)) for n in self.line_numbers if n is not None), default=1)
         digits = max(digits, 2)
         metrics = QFontMetrics(self.font())
         return metrics.horizontalAdvance("9") * digits + 10
@@ -119,12 +151,8 @@ class _DiffPane(QPlainTextEdit):
         metrics = QFontMetrics(self.font())
 
         while block.isValid() and top <= event.rect().bottom():
-            if (
-                block.isVisible()
-                and bottom >= event.rect().top()
-                and block_number < len(self.line_numbers)
-            ):
-                lineno = self.line_numbers[block_number]
+            if block.isVisible() and bottom >= event.rect().top():
+                lineno = self._lineno_for_block(block_number)
                 if lineno is not None:
                     painter.setPen(QColor("#6B7280"))
                     painter.drawText(
@@ -140,6 +168,47 @@ class _DiffPane(QPlainTextEdit):
             top = bottom
             bottom = top + int(self.blockBoundingRect(block).height())
             block_number += 1
+
+    def _lineno_for_block(self, block_number: int) -> int | None:
+        if self.sequential_line_numbers:
+            # Edit mode always shows the real, whole file (never folded),
+            # so the displayed number is simply the block's own position --
+            # reading it straight off the document avoids the snapshot-list
+            # desync described on `sequential_line_numbers` above.
+            return block_number + 1
+        if block_number < len(self.line_numbers):
+            return self.line_numbers[block_number]
+        return None
+
+
+class _BarLineEdit(QLineEdit):
+    """The find/goto bar's input, with key handling QLineEdit alone can't
+    express: Escape to close the bar, and Shift+Enter for find-previous
+    (the plain `returnPressed` signal carries no modifier information, so
+    telling Enter and Shift+Enter apart needs this override)."""
+
+    def __init__(
+        self,
+        on_escape: Callable[[], None],
+        on_return: Callable[[], None],
+        on_shift_return: Callable[[], None],
+    ) -> None:
+        super().__init__()
+        self._on_escape = on_escape
+        self._on_return = on_return
+        self._on_shift_return = on_shift_return
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self._on_escape()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self._on_shift_return()
+            else:
+                self._on_return()
+            return
+        super().keyPressEvent(event)
 
 
 class SideBySideView(QWidget):
@@ -166,9 +235,55 @@ class SideBySideView(QWidget):
         splitter.addWidget(self._left)
         splitter.addWidget(self._right)
 
-        layout = QHBoxLayout(self)
+        # Ctrl+F/Ctrl+G are parented to the right pane itself (not `self`)
+        # with WidgetWithChildrenShortcut context, so Qt only routes them
+        # here when the keyboard focus is inside that pane -- per spec,
+        # these must be scoped to the edit pane, not the whole view. The
+        # `_editing` check in each slot is still needed on top of that
+        # because the right pane keeps accepting focus while read-only in
+        # diff mode, where the context alone would otherwise let it fire.
+        self._find_shortcut = QShortcut(QKeySequence("Ctrl+F"), self._right)
+        self._find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._find_shortcut.activated.connect(self._open_find_bar)
+        self._goto_shortcut = QShortcut(QKeySequence("Ctrl+G"), self._right)
+        self._goto_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._goto_shortcut.activated.connect(self._open_goto_bar)
+
+        self._bar_mode = "find"
+        self._find_anchor: QTextCursor | None = None
+        self._bar = QWidget()
+        self._bar.setVisible(False)
+        bar_layout = QHBoxLayout(self._bar)
+        bar_layout.setContentsMargins(4, 2, 4, 2)
+        self._bar_label = QLabel("Find:")
+        self._bar_input = _BarLineEdit(
+            on_escape=self._close_bar,
+            on_return=self._on_bar_return,
+            on_shift_return=self._on_bar_shift_return,
+        )
+        self._bar_prev_button = QPushButton("Prev")
+        self._bar_next_button = QPushButton("Next")
+        self._bar_close_button = QPushButton("✕")
+        self._bar_close_button.setFixedWidth(24)
+        bar_layout.addWidget(self._bar_label)
+        bar_layout.addWidget(self._bar_input, 1)
+        bar_layout.addWidget(self._bar_prev_button)
+        bar_layout.addWidget(self._bar_next_button)
+        bar_layout.addWidget(self._bar_close_button)
+        self._bar_input.textChanged.connect(self._on_bar_text_changed)
+        self._bar_next_button.clicked.connect(self._find_next)
+        self._bar_prev_button.clicked.connect(self._find_prev)
+        self._bar_close_button.clicked.connect(self._close_bar)
+
+        # A non-modal inline bar, not QInputDialog: a modal dialog would
+        # block the pane underneath it and, per spec, is effectively
+        # untestable (it steals the event loop instead of participating in
+        # the same widget tree tests can drive with QTest).
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(splitter)
+        layout.addWidget(self._bar)
 
     def set_sync_scroll(self, enabled: bool) -> None:
         self._sync_scroll_enabled = enabled
@@ -219,6 +334,7 @@ class SideBySideView(QWidget):
         self._expanded_folds = set()
         self._editing = False
         self._right.setReadOnly(True)
+        self._reset_bar()
         self._rebuild()
 
     def set_file_target(self, abs_file_path: Path | None) -> None:
@@ -250,14 +366,21 @@ class SideBySideView(QWidget):
         self._editing = True
         self._right.fold_keys = []
         self._right.setExtraSelections([])
+        # Set before setPlainText so the blockCountChanged it triggers
+        # already recomputes gutter width against the sequential-mode
+        # digit count, not the stale diff-row line_numbers list.
+        self._right.sequential_line_numbers = True
         self._right.setPlainText(text)
         self._right.document().setModified(False)
         self._right.setReadOnly(False)
+        self._right._update_gutter_width()
+        self._right._gutter.update()
         return True
 
     def exit_edit_mode(self) -> None:
         self._editing = False
         self._right.setReadOnly(True)
+        self._reset_bar()
         self._rebuild()
 
     def save_edits(self) -> bool:
@@ -273,10 +396,156 @@ class SideBySideView(QWidget):
         self._right.document().setModified(False)
         return True
 
+    def _open_find_bar(self) -> None:
+        if not self._editing:
+            return
+        # Anchor the incremental as-you-type search to wherever the cursor
+        # sat when the bar was opened, not to whatever the cursor drifts to
+        # after each keystroke's match -- otherwise typing "a" then "ab"
+        # would search for "ab" starting *after* the "a" match, which can
+        # skip straight past an "ab" that begins at the "a" match itself.
+        self._find_anchor = self._right.textCursor()
+        self._show_bar("find")
+
+    def _open_goto_bar(self) -> None:
+        if not self._editing:
+            return
+        self._show_bar("goto")
+
+    def _show_bar(self, mode: str) -> None:
+        reopening_same_mode = self._bar.isVisible() and self._bar_mode == mode
+        self._bar_mode = mode
+        if mode == "find":
+            self._bar_label.setText("Find:")
+            self._bar_input.setPlaceholderText("Find in file…")
+            self._bar_prev_button.setVisible(True)
+            self._bar_next_button.setVisible(True)
+        else:
+            self._bar_label.setText("Go to line:")
+            self._bar_input.setPlaceholderText("Line number…")
+            self._bar_prev_button.setVisible(False)
+            self._bar_next_button.setVisible(False)
+        self._clear_bar_feedback()
+        self._bar.setVisible(True)
+        self._bar_input.setFocus()
+        if reopening_same_mode:
+            # Ctrl+F on an already-open find bar re-focuses and selects the
+            # existing query, per spec, instead of clearing it -- matches
+            # how browser find bars behave on a repeat press.
+            self._bar_input.selectAll()
+        else:
+            self._bar_input.clear()
+
+    def _close_bar(self) -> None:
+        self._bar.setVisible(False)
+        self._right.setFocus()
+
+    def _reset_bar(self) -> None:
+        # Leaving edit mode or navigating to a different file must not
+        # leave a find/goto bar dangling in a stale mode over the new
+        # buffer, and any find anchor from the old buffer is meaningless.
+        self._bar.setVisible(False)
+        self._find_anchor = None
+
+    def _on_bar_return(self) -> None:
+        if self._bar_mode == "find":
+            self._find_next()
+        else:
+            self._do_goto()
+
+    def _on_bar_shift_return(self) -> None:
+        if self._bar_mode == "find":
+            self._find_prev()
+        # Goto mode has no "previous" concept -- Shift+Enter is a no-op.
+
+    def _on_bar_text_changed(self, _text: str) -> None:
+        if self._bar_mode != "find":
+            return
+        if not self._bar_input.text():
+            self._clear_bar_feedback()
+            return
+        if self._find_anchor is not None:
+            self._right.setTextCursor(self._find_anchor)
+        self._do_find(QTextDocument.FindFlag(0))
+
+    def _find_next(self) -> None:
+        self._do_find(QTextDocument.FindFlag(0))
+
+    def _find_prev(self) -> None:
+        self._do_find(QTextDocument.FindFlag.FindBackward)
+
+    def _do_find(self, flags: QTextDocument.FindFlag) -> None:
+        text = self._bar_input.text()
+        if not text:
+            self._clear_bar_feedback()
+            return
+        original_cursor = self._right.textCursor()
+        found = self._right.find(text, flags)
+        if not found:
+            # QPlainTextEdit.find() doesn't wrap on its own: move to the
+            # document's start (or end, searching backward) and retry once
+            # rather than silently reporting no match when the search
+            # simply ran off whichever edge.
+            wrap_cursor = QTextCursor(original_cursor)
+            move = (
+                QTextCursor.MoveOperation.End
+                if flags & QTextDocument.FindFlag.FindBackward
+                else QTextCursor.MoveOperation.Start
+            )
+            wrap_cursor.movePosition(move)
+            self._right.setTextCursor(wrap_cursor)
+            found = self._right.find(text, flags)
+            if not found:
+                # No match anywhere in the document -- restore the
+                # original cursor rather than stranding it at the wrap
+                # point, per spec ("leaves the cursor put").
+                self._right.setTextCursor(original_cursor)
+        self._set_bar_feedback(found)
+
+    def _do_goto(self) -> None:
+        text = self._bar_input.text().strip()
+        try:
+            line = int(text)
+        except ValueError:
+            self._set_bar_feedback(False)
+            return
+        block_count = self._right.document().blockCount()
+        # Clamp rather than reject/raise on out-of-range input, per spec.
+        line = max(1, min(line, block_count))
+        block = self._right.document().findBlockByNumber(line - 1)
+        if not block.isValid():
+            self._set_bar_feedback(False)
+            return
+        cursor = QTextCursor(block)
+        self._right.setTextCursor(cursor)
+        self._right.centerCursor()
+        self._set_bar_feedback(True)
+        self._close_bar()
+
+    def _set_bar_feedback(self, found: bool) -> None:
+        if found:
+            self._clear_bar_feedback()
+        else:
+            # A reddish input colour is the cheapest, most Qt-idiomatic
+            # "no match" signal that doesn't need a second widget; cleared
+            # the instant a search succeeds again.
+            self._bar_input.setStyleSheet("color: #B91C1C;")
+
+    def _clear_bar_feedback(self) -> None:
+        self._bar_input.setStyleSheet("")
+
     def _rebuild(self) -> None:
         diff = self._diff
         if diff is None:
             return
+
+        # _rebuild always renders diff-row numbering, never edit mode's
+        # sequential numbering -- resetting it here (rather than only in
+        # exit_edit_mode) means every caller that ends up here (set_diff,
+        # exit_edit_mode, fold-expand) is guaranteed correct even if a
+        # future caller forgets to reset it explicitly.
+        self._left.sequential_line_numbers = False
+        self._right.sequential_line_numbers = False
 
         paired: list[PairedLine] = []
         fold_keys: list[tuple[int, int] | None] = []
@@ -350,8 +619,11 @@ class SideBySideView(QWidget):
         self._right.fold_keys = []
         self._left.line_numbers = []
         self._right.line_numbers = []
+        self._left.sequential_line_numbers = False
+        self._right.sequential_line_numbers = False
         self._left.setPlainText("")
         self._right.setPlainText("")
+        self._reset_bar()
 
     def _highlight(
         self,
