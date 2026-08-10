@@ -50,6 +50,35 @@ def _empty_diff() -> DiffResult:
     return DiffResult(old_ref="HEAD", new_ref="working tree", hunks=[])
 
 
+def _multi_run_diff() -> DiffResult:
+    """Three well-separated substitutions inside a SINGLE hunk -- the
+    `--unified=100000` reality `compute_diff` actually produces (see
+    git_repo_adapter.py:273). Old and new behavior diverge on exactly this
+    shape: hunk-based navigation would find only ONE target (this diff has
+    one `@@`), change-run-based navigation must find three."""
+    hunk = DiffHunk(
+        old_start=1,
+        old_count=9,
+        new_start=1,
+        new_count=9,
+        lines=[
+            DiffLine(DiffLineKind.REMOVED, 1, None, "old1"),
+            DiffLine(DiffLineKind.ADDED, None, 1, "new1"),
+            DiffLine(DiffLineKind.CONTEXT, 2, 2, "same-a"),
+            DiffLine(DiffLineKind.CONTEXT, 3, 3, "same-b"),
+            DiffLine(DiffLineKind.CONTEXT, 4, 4, "same-c"),
+            DiffLine(DiffLineKind.REMOVED, 5, None, "old2"),
+            DiffLine(DiffLineKind.ADDED, None, 5, "new2"),
+            DiffLine(DiffLineKind.CONTEXT, 6, 6, "same-d"),
+            DiffLine(DiffLineKind.CONTEXT, 7, 7, "same-e"),
+            DiffLine(DiffLineKind.CONTEXT, 8, 8, "same-f"),
+            DiffLine(DiffLineKind.REMOVED, 9, None, "old3"),
+            DiffLine(DiffLineKind.ADDED, None, 9, "new3"),
+        ],
+    )
+    return DiffResult(old_ref="HEAD", new_ref="working tree", hunks=[hunk])
+
+
 def _ready_view(tmp_path: Path, file_text: str, diff: DiffResult | None = None) -> SideBySideView:
     """A shown, exposed view wired to a real on-disk file as its edit
     target. Showing it (rather than leaving it unparented) matters: the
@@ -299,3 +328,114 @@ def test_cmd_s_shortcut_saves_through_the_same_path_as_the_save_button(
 
     assert not right.document().isModified()
     assert file_path.read_bytes() == b"one\r\ntwo\r\nthree_edited"
+
+
+# ---------------------------------------------------------------------------
+# Prev/Next change navigation: the change-run fix for the "--unified=100000
+# collapses everything into one hunk" defect (see diff_pairing.change_runs).
+# ---------------------------------------------------------------------------
+
+
+def _ready_widget(tmp_path: Path, file_text: str, diff: DiffResult) -> DiffViewWidget:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text(file_text)
+    widget = DiffViewWidget()
+    widget.set_side_by_side(True)
+    widget.set_diff(diff, str(file_path), file_path)
+    widget.show()
+    QTest.qWaitForWindowExposed(widget)
+    return widget
+
+
+def test_successive_next_change_clicks_reach_successive_changes_in_diff_mode(
+    qapp, tmp_path: Path
+) -> None:
+    widget = _ready_widget(
+        tmp_path,
+        "new1\nsame-a\nsame-b\nsame-c\nnew2\nsame-d\nsame-e\nsame-f\nnew3",
+        _multi_run_diff(),
+    )
+    left = widget._side_by_side._left
+
+    QTest.mouseClick(widget._next_button, Qt.MouseButton.LeftButton)
+    first_block = left.textCursor().blockNumber()
+    QTest.mouseClick(widget._next_button, Qt.MouseButton.LeftButton)
+    second_block = left.textCursor().blockNumber()
+    QTest.mouseClick(widget._next_button, Qt.MouseButton.LeftButton)
+    third_block = left.textCursor().blockNumber()
+
+    assert first_block < second_block < third_block, (
+        "each 'Next change' click must land on a later change than the last -- "
+        "with the old hunk-based navigation all three clicks land on block 0, "
+        "since this diff is a single `@@` hunk."
+    )
+
+    QTest.mouseClick(widget._prev_button, Qt.MouseButton.LeftButton)
+    assert left.textCursor().blockNumber() == second_block
+
+
+def test_next_change_in_edit_mode_lands_each_pane_on_its_own_real_line(
+    qapp, tmp_path: Path
+) -> None:
+    widget = _ready_widget(
+        tmp_path,
+        "new1\nsame-a\nsame-b\nsame-c\nnew2\nsame-d\nsame-e\nsame-f\nnew3",
+        _multi_run_diff(),
+    )
+    widget._edit_button.setChecked(True)
+    assert widget._side_by_side.is_editing()
+    left = widget._side_by_side._left
+    right = widget._side_by_side._right
+
+    QTest.mouseClick(widget._next_button, Qt.MouseButton.LeftButton)
+    assert left.textCursor().blockNumber() == 0  # old_lineno 1
+    assert right.textCursor().blockNumber() == 0  # new_lineno 1
+    assert right.hasFocus(), "focus must stay in the editable right pane"
+
+    QTest.mouseClick(widget._next_button, Qt.MouseButton.LeftButton)
+    assert left.textCursor().blockNumber() == 4  # old_lineno 5
+    assert right.textCursor().blockNumber() == 4  # new_lineno 5
+
+    QTest.mouseClick(widget._next_button, Qt.MouseButton.LeftButton)
+    assert left.textCursor().blockNumber() == 8  # old_lineno 9
+    assert right.textCursor().blockNumber() == 8  # new_lineno 9
+
+
+# ---------------------------------------------------------------------------
+# Edit disabled (with explaining tooltip) for an already-committed diff.
+# ---------------------------------------------------------------------------
+
+
+def test_edit_disabled_with_explaining_tooltip_for_committed_diff(
+    qapp, tmp_path: Path
+) -> None:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("content")
+    widget = DiffViewWidget()
+
+    widget.set_diff(
+        _empty_diff(),
+        str(file_path),
+        file_path,
+        "This is an already-committed (not yet pushed) change, so the file "
+        "on disk no longer matches this diff.",
+    )
+
+    assert not widget._edit_button.isEnabled()
+    assert widget._edit_button.toolTip() == (
+        "This is an already-committed (not yet pushed) change, so the file "
+        "on disk no longer matches this diff."
+    )
+
+
+def test_edit_enabled_with_normal_tooltip_for_working_tree_diff(
+    qapp, tmp_path: Path
+) -> None:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("content")
+    widget = DiffViewWidget()
+
+    widget.set_diff(_empty_diff(), str(file_path), file_path, None)
+
+    assert widget._edit_button.isEnabled()
+    assert widget._edit_button.toolTip() == "Edit the file in place"

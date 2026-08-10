@@ -24,7 +24,7 @@ stripping the tests off a covered one, breaks the build.
 - **Moved a file?** Update its `WHERE:` anchor.
 - **Renamed a test?** Update every block citing it.
 - **Reorganized categories, or moved a block to a different one?** Keep every
-  block's `### F<n>.` heading sequential (F1…F86) in document order — a block
+  block's `### F<n>.` heading sequential (F1…F87) in document order — a block
   that changes position gets renumbered to match, even if nothing else about
   it changed.
 
@@ -40,7 +40,7 @@ tests.
 - [Profiles](#profiles) — F37–F43
 - [Git Change Detection](#git-change-detection) — F44–F52
 - [GitHub Integration & Pull Requests](#github-integration--pull-requests) — F53–F64
-- [Diff Viewing & Editing](#diff-viewing--editing) — F65–F78
+- [Diff Viewing & Editing](#diff-viewing--editing) — F65–F78, F87
 - [Settings, Persistence & Logging](#settings-persistence--logging) — F79–F86
 
 ---
@@ -418,15 +418,15 @@ WHAT: Within a paired removed/added line, only the actually-changed word or subs
 WHERE: `src/local_changes_viewer/core/services/intraline_diff.py`
 TESTS: `tests/core/services/test_intraline_diff.py::test_single_word_change_in_long_line_highlights_only_that_word`, `tests/core/services/test_intraline_diff.py::test_identical_text_produces_no_ranges`, `tests/core/services/test_intraline_diff.py::test_completely_different_text_covers_whole_string`
 
-### F70. Diff toolbar: view-mode toggle, prev/next hunk, refresh, line numbers, font size
-WHAT: Toggle side-by-side/unified, jump between changed hunks, force-reload the diff, toggle gutters, and zoom in and out, also via View menu and Ctrl+= / Ctrl+-.
+### F70. Diff toolbar: view-mode toggle, prev/next change, refresh, line numbers, font size
+WHAT: Toggle side-by-side/unified, jump between changes (a maximal run of added/removed lines, not the underlying git hunk -- `compute_diff`'s `--unified=100000` usually collapses a whole file's diff into a single hunk, so jumping by hunk found only one target), force-reload the diff, toggle gutters, and zoom in and out, also via View menu and Ctrl+= / Ctrl+-.
 WHERE: `src/local_changes_viewer/gui/diff_view/diff_view_widget.py`
-TESTS: NONE
+TESTS: `tests/gui/test_diff_view.py::test_successive_next_change_clicks_reach_successive_changes_in_diff_mode`, `tests/core/services/test_diff_pairing.py::test_change_runs_finds_multiple_separate_runs_inside_a_single_hunk`
 
 ### F71. In-place file editing from the side-by-side view, with save and discard-on-navigate
-WHAT: An Edit toggle makes the right pane of side-by-side view editable, preserving original encoding and line endings; both panes switch from the folded diff view to their own full source (right pane the live on-disk/as-typed file, left pane the reconstructed pre-change original) with real file line numbers (1..N, live as you type on the right) instead of diff-row numbers, so scrolling the two together lines up whole files instead of folded hunks; removed/added lines stay highlighted at their real line numbers. Save (the toolbar button, or Cmd+S/Ctrl+S via the platform-standard save shortcut, which drives that same button) writes the right pane back; navigating away or closing with unsaved edits prompts to discard.
+WHAT: An Edit toggle makes the right pane of side-by-side view editable, preserving original encoding and line endings; both panes switch from the folded diff view to their own full source (right pane the live on-disk/as-typed file, left pane the reconstructed pre-change original) with real file line numbers (1..N, live as you type on the right) instead of diff-row numbers, so scrolling the two together lines up whole files instead of folded hunks; removed/added lines stay highlighted at their real line numbers. Prev/Next change in edit mode scrolls each pane to that change's own real line (left to its old line, right to its new line) with sync-scroll suppressed for the jump and keyboard focus left in the right pane. Save (the toolbar button, or Cmd+S/Ctrl+S via the platform-standard save shortcut, which drives that same button) writes the right pane back; navigating away or closing with unsaved edits prompts to discard.
 WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:362`
-TESTS: `tests/gui/test_diff_view.py::test_entering_edit_mode_shows_real_sequential_line_numbers`, `tests/gui/test_diff_view.py::test_typing_a_new_line_keeps_gutter_sequential`, `tests/gui/test_diff_view.py::test_exiting_edit_mode_restores_diff_row_line_numbers`, `tests/gui/test_diff_view.py::test_entering_edit_mode_expands_left_pane_to_full_original_source`, `tests/gui/test_diff_view.py::test_exiting_edit_mode_restores_left_pane_folded_diff_rendering`, `tests/gui/test_diff_view.py::test_cmd_s_shortcut_saves_through_the_same_path_as_the_save_button`
+TESTS: `tests/gui/test_diff_view.py::test_entering_edit_mode_shows_real_sequential_line_numbers`, `tests/gui/test_diff_view.py::test_typing_a_new_line_keeps_gutter_sequential`, `tests/gui/test_diff_view.py::test_exiting_edit_mode_restores_diff_row_line_numbers`, `tests/gui/test_diff_view.py::test_entering_edit_mode_expands_left_pane_to_full_original_source`, `tests/gui/test_diff_view.py::test_exiting_edit_mode_restores_left_pane_folded_diff_rendering`, `tests/gui/test_diff_view.py::test_cmd_s_shortcut_saves_through_the_same_path_as_the_save_button`, `tests/gui/test_diff_view.py::test_next_change_in_edit_mode_lands_each_pane_on_its_own_real_line`
 
 ### F72. File-info status label shows detected encoding and line-ending
 WHAT: Selecting a file shows its detected text encoding (UTF-8, UTF-8 BOM, Latin-1, Binary, Unknown) and line-ending style (LF, CRLF, Mixed, N-A) in the status bar.
@@ -506,3 +506,8 @@ TESTS: NONE
 WHAT: Actions > App Log dumps every logged line to the clipboard for bug reports.
 WHERE: `src/local_changes_viewer/gui/main_window.py:1181`
 TESTS: NONE
+
+### F87. Edit is disabled, with an explaining tooltip, for a diff that can't be safely edited
+WHAT: The Edit button is disabled -- with a tooltip naming the reason -- for an already-committed-but-unpushed change (the file on disk no longer matches the shown upstream-to-HEAD diff), a deleted file, or a folder; it is enabled with its normal tooltip for an editable working-tree change. This belongs to the Diff Viewing & Editing category (see `## Categories`); it is numbered last because renumbering existing features is not allowed.
+WHERE: `src/local_changes_viewer/gui/main_window.py`
+TESTS: `tests/gui/test_diff_view.py::test_edit_disabled_with_explaining_tooltip_for_committed_diff`, `tests/gui/test_diff_view.py::test_edit_enabled_with_normal_tooltip_for_working_tree_diff`

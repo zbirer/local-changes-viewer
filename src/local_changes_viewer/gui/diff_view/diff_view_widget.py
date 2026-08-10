@@ -29,6 +29,8 @@ class DiffViewWidget(QWidget):
     _MIN_FONT_POINT_SIZE = 6
     _MAX_FONT_POINT_SIZE = 36
 
+    _EDIT_TOOLTIP = "Edit the file in place"
+
     def __init__(self) -> None:
         super().__init__()
         # Overrides the toolbar's cumulative minimum width so the splitter divider
@@ -65,7 +67,7 @@ class DiffViewWidget(QWidget):
         self._refresh_button.clicked.connect(self.refresh_requested.emit)
 
         self._edit_button = QPushButton("Edit")
-        self._edit_button.setToolTip("Edit the file in place")
+        self._edit_button.setToolTip(self._EDIT_TOOLTIP)
         self._edit_button.setCheckable(True)
         self._edit_button.setEnabled(False)
         self._edit_button.toggled.connect(self._on_edit_toggled)
@@ -183,13 +185,17 @@ class DiffViewWidget(QWidget):
         diff: DiffResult,
         file_path: str | None = None,
         abs_file_path: Path | None = None,
+        not_editable_reason: str | None = None,
     ) -> None:
         self._current_hunk_index = -1
         self._unified.set_diff(diff, file_path)
         self._side_by_side.set_diff(diff, file_path)
         self._side_by_side.set_file_target(abs_file_path)
         self._edit_button.setChecked(False)
-        self._edit_button.setEnabled(abs_file_path is not None)
+        self._edit_button.setEnabled(abs_file_path is not None and not_editable_reason is None)
+        self._edit_button.setToolTip(
+            self._EDIT_TOOLTIP if not_editable_reason is None else not_editable_reason
+        )
         self._save_button.setEnabled(False)
         if diff.old_blob_id and diff.new_blob_id:
             self._header_label.setText(
@@ -204,6 +210,7 @@ class DiffViewWidget(QWidget):
         self._side_by_side.clear_diff()
         self._edit_button.setChecked(False)
         self._edit_button.setEnabled(False)
+        self._edit_button.setToolTip(self._EDIT_TOOLTIP)
         self._save_button.setEnabled(False)
         self._header_label.setText("")
 

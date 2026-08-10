@@ -49,6 +49,7 @@ class UnifiedView(QPlainTextEdit):
         self.setFont(QFont("Menlo", 12))
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._line_meta: list[_LineMeta] = []
+        self._change_run_rows: list[int] = []
         self._diff: DiffResult | None = None
         self._file_path: str | None = None
         self._expanded_folds: set[tuple[int, int]] = set()
@@ -82,6 +83,7 @@ class UnifiedView(QPlainTextEdit):
         self._file_path = None
         self._expanded_folds = set()
         self._line_meta = []
+        self._change_run_rows = []
         self.setPlainText("")
         self._update_gutter_width()
         self.setExtraSelections([])
@@ -93,11 +95,22 @@ class UnifiedView(QPlainTextEdit):
 
         lines: list[str] = []
         meta: list[_LineMeta] = []
+        # The block index of each change run's first row -- a change run
+        # is a maximal contiguous group of ADDED/REMOVED rows, never split
+        # across a hunk boundary or a CONTEXT row (a fold marker's rows are
+        # CONTEXT too, just collapsed). This is the navigation unit for
+        # "Prev change"/"Next change": `compute_diff`'s `--unified=100000`
+        # usually collapses a whole file into a single git hunk, so
+        # counting/jumping by hunk header (the old behavior) only ever
+        # found one target -- see diff_pairing.change_runs for the
+        # equivalent, independently-tested logic on the side-by-side view.
+        change_run_rows: list[int] = []
         for h_idx, hunk in enumerate(diff.hunks):
             lines.append(
                 f"@@ -{hunk.old_start},{hunk.old_count} +{hunk.new_start},{hunk.new_count} @@"
             )
             meta.append(_LineMeta(None, None, None, is_hunk_header=True))
+            in_run = False
 
             intraline_by_index: dict[int, list[tuple[int, int]]] = {}
             for removed_idx, added_idx in pair_substitution_indices(hunk.lines):
@@ -115,6 +128,7 @@ class UnifiedView(QPlainTextEdit):
                     lines.append(f"⋯ {count} unchanged lines — click to expand ⋯")
                     meta.append(_LineMeta(None, None, None, fold_key=key))
                     orig_idx += count
+                    in_run = False
                     continue
 
                 for line in segment.lines:
@@ -128,9 +142,14 @@ class UnifiedView(QPlainTextEdit):
                             intraline_ranges=intraline_by_index.get(orig_idx),
                         )
                     )
+                    is_change_row = line.kind is not DiffLineKind.CONTEXT
+                    if is_change_row and not in_run:
+                        change_run_rows.append(len(meta) - 1)
+                    in_run = is_change_row
                     orig_idx += 1
 
         self._line_meta = meta
+        self._change_run_rows = change_run_rows
         self.setPlainText("\n".join(lines) if lines else "(no changes)")
         if self._file_path is not None:
             self._highlighter.set_filename(self._file_path)
@@ -139,13 +158,12 @@ class UnifiedView(QPlainTextEdit):
         self._update_intraline_selections()
 
     def hunk_count(self) -> int:
-        return sum(1 for m in self._line_meta if m.is_hunk_header)
+        return len(self._change_run_rows)
 
     def scroll_to_hunk(self, index: int) -> None:
-        header_blocks = [i for i, m in enumerate(self._line_meta) if m.is_hunk_header]
-        if not 0 <= index < len(header_blocks):
+        if not 0 <= index < len(self._change_run_rows):
             return
-        block = self.document().findBlockByNumber(header_blocks[index])
+        block = self.document().findBlockByNumber(self._change_run_rows[index])
         cursor = QTextCursor(block)
         self.setTextCursor(cursor)
         self.centerCursor()

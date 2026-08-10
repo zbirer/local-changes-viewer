@@ -627,14 +627,35 @@ class MainWindow(QMainWindow):
         self._selected_repo_path = repo_path
         self._update_file_info_label(repo_path, change)
         if change.diff is not None and not self._always_reload_diff_action.isChecked():
-            self._diff_view.set_diff(change.diff, str(change.path), self._editable_path(repo_path, change))
+            abs_path, not_editable_reason = self._edit_target(repo_path, change)
+            self._diff_view.set_diff(change.diff, str(change.path), abs_path, not_editable_reason)
             return
         self._load_diff(repo_path, change)
 
-    def _editable_path(self, repo_path: Path, change: FileChange) -> Path | None:
-        if change.change_type == ChangeType.DELETED or change.is_directory:
-            return None
-        return repo_path / change.path
+    def _edit_target(self, repo_path: Path, change: FileChange) -> tuple[Path | None, str | None]:
+        """Whether `change` can be edited in place, and if not, why -- as a
+        single (path, reason) pair so the two can never drift apart.
+        Exactly one of the two is None.
+
+        `is_unpushed_commit` is checked first: that diff is old_ref=<upstream>,
+        new_ref=HEAD (see git_repo_adapter.compute_diff), so the file on disk
+        is the CURRENT working tree, not either side of the displayed diff --
+        loading it into the edit pane would show content that matches
+        neither ref, and Save would silently overwrite it with something
+        unrelated to what the diff shown. This must be checked before
+        DELETED/directory, but the current change types can't overlap
+        (only a real file's own commits carry is_unpushed_commit).
+        """
+        if change.is_unpushed_commit:
+            return None, (
+                "This is an already-committed (not yet pushed) change, so the file "
+                "on disk no longer matches this diff."
+            )
+        if change.change_type == ChangeType.DELETED:
+            return None, "The file no longer exists."
+        if change.is_directory:
+            return None, "This is a folder, not a file."
+        return repo_path / change.path, None
 
     def _update_file_info_label(self, repo_path: Path, change: FileChange) -> None:
         if change.change_type == ChangeType.DELETED:
@@ -661,8 +682,8 @@ class MainWindow(QMainWindow):
     def _on_diff_ready(self, change: FileChange, diff) -> None:
         change.diff = diff
         if change is self._selected_change and self._selected_repo_path is not None:
-            abs_path = self._editable_path(self._selected_repo_path, change)
-            self._diff_view.set_diff(diff, str(change.path), abs_path)
+            abs_path, not_editable_reason = self._edit_target(self._selected_repo_path, change)
+            self._diff_view.set_diff(diff, str(change.path), abs_path, not_editable_reason)
 
     def _on_diff_error(self, message: str, file_path: Path) -> None:
         applog.log(f"Diff failed for {file_path}: {message}", level=applog.LogLevel.ERROR)

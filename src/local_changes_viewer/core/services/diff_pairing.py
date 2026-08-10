@@ -4,6 +4,17 @@ from local_changes_viewer.core.domain.diff import DiffLine, DiffLineKind, DiffRe
 
 
 @dataclass
+class ChangeRun:
+    """One maximal contiguous run of REMOVED and/or ADDED lines -- what a
+    user thinks of as "a change", as opposed to a git hunk (which, under
+    `compute_diff`'s `--unified=100000`, is usually the *entire file* and so
+    is useless as a navigation unit -- see `change_runs` below)."""
+
+    old_lineno: int
+    new_lineno: int
+
+
+@dataclass
 class PairedLine:
     left_text: str | None
     left_kind: DiffLineKind | None
@@ -104,3 +115,65 @@ def reconstruct_old_file_lines(diff: DiffResult) -> list[str]:
             if line.kind is not DiffLineKind.ADDED and line.old_lineno is not None:
                 result[line.old_lineno - 1] = line.text
     return result
+
+
+def change_runs(diff: DiffResult) -> list[ChangeRun]:
+    """Returns one `ChangeRun` per maximal contiguous group of REMOVED
+    and/or ADDED lines, in file order across ALL of the diff's hunks -- the
+    unit "Prev change"/"Next change" navigation jumps between.
+
+    This exists because `compute_diff` asks git for `--unified=100000`,
+    which collapses a normal-size file's diff into a single `@@` hunk no
+    matter how many separate edits it contains -- so counting/jumping by
+    git hunk (the old behavior) only ever finds one target, the top of the
+    file. A "change run" is what the folded diff view already treats as
+    one visual unit (the `⋯ N unchanged lines ⋯` markers in
+    `context_folding.fold_context` only ever fold *unchanged* runs, so a
+    change run can never itself end up hidden inside one).
+
+    A pure insertion (no REMOVED line in the run) has no old-side line of
+    its own to report, so `old_lineno` falls back to one past the closest
+    preceding CONTEXT line's `old_lineno` seen so far -- `1` if the
+    insertion sits before any context, i.e. at the very top of the file.
+    `new_lineno` falls back symmetrically for a pure deletion. Runs are
+    also flushed at each hunk boundary, since two hunks that both start or
+    end without a shared context line may be separated by content git
+    simply didn't include in either hunk -- merging them would silently
+    drop a navigation stop.
+
+    Returns `[]` when the diff has no REMOVED/ADDED lines at all.
+    """
+    runs: list[ChangeRun] = []
+    pending: list[DiffLine] = []
+    last_context_old = 0
+    last_context_new = 0
+
+    def flush() -> None:
+        if not pending:
+            return
+        removed = [line for line in pending if line.kind is DiffLineKind.REMOVED]
+        added = [line for line in pending if line.kind is DiffLineKind.ADDED]
+        if removed and removed[0].old_lineno is not None:
+            old_lineno = removed[0].old_lineno
+        else:
+            old_lineno = last_context_old + 1
+        if added and added[0].new_lineno is not None:
+            new_lineno = added[0].new_lineno
+        else:
+            new_lineno = last_context_new + 1
+        runs.append(ChangeRun(old_lineno=old_lineno, new_lineno=new_lineno))
+        pending.clear()
+
+    for hunk in diff.hunks:
+        flush()
+        for line in hunk.lines:
+            if line.kind is DiffLineKind.CONTEXT:
+                flush()
+                if line.old_lineno is not None:
+                    last_context_old = line.old_lineno
+                if line.new_lineno is not None:
+                    last_context_new = line.new_lineno
+            else:
+                pending.append(line)
+    flush()
+    return runs

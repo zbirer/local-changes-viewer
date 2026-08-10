@@ -29,7 +29,9 @@ from PySide6.QtWidgets import (
 from local_changes_viewer.core.domain.diff import DiffLineKind, DiffResult
 from local_changes_viewer.core.services.context_folding import FoldedRun, fold_context
 from local_changes_viewer.core.services.diff_pairing import (
+    ChangeRun,
     PairedLine,
+    change_runs,
     pair_hunk_lines,
     reconstruct_old_file_lines,
 )
@@ -223,7 +225,8 @@ class SideBySideView(QWidget):
         self._file_path: str | None = None
         self._abs_file_path: Path | None = None
         self._expanded_folds: set[tuple[int, int]] = set()
-        self._hunk_start_rows: list[int] = []
+        self._change_runs: list[ChangeRun] = []
+        self._change_run_rows: list[int] = []
         self._editing = False
         self._edit_codec = "utf-8"
         self._edit_line_ending = "LF"
@@ -582,9 +585,15 @@ class SideBySideView(QWidget):
 
         paired: list[PairedLine] = []
         fold_keys: list[tuple[int, int] | None] = []
-        hunk_start_rows: list[int] = []
+        # The diff-row index of each change run's first row, tracked in
+        # lockstep with `change_runs()` below: both flush "am I inside a
+        # change" tracking on the same two boundaries -- a CONTEXT row (a
+        # fold marker's lines are CONTEXT too, just collapsed) and a hunk
+        # boundary -- so the two lists always end up the same length and
+        # in the same order, letting scroll_to_hunk zip them by index.
+        change_run_rows: list[int] = []
         for h_idx, hunk in enumerate(diff.hunks):
-            hunk_start_rows.append(len(paired))
+            in_run = False
             for seg_idx, segment in enumerate(fold_context(hunk.lines)):
                 key = (h_idx, seg_idx)
                 if isinstance(segment, FoldedRun) and key not in self._expanded_folds:
@@ -592,9 +601,14 @@ class SideBySideView(QWidget):
                     marker = f"⋯ {count} unchanged lines — click to expand ⋯"
                     paired.append(PairedLine(marker, None, marker, None))
                     fold_keys.append(key)
+                    in_run = False
                     continue
 
                 for p in pair_hunk_lines(segment.lines):
+                    is_change_row = p.left_kind is not None or p.right_kind is not None
+                    if is_change_row and not in_run:
+                        change_run_rows.append(len(paired))
+                    in_run = is_change_row
                     paired.append(p)
                     fold_keys.append(None)
 
@@ -627,25 +641,62 @@ class SideBySideView(QWidget):
 
         self._highlight(self._left, [p.left_kind for p in paired], left_ranges)
         self._highlight(self._right, [p.right_kind for p in paired], right_ranges)
-        self._hunk_start_rows = hunk_start_rows
+        self._change_runs = change_runs(diff)
+        self._change_run_rows = change_run_rows
 
     def hunk_count(self) -> int:
-        return len(self._hunk_start_rows)
+        return len(self._change_runs)
 
     def scroll_to_hunk(self, index: int) -> None:
-        if not 0 <= index < len(self._hunk_start_rows):
+        if not 0 <= index < len(self._change_runs):
             return
-        block = self._left.document().findBlockByNumber(self._hunk_start_rows[index])
+        if self._editing:
+            self._scroll_to_change_run_in_edit_mode(self._change_runs[index])
+        else:
+            self._scroll_to_change_run_in_diff_mode(index)
+
+    def _scroll_to_change_run_in_diff_mode(self, index: int) -> None:
+        if not 0 <= index < len(self._change_run_rows):
+            return
+        block = self._left.document().findBlockByNumber(self._change_run_rows[index])
         cursor = QTextCursor(block)
         self._left.setTextCursor(cursor)
         self._left.centerCursor()
+
+    def _scroll_to_change_run_in_edit_mode(self, run: ChangeRun) -> None:
+        # Both panes hold their own whole file with real line numbers in
+        # edit mode -- scroll each to its own real line rather than a
+        # shared diff-row. Sync-scroll mirrors raw scrollbar values between
+        # the panes (_sync_vertical_from_left/_sync_vertical_from_right),
+        # so without suppressing it via the existing `_syncing` guard,
+        # scrolling one pane here would immediately overwrite the other's
+        # position with its own (unrelated) scrollbar value.
+        self._syncing = True
+        try:
+            self._scroll_pane_to_line(self._left, run.old_lineno)
+            self._scroll_pane_to_line(self._right, run.new_lineno)
+        finally:
+            self._syncing = False
+        # Focus stays in the editable right pane so the user can type at
+        # the change immediately; the left pane is scrolled without being
+        # given focus.
+        self._right.setFocus()
+
+    @staticmethod
+    def _scroll_pane_to_line(pane: "_DiffPane", lineno: int) -> None:
+        block_number = max(0, min(lineno - 1, max(pane.document().blockCount() - 1, 0)))
+        block = pane.document().findBlockByNumber(block_number)
+        cursor = QTextCursor(block)
+        pane.setTextCursor(cursor)
+        pane.centerCursor()
 
     def clear_diff(self) -> None:
         self._diff = None
         self._file_path = None
         self._abs_file_path = None
         self._expanded_folds = set()
-        self._hunk_start_rows = []
+        self._change_runs = []
+        self._change_run_rows = []
         self._editing = False
         self._right.setReadOnly(True)
         self._left.fold_keys = []
