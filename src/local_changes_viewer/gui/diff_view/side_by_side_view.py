@@ -28,7 +28,11 @@ from PySide6.QtWidgets import (
 
 from local_changes_viewer.core.domain.diff import DiffLineKind, DiffResult
 from local_changes_viewer.core.services.context_folding import FoldedRun, fold_context
-from local_changes_viewer.core.services.diff_pairing import PairedLine, pair_hunk_lines
+from local_changes_viewer.core.services.diff_pairing import (
+    PairedLine,
+    pair_hunk_lines,
+    reconstruct_old_file_lines,
+)
 from local_changes_viewer.core.services.file_info import detect_encoding, detect_line_ending
 from local_changes_viewer.core.services.intraline_diff import intraline_ranges
 from local_changes_viewer.gui.diff_view.syntax_highlighter import PygmentsHighlighter
@@ -370,6 +374,21 @@ class SideBySideView(QWidget):
         self._edit_codec = codec
         self._edit_line_ending = detect_line_ending(raw)
         self._editing = True
+
+        # The left pane gets the same whole-file treatment as the right so
+        # the two scroll together like two plain files -- see the module
+        # docstring-equivalent comment on `sequential_line_numbers` above.
+        # `reconstruct_old_file_lines` derives the old side straight from
+        # `self._diff`, since (unlike the right pane's live-on-disk text)
+        # there is no separate "old file" to read off disk.
+        old_lines = reconstruct_old_file_lines(self._diff) if self._diff is not None else []
+        self._left.fold_keys = []
+        self._left.setExtraSelections([])
+        self._left.sequential_line_numbers = True
+        self._left.setPlainText("\n".join(old_lines))
+        self._left._update_gutter_width()
+        self._left._gutter.update()
+
         self._right.fold_keys = []
         self._right.setExtraSelections([])
         # Set before setPlainText so the blockCountChanged it triggers
@@ -381,7 +400,38 @@ class SideBySideView(QWidget):
         self._right.setReadOnly(False)
         self._right._update_gutter_width()
         self._right._gutter.update()
+
+        # Expanding both panes to their whole files means the folded-diff
+        # highlighting _rebuild() applied is gone too; re-derive it at each
+        # pane's own real line number instead of the diff-row position that
+        # highlighting was keyed to.
+        self._highlight_edit_mode_panes(len(old_lines), self._right.document().blockCount())
         return True
+
+    def _highlight_edit_mode_panes(self, left_line_count: int, right_line_count: int) -> None:
+        """Rebuilds full-line REMOVED/ADDED highlighting for edit mode's
+        whole-file panes, keyed by each line's real `old_lineno`/`new_lineno`
+        rather than its diff-row position (which no longer exists once the
+        panes are expanded). Intraline ranges are not carried over: a
+        removed line and its added counterpart no longer sit on the same
+        row once each pane scrolls independently, so there is no adjacent
+        pair left to diff a substring against.
+        """
+        left_kinds: list[DiffLineKind | None] = [None] * left_line_count
+        right_kinds: list[DiffLineKind | None] = [None] * right_line_count
+        if self._diff is not None:
+            for hunk in self._diff.hunks:
+                for line in hunk.lines:
+                    if line.kind is DiffLineKind.REMOVED and line.old_lineno is not None:
+                        index = line.old_lineno - 1
+                        if 0 <= index < len(left_kinds):
+                            left_kinds[index] = DiffLineKind.REMOVED
+                    elif line.kind is DiffLineKind.ADDED and line.new_lineno is not None:
+                        index = line.new_lineno - 1
+                        if 0 <= index < len(right_kinds):
+                            right_kinds[index] = DiffLineKind.ADDED
+        self._highlight(self._left, left_kinds, [[] for _ in left_kinds])
+        self._highlight(self._right, right_kinds, [[] for _ in right_kinds])
 
     def exit_edit_mode(self) -> None:
         self._editing = False

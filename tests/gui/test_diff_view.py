@@ -117,6 +117,37 @@ def test_exiting_edit_mode_restores_diff_row_line_numbers(qapp, tmp_path: Path) 
     assert view._right._lineno_for_block(2) is None
 
 
+def test_entering_edit_mode_expands_left_pane_to_full_original_source(
+    qapp, tmp_path: Path
+) -> None:
+    """`_diff_with_substitution`'s single hunk spans old lines 5-7 with no
+    context before it, so the reconstructed original is 7 lines -- 1-4
+    blank (the diff never mentions them), 5-7 the hunk's own lines -- and
+    the gutter must report real line 7 for the last block, not a folded
+    diff-row position."""
+    view = _ready_view(tmp_path, "one\ntwo\nthree", diff=_diff_with_substitution())
+
+    assert view.enter_edit_mode()
+
+    assert view._left.sequential_line_numbers is True
+    assert view._left.document().blockCount() == 7
+    assert view._left._lineno_for_block(6) == 7
+
+
+def test_exiting_edit_mode_restores_left_pane_folded_diff_rendering(
+    qapp, tmp_path: Path
+) -> None:
+    view = _ready_view(tmp_path, "one\ntwo\nthree", diff=_diff_with_substitution())
+    view.enter_edit_mode()
+
+    view.exit_edit_mode()
+
+    assert view._left.sequential_line_numbers is False
+    assert view._left._lineno_for_block(0) == 5
+    assert view._left._lineno_for_block(1) == 6
+    assert view._left._lineno_for_block(2) == 7
+
+
 # ---------------------------------------------------------------------------
 # 4-6, 9: Ctrl+F find bar.
 # ---------------------------------------------------------------------------

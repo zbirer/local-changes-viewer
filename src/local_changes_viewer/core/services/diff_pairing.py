@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from local_changes_viewer.core.domain.diff import DiffLine, DiffLineKind
+from local_changes_viewer.core.domain.diff import DiffLine, DiffLineKind, DiffResult
 
 
 @dataclass
@@ -73,3 +73,34 @@ def pair_substitution_indices(lines: list[DiffLine]) -> list[tuple[int, int]]:
         for row in range(min(len(removed_idxs), len(added_idxs))):
             pairs.append((removed_idxs[row], added_idxs[row]))
     return pairs
+
+
+def reconstruct_old_file_lines(diff: DiffResult) -> list[str]:
+    """Rebuilds the pre-change (old) side of the file as a full line list,
+    for showing the left pane's whole original source in edit mode.
+
+    Every CONTEXT and REMOVED line already carries its own `old_lineno`, so
+    each one is placed at `old_lineno - 1` in the result rather than simply
+    appended in encounter order. Placement-by-number is what keeps this
+    correct even if git ever omitted some context between hunks (possible
+    for a file bigger than the `--unified=100000` window `compute_diff`
+    asks for) -- naive appending would silently shift every line number
+    below such a gap, while indexing by `old_lineno` cannot drift.
+
+    Returns `[]` when the diff has no CONTEXT/REMOVED lines at all -- an
+    untracked/new file has no "old" side to reconstruct.
+    """
+    max_lineno = 0
+    for hunk in diff.hunks:
+        for line in hunk.lines:
+            if line.kind is not DiffLineKind.ADDED and line.old_lineno is not None:
+                max_lineno = max(max_lineno, line.old_lineno)
+    if max_lineno == 0:
+        return []
+
+    result = [""] * max_lineno
+    for hunk in diff.hunks:
+        for line in hunk.lines:
+            if line.kind is not DiffLineKind.ADDED and line.old_lineno is not None:
+                result[line.old_lineno - 1] = line.text
+    return result
