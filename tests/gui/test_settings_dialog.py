@@ -5,6 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QSettings
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication
 
 import local_changes_viewer.gui.settings as settings_module
@@ -258,3 +259,11 @@ def test_view_menu_has_settings_action_that_opens_dialog(
     assert len(opened) == 1
     assert isinstance(opened[0], SettingsDialog)
     opened[0].deleteLater()
+
+
+def test_settings_action_menu_role_is_norole(qapp, window: MainWindow) -> None:
+    # macOS relocates any action Qt guesses is a preferences item into the
+    # application menu, which silently removed this one from the View menu.
+    assert (
+        window._settings_dialog_action.menuRole() == QAction.MenuRole.NoRole
+    )

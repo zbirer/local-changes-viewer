@@ -256,8 +256,13 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
 
         settings_dialog_action = QAction("Settings…", self)
+        # On macOS, Qt sniffs an action's text and moves anything looking like
+        # "settings"/"preferences"/"options" into the application menu. NoRole
+        # keeps this item where the user is looking for it: the View menu.
+        settings_dialog_action.setMenuRole(QAction.MenuRole.NoRole)
         settings_dialog_action.triggered.connect(self._on_open_settings_dialog)
         view_menu.addAction(settings_dialog_action)
+        self._settings_dialog_action = settings_dialog_action
 
         view_menu.addSeparator()
 
