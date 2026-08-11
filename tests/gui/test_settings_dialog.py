@@ -5,7 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QFontMetrics
 from PySide6.QtWidgets import QApplication
 
 import local_changes_viewer.gui.settings as settings_module
@@ -267,3 +267,100 @@ def test_settings_action_menu_role_is_norole(qapp, window: MainWindow) -> None:
     assert (
         window._settings_dialog_action.menuRole() == QAction.MenuRole.NoRole
     )
+
+
+def test_dialog_has_four_tabs_with_expected_labels(qapp, window: MainWindow) -> None:
+    dialog = SettingsDialog(window)
+    try:
+        labels = [dialog._tabs.tabText(i) for i in range(dialog._tabs.count())]
+        # "&&" is Qt's escape for a literal "&" in a tab label -- without
+        # it, "Filters & Profiles" renders as "Filters  Profiles" with an
+        # underlined "P" (the "&" consumed as a mnemonic marker). tabText()
+        # returns the source string with the escape still in it.
+        assert labels == ["Scanning", "Display", "Filters && Profiles", "Diagnostics"]
+    finally:
+        dialog.close()
+
+
+def test_every_control_is_reachable_through_its_tab_and_still_functional(
+    qapp, window: MainWindow
+) -> None:
+    """Regression test for the QScrollArea -> QTabWidget restructure: every
+    control must still live under its tab's page widget, and driving it
+    (via setChecked/setCurrentText, as a real click would) must still
+    reach through to the real MainWindow action/setting (D1) -- the
+    restructure must not have severed any wiring."""
+    dialog = SettingsDialog(window)
+    try:
+        scanning_tab = dialog._tabs.widget(0)
+        display_tab = dialog._tabs.widget(1)
+        filters_profiles_tab = dialog._tabs.widget(2)
+        diagnostics_tab = dialog._tabs.widget(3)
+
+        for tab, controls in (
+            (
+                scanning_tab,
+                [
+                    dialog._show_ignored_checkbox,
+                    dialog._show_unpushed_checkbox,
+                    dialog._watch_file_changes_checkbox,
+                    dialog._auto_refresh_spinbox,
+                ],
+            ),
+            (
+                display_tab,
+                [
+                    dialog._ignore_md_checkbox,
+                    dialog._hide_empty_repos_checkbox,
+                    dialog._ignore_whitespace_checkbox,
+                    dialog._always_reload_diff_checkbox,
+                    dialog._sync_scroll_checkbox,
+                    dialog._tooltip_font_size_spinbox,
+                ],
+            ),
+            (
+                filters_profiles_tab,
+                [dialog._folder_filter_summary_label, dialog._profiles_summary_label],
+            ),
+            (diagnostics_tab, [dialog._log_level_combo]),
+        ):
+            for control in controls:
+                assert tab.isAncestorOf(control), f"{control!r} is not under its expected tab"
+
+        dialog._tabs.setCurrentIndex(1)
+        window._ignore_md_action.setChecked(False)
+        dialog._ignore_md_checkbox.setChecked(True)
+        assert window._ignore_md_action.isChecked() is True
+
+        dialog._tabs.setCurrentIndex(3)
+        dialog._log_level_combo.setCurrentText("ERROR")
+        assert window._settings.log_level() == "ERROR"
+    finally:
+        dialog.close()
+
+
+def test_tooltip_font_size_spinbox_is_wide_enough_for_special_value_text(
+    qapp, window: MainWindow
+) -> None:
+    """Regression test: the spinbox used to clip "System default" to
+    "ystem default" because QSpinBox sizes itself from its numeric range,
+    not from setSpecialValueText()'s string."""
+    dialog = SettingsDialog(window)
+    try:
+        spinbox = dialog._tooltip_font_size_spinbox
+        required = QFontMetrics(spinbox.font()).horizontalAdvance("System default")
+        assert spinbox.minimumWidth() >= required
+    finally:
+        dialog.close()
+
+
+def test_auto_refresh_spinbox_is_wide_enough_for_special_value_text(
+    qapp, window: MainWindow
+) -> None:
+    dialog = SettingsDialog(window)
+    try:
+        spinbox = dialog._auto_refresh_spinbox
+        required = QFontMetrics(spinbox.font()).horizontalAdvance("Off")
+        assert spinbox.minimumWidth() >= required
+    finally:
+        dialog.close()

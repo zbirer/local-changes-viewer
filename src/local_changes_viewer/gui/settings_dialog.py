@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -46,9 +46,21 @@ def _explanation_label(text: str) -> QLabel:
     return label
 
 
+def _widen_for_special_value_text(spinbox: QSpinBox, text: str) -> None:
+    """A QSpinBox sizes itself from its numeric range, not from
+    setSpecialValueText()'s string, so a special-value label longer than
+    the widest number (e.g. "System default" vs. "36") gets clipped.
+    Widen the box to fit the longest of its special-value text and its
+    numeric+suffix display, plus room for the up/down spin arrows."""
+    metrics = QFontMetrics(spinbox.font())
+    numeric_text = f"{spinbox.maximum()}{spinbox.suffix()}"
+    text_width = max(metrics.horizontalAdvance(text), metrics.horizontalAdvance(numeric_text))
+    spinbox.setMinimumWidth(text_width + 40)
+
+
 class SettingsDialog(QDialog):
-    """Lists every user-configurable setting in one scrollable dialog,
-    grouped by area, each paired with a plain-English explanation.
+    """Lists every user-configurable setting in one tabbed dialog -- one
+    tab per area -- each paired with a plain-English explanation.
 
     Takes the live MainWindow (rather than a narrower interface) because
     every control here drives a QAction or a persist+apply helper that
@@ -59,12 +71,22 @@ class SettingsDialog(QDialog):
     dialog does no scanning and mutates no setting (see `_loading`), so
     it's cheap and safe to instantiate against a MainWindow that has no
     open workspace -- e.g. in tests.
+
+    Tabs, not a scroll area: each tab is sized to fit its own controls at
+    the dialog's default size, so the tallest tab (Display, with 6
+    controls) needs no internal scrolling -- see the dialog's fixed
+    resize() height below, picked by rendering the Display tab and
+    reading back its required height.
     """
 
     def __init__(self, main_window: "MainWindow", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(640, 700)
+        # 630 was measured empirically: QTabWidget's sizeHint already
+        # incorporates the tallest tab's page (QStackedWidget sizes to the
+        # largest of its children), and 616 was that measured sizeHint's
+        # height at this dialog's default width -- +14px of headroom.
+        self.resize(640, 630)
         self.setMinimumWidth(560)
         self._main_window = main_window
         # True only while __init__ is populating widgets from current
@@ -74,16 +96,13 @@ class SettingsDialog(QDialog):
         # read.
         self._loading = True
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.addWidget(self._build_scanning_group())
-        content_layout.addWidget(self._build_display_group())
-        content_layout.addWidget(self._build_filters_profiles_group())
-        content_layout.addWidget(self._build_diagnostics_group())
-        content_layout.addStretch(1)
-        scroll.setWidget(content)
+        self._tabs = QTabWidget()
+        # "&" in a tab label (like a QGroupBox title) is eaten as a
+        # mnemonic marker by Qt -- "&&" is the escape for a literal "&".
+        self._tabs.addTab(self._build_scanning_tab(), "Scanning")
+        self._tabs.addTab(self._build_display_tab(), "Display")
+        self._tabs.addTab(self._build_filters_profiles_tab(), "Filters && Profiles")
+        self._tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
 
         close_button = QPushButton("Close")
         close_button.setToolTip("Close this dialog")
@@ -93,7 +112,7 @@ class SettingsDialog(QDialog):
         close_row.addWidget(close_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(scroll)
+        layout.addWidget(self._tabs)
         layout.addLayout(close_row)
 
         self._load_current_state()
@@ -127,11 +146,11 @@ class SettingsDialog(QDialog):
         checkbox.toggled.connect(on_toggled)
         return checkbox, self._row(checkbox, explanation)
 
-    # -- groups -----------------------------------------------------------
+    # -- tabs -----------------------------------------------------------
 
-    def _build_scanning_group(self) -> QGroupBox:
-        group = QGroupBox("Scanning")
-        layout = QVBoxLayout(group)
+    def _build_scanning_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
 
         self._show_ignored_checkbox, row = self._checkbox_row(
             "Show ignored files",
@@ -162,6 +181,7 @@ class SettingsDialog(QDialog):
         self._auto_refresh_spinbox.setRange(0, 1440)
         self._auto_refresh_spinbox.setSuffix(" min")
         self._auto_refresh_spinbox.setSpecialValueText("Off")
+        _widen_for_special_value_text(self._auto_refresh_spinbox, "Off")
         self._auto_refresh_spinbox.valueChanged.connect(self._on_auto_refresh_changed)
         layout.addWidget(
             self._row(
@@ -171,11 +191,12 @@ class SettingsDialog(QDialog):
             )
         )
 
-        return group
+        layout.addStretch(1)
+        return tab
 
-    def _build_display_group(self) -> QGroupBox:
-        group = QGroupBox("Display")
-        layout = QVBoxLayout(group)
+    def _build_display_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
 
         self._ignore_md_checkbox, row = self._checkbox_row(
             "Ignore MD files",
@@ -221,6 +242,7 @@ class SettingsDialog(QDialog):
         self._tooltip_font_size_spinbox = QSpinBox()
         self._tooltip_font_size_spinbox.setRange(0, _TOOLTIP_FONT_SIZE_MAX)
         self._tooltip_font_size_spinbox.setSpecialValueText("System default")
+        _widen_for_special_value_text(self._tooltip_font_size_spinbox, "System default")
         self._tooltip_font_size_spinbox.valueChanged.connect(self._on_tooltip_font_size_changed)
         layout.addWidget(
             self._row(
@@ -230,11 +252,12 @@ class SettingsDialog(QDialog):
             )
         )
 
-        return group
+        layout.addStretch(1)
+        return tab
 
-    def _build_filters_profiles_group(self) -> QGroupBox:
-        group = QGroupBox("Filters & Profiles")
-        layout = QVBoxLayout(group)
+    def _build_filters_profiles_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
 
         manage_filters_button = QPushButton("Manage Filtered Folders…")
         manage_filters_button.setToolTip("Open the Filtered Folders dialog")
@@ -273,11 +296,12 @@ class SettingsDialog(QDialog):
             )
         )
 
-        return group
+        layout.addStretch(1)
+        return tab
 
-    def _build_diagnostics_group(self) -> QGroupBox:
-        group = QGroupBox("Diagnostics")
-        layout = QVBoxLayout(group)
+    def _build_diagnostics_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
 
         self._log_level_combo = QComboBox()
         self._log_level_combo.addItems(_LOG_LEVELS)
@@ -290,7 +314,8 @@ class SettingsDialog(QDialog):
             )
         )
 
-        return group
+        layout.addStretch(1)
+        return tab
 
     # -- population ---------------------------------------------------------
 
