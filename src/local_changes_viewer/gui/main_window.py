@@ -1721,6 +1721,7 @@ class MainWindow(QMainWindow):
             folder_filter_rules=self._folder_filter_rules,
             max_age_minutes=self._time_filter_minutes,
             profile=self._active_profile(),
+            on_log=lambda msg: applog.log(msg, level=applog.LogLevel.DEBUG),
         )
         before_by_repo = {r.path: len(r.changes) for r in self._workspace.repositories}
         for repo in display_workspace.repositories:

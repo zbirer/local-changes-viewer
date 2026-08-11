@@ -1,4 +1,5 @@
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,7 +23,14 @@ def _is_inside_filtered_folder(change: FileChange, rules: list[FolderFilterRule]
 
 def _repo_is_inside_filtered_folder(
     repo: Repository, root_path: Path, rules: list[FolderFilterRule]
-) -> bool:
+) -> tuple[FolderFilterRule, str] | None:
+    """Returns the (rule, path segment) that matched, or None if no rule matches.
+
+    Returning the match (rather than a bare bool) lets callers log exactly which
+    rule dropped the repo — critical because a rule intended for build output
+    (e.g. `contains:'.claude'`) can also match a path segment of an unrelated
+    repo/worktree location, silently dropping it with no other indication.
+    """
     try:
         rel_parts = repo.path.relative_to(root_path).parts
     except ValueError:
@@ -30,8 +38,8 @@ def _repo_is_inside_filtered_folder(
     for folder_name in rel_parts:
         for rule in rules:
             if rule.matches(folder_name):
-                return True
-    return False
+                return rule, folder_name
+    return None
 
 
 def _changed_within(repo_path: Path, change: FileChange, max_age_minutes: int) -> bool:
@@ -74,30 +82,51 @@ def filter_workspace(
     folder_filter_rules: list[FolderFilterRule] | None = None,
     max_age_minutes: int = 0,
     profile: Profile | None = None,
+    on_log: Callable[[str], None] | None = None,
 ) -> Workspace:
+    on_log = on_log or (lambda _message: None)
     folder_filter_rules = folder_filter_rules or []
     all_by_path = {str(r.path): r for r in workspace.repositories}
     considered: list[Repository] = []
     for repo in workspace.repositories:
         if profile is not None and not _repo_matches_profile(repo, profile, all_by_path):
+            on_log(f"{repo.path}: dropped — not in active profile {profile.name!r}")
             continue
-
-        if folder_filter_rules and _repo_is_inside_filtered_folder(
-            repo, workspace.root_path, folder_filter_rules
-        ):
-            continue
-
-        changes = repo.changes
-        if ignore_md_files:
-            changes = [c for c in changes if c.path.suffix.lower() != ".md"]
 
         if folder_filter_rules:
-            changes = [
+            match = _repo_is_inside_filtered_folder(repo, workspace.root_path, folder_filter_rules)
+            if match is not None:
+                rule, segment = match
+                on_log(
+                    f"{repo.path}: dropped — inside filtered folder "
+                    f"(rule {rule.mode.value}:{rule.text!r} matched segment {segment!r})"
+                )
+                continue
+
+        changes = repo.changes
+
+        if ignore_md_files:
+            filtered = [c for c in changes if c.path.suffix.lower() != ".md"]
+            dropped = len(changes) - len(filtered)
+            if dropped:
+                on_log(f"{repo.path}: ignore_md_files dropped {dropped} change(s)")
+            changes = filtered
+
+        if folder_filter_rules:
+            filtered = [
                 c for c in changes if not _is_inside_filtered_folder(c, folder_filter_rules)
             ]
+            dropped = len(changes) - len(filtered)
+            if dropped:
+                on_log(f"{repo.path}: folder filter dropped {dropped} change(s)")
+            changes = filtered
 
         if max_age_minutes > 0:
-            changes = [c for c in changes if _changed_within(repo.path, c, max_age_minutes)]
+            filtered = [c for c in changes if _changed_within(repo.path, c, max_age_minutes)]
+            dropped = len(changes) - len(filtered)
+            if dropped:
+                on_log(f"{repo.path}: max_age_minutes dropped {dropped} change(s)")
+            changes = filtered
 
         # dataclasses.replace() carries every other field (notably
         # pull_request) through unchanged, so a future field added to
@@ -117,7 +146,10 @@ def filter_workspace(
     # A parent repo with no changes of its own is still kept when a nested
     # worktree underneath it has changes, so that worktree isn't orphaned as
     # a top-level item once its parent's row is dropped.
-    repositories = [
-        r for r in considered if _repo_or_descendant_has_changes(r, children_by_parent)
-    ]
+    repositories = []
+    for r in considered:
+        if _repo_or_descendant_has_changes(r, children_by_parent):
+            repositories.append(r)
+        else:
+            on_log(f"{r.path}: hidden — no changes")
     return Workspace(root_path=workspace.root_path, repositories=repositories)
