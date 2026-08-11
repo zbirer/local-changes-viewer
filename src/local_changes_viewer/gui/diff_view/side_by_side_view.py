@@ -230,6 +230,11 @@ class SideBySideView(QWidget):
         self._editing = False
         self._edit_codec = "utf-8"
         self._edit_line_ending = "LF"
+        # (mtime_ns, size) of _abs_file_path as of the moment edit mode last
+        # read it (or last wrote it -- see save_edits) -- see disk_stat() and
+        # disk_changed_since_edit() below for the save-clobber guard this
+        # backs.
+        self._edit_disk_stat: tuple[int, int] | None = None
         self._left = _DiffPane(self._on_marker_click)
         self._right = _DiffPane(self._on_marker_click)
         self._syncing = False
@@ -363,6 +368,14 @@ class SideBySideView(QWidget):
         return self._editing and self._right.document().isModified()
 
     def enter_edit_mode(self) -> bool:
+        if self._editing:
+            # Bug 1's second, independent guard layer: diff_view_widget's
+            # blockSignals() stops the *spurious* re-toggle from the
+            # "Discard edits?" No/Cancel path from ever reaching here, but
+            # this no-op must also hold on its own -- any other future path
+            # that re-enters edit mode while already editing must not
+            # re-read the file from disk and clobber the live buffer either.
+            return True
         if self._abs_file_path is None:
             return False
         try:
@@ -377,6 +390,9 @@ class SideBySideView(QWidget):
         self._edit_codec = codec
         self._edit_line_ending = detect_line_ending(raw)
         self._editing = True
+        # Fingerprint the file as of this read so save_edits() can later tell
+        # whether something else rewrote it underneath the buffer (Bug 3).
+        self._edit_disk_stat = self._disk_stat()
 
         # The left pane gets the same whole-file treatment as the right so
         # the two scroll together like two plain files -- see the module
@@ -442,6 +458,40 @@ class SideBySideView(QWidget):
         self._reset_bar()
         self._rebuild()
 
+    def _disk_stat(self) -> tuple[int, int] | None:
+        """(mtime_ns, size) for the edit target, or None if it can't be
+        stat'd (e.g. deleted since edit began -- treated as "changed" by
+        disk_changed_since_edit(), which is the right call: overwriting a
+        file that vanished out from under the edit still deserves a prompt).
+        Two cheap fields rather than hashing file contents: a full-file hash
+        on every Save (this file can be edited repeatedly in one session) is
+        needless I/O for a check that only needs to catch "something else
+        touched this file", not verify byte-for-byte identity -- a
+        same-second, same-size rewrite slipping past this is a theoretical
+        gap this guard accepts, not a threat it's trying to close.
+        """
+        if self._abs_file_path is None:
+            return None
+        try:
+            stat = self._abs_file_path.stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def disk_changed_since_edit(self) -> bool:
+        """True if the file no longer matches the fingerprint taken when
+        edit mode last read (enter_edit_mode) or wrote (save_edits) it --
+        i.e. something else (git pull, another editor, a background
+        refresh) rewrote it in between. The widget layer (diff_view_widget)
+        consults this before save_edits() and owns the confirmation modal;
+        this module stays read-only-of-QMessageBox, matching how the find
+        bar (not a QInputDialog) and confirm_and_clear_diff's caller keep
+        modals out of the view layer.
+        """
+        if not self._editing:
+            return False
+        return self._disk_stat() != self._edit_disk_stat
+
     def save_edits(self) -> bool:
         if not self._editing or self._abs_file_path is None:
             return False
@@ -453,6 +503,10 @@ class SideBySideView(QWidget):
         except OSError:
             return False
         self._right.document().setModified(False)
+        # Refreshes the fingerprint to the write we just made, so a second
+        # Save later in the same edit session compares against this write --
+        # not the snapshot taken back when edit mode first opened the file.
+        self._edit_disk_stat = self._disk_stat()
         return True
 
     def _open_find_bar(self) -> None:
@@ -698,6 +752,7 @@ class SideBySideView(QWidget):
         self._change_runs = []
         self._change_run_rows = []
         self._editing = False
+        self._edit_disk_stat = None
         self._right.setReadOnly(True)
         self._left.fold_keys = []
         self._right.fold_keys = []

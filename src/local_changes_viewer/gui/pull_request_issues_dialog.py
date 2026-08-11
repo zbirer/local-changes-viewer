@@ -1,3 +1,5 @@
+import html
+
 from PySide6.QtCore import QEvent, QPoint, QUrl, Qt
 from PySide6.QtGui import QCursor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
@@ -26,6 +28,10 @@ class _CommentPopup(QWidget):
         super().__init__(parent, Qt.WindowType.ToolTip)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self._label = QLabel(self)
+        # The popup text is a comment body straight from the GitHub API, so
+        # it must be shown literally -- QLabel's default AutoText format
+        # would otherwise render any markup the comment happens to contain.
+        self._label.setTextFormat(Qt.TextFormat.PlainText)
         self._label.setWordWrap(True)
         self._label.setStyleSheet(
             "background-color: #2b2b2b; color: white; border: 1px solid #666; padding: 6px;"
@@ -88,7 +94,12 @@ class PullRequestIssuesDialog(QDialog):
                 item.setData(0, _URL_ROLE, thread.url)
                 self._tree.addTopLevelItem(item)
 
-                date_label = QLabel(f'<a href="{thread.url}">{format_timestamp(thread.created_at)}</a>')
+                # thread.url is API-supplied; escape it before interpolating
+                # into the anchor's href so a crafted URL can't break out of
+                # the attribute and inject markup (the visible link text is
+                # just our own timestamp formatting, not API text).
+                escaped_url = html.escape(thread.url)
+                date_label = QLabel(f'<a href="{escaped_url}">{format_timestamp(thread.created_at)}</a>')
                 date_label.setOpenExternalLinks(True)
                 self._tree.setItemWidget(item, 0, date_label)
         else:

@@ -5,6 +5,7 @@ from pathlib import Path
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.folder_filter_rule import FolderFilterMode, FolderFilterRule
 from local_changes_viewer.core.domain.profile import Profile
+from local_changes_viewer.core.domain.pull_request import PullRequestInfo
 from local_changes_viewer.core.domain.repository import BranchStatus, Repository
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.core.services.workspace_filter import filter_workspace
@@ -301,6 +302,34 @@ def test_max_age_minutes_filters_out_old_files(tmp_path: Path) -> None:
     result = filter_workspace(workspace, max_age_minutes=5)
 
     assert [c.path for c in result.repositories[0].changes] == [Path("recent.py")]
+
+
+def test_pull_request_survives_filtering() -> None:
+    """The rebuild inside filter_workspace used to construct a fresh
+    Repository listing only some fields, silently dropping pull_request
+    (which defaults to None) even though nothing here is supposed to touch
+    it. An active folder filter is enough to exercise that rebuild path."""
+    pull_request = PullRequestInfo(
+        number=42,
+        title="Add feature",
+        state="open",
+        url="https://example.com/pr/42",
+        comment_count=1,
+        review_comment_count=0,
+    )
+    repo = Repository(
+        path=Path("/repos/repo_a"),
+        name="repo_a",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)],
+        pull_request=pull_request,
+    )
+    workspace = Workspace(root_path=Path("/root"), repositories=[repo])
+    rules = [FolderFilterRule(text="build", mode=FolderFilterMode.EQUALS)]
+
+    result = filter_workspace(workspace, folder_filter_rules=rules)
+
+    assert result.repositories[0].pull_request == pull_request
 
 
 def test_max_age_minutes_includes_change_when_file_missing(tmp_path: Path) -> None:

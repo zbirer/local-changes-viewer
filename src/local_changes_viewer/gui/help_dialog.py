@@ -59,9 +59,10 @@ _TOOLBAR_HELP = """
 <ul>
 <li><b>PRs</b> — open the pull requests panel.</li>
 <li><b>Side-by-side / Unified</b> — toggle between side-by-side and unified diff view.</li>
-<li><b>Prev change / Next change</b> — scroll to the previous/next changed hunk.</li>
+<li><b>Prev change / Next change</b> — scroll to the previous/next changed section of the file.</li>
 <li><b>Refresh</b> — re-load the diff for the current file.</li>
-<li><b>Edit</b> — edit the file in place (side-by-side view only).</li>
+<li><b>Edit</b> — edit the file in place (side-by-side view only; disabled for a file whose
+changes are already committed).</li>
 <li><b>Save</b> — save edits made while in edit mode.</li>
 <li><b>Line Numbers</b> — toggle line number gutters.</li>
 <li><b>Time filter slider</b> — limit the diff to changes from the last N minutes; "All changes"

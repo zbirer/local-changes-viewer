@@ -2,7 +2,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt, QThreadPool, QTimer, QUrl
+from PySide6.QtCore import QModelIndex, QProcess, Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -77,6 +77,7 @@ from local_changes_viewer.gui.workspace_tree.tree_model import (
     FILE_CHANGE_ROLE,
     FOLDER_PATH_ROLE,
     NODE_KEY_ROLE,
+    REPO_PATH_ROLE,
 )
 from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
 
@@ -104,6 +105,12 @@ class MainWindow(QMainWindow):
         self._active_profile_name: str | None = self._settings.active_profile_name()
         self._selected_change: FileChange | None = None
         self._selected_repo_path: Path | None = None
+        # Guards _restore_previous_selection() (Bug 4) against re-entering
+        # _on_file_selected: programmatically restoring the tree/list's
+        # current index re-fires file_selected via Qt's own
+        # currentChanged, which would otherwise re-run the same
+        # discard-edits confirmation for the file being restored.
+        self._restoring_selection = False
         self._thread_pool = QThreadPool.globalInstance()
         # Guards _on_refresh_repo against a double-click (or a context-menu
         # click plus a row-button click) firing two concurrent
@@ -621,7 +628,29 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_file_selected(self, repo_path: Path, change: FileChange) -> None:
-        if self._diff_view.discard_edits_if_any():
+        if self._restoring_selection:
+            # We're here because _restore_previous_selection() below is
+            # putting the highlight back on the file the user is staying on
+            # -- without this early return, that programmatic selection
+            # change would re-fire this very handler and re-ask the same
+            # "Discard edits?" question for the file we're restoring.
+            return
+        if self._diff_view.has_unsaved_edits():
+            reply = QMessageBox.question(
+                self,
+                "Discard edits?",
+                "You have unsaved edits to this file. Discard them and switch files?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                # Qt has already moved the tree/list's own selection
+                # highlight onto `change` by the time this signal reaches
+                # us (it fires from currentChanged, after the current index
+                # has changed) -- declining here must not leave that row
+                # highlighted while the diff view still shows the file the
+                # user chose to keep editing.
+                self._restore_previous_selection()
+                return
+            self._diff_view.discard_edits_if_any()
             self.statusBar().showMessage("Discarded unsaved edits", 5000)
         self._selected_change = change
         self._selected_repo_path = repo_path
@@ -631,6 +660,65 @@ class MainWindow(QMainWindow):
             self._diff_view.set_diff(change.diff, str(change.path), abs_path, not_editable_reason)
             return
         self._load_diff(repo_path, change)
+
+    def _restore_previous_selection(self) -> None:
+        """Bug 4: puts the tree/list highlight back on the file still open
+        for editing after the user declines to discard its edits. Whichever
+        widget emitted the file_selected we're currently handling (found via
+        sender(), since both _tree_view and _aggregate_list route through
+        the same _on_file_selected) is the one whose highlight needs
+        correcting -- the other one never moved.
+        """
+        if self._selected_repo_path is None or self._selected_change is None:
+            return
+        source = self.sender()
+        self._restoring_selection = True
+        try:
+            if source is self._tree_view:
+                index = self._find_tree_index(
+                    self._tree_view.model(), self._selected_repo_path, self._selected_change
+                )
+                if index.isValid():
+                    self._tree_view.setCurrentIndex(index)
+            elif source is self._aggregate_list:
+                for row in range(self._aggregate_list.count()):
+                    item = self._aggregate_list.item(row)
+                    # Matches aggregate_list.py's own _ITEM_DATA_ROLE
+                    # (Qt.ItemDataRole.UserRole + 1), which stores each
+                    # row's (repo_path, change) tuple -- not re-exported
+                    # from that module, so the literal role value is
+                    # duplicated here rather than importing a private name.
+                    data = item.data(Qt.ItemDataRole.UserRole + 1)
+                    if (
+                        data is not None
+                        and data[0] == self._selected_repo_path
+                        and data[1] is self._selected_change
+                    ):
+                        self._aggregate_list.setCurrentItem(item)
+                        break
+        finally:
+            self._restoring_selection = False
+
+    @staticmethod
+    def _find_tree_index(
+        model, repo_path: Path, change: FileChange, parent: QModelIndex = QModelIndex()
+    ) -> QModelIndex:
+        """Recursively searches the folder tree's (proxied) model for the
+        row carrying `change`, using the same FILE_CHANGE_ROLE/REPO_PATH_ROLE
+        the tree model already exposes -- plain public QAbstractItemModel
+        API (rowCount/index/data), not a reach into tree_view.py's private
+        attributes.
+        """
+        for row in range(model.rowCount(parent)):
+            index = model.index(row, 0, parent)
+            if index.data(FILE_CHANGE_ROLE) is change and index.data(REPO_PATH_ROLE) == str(
+                repo_path
+            ):
+                return index
+            found = MainWindow._find_tree_index(model, repo_path, change, index)
+            if found.isValid():
+                return found
+        return QModelIndex()
 
     def _edit_target(self, repo_path: Path, change: FileChange) -> tuple[Path | None, str | None]:
         """Whether `change` can be edited in place, and if not, why -- as a
@@ -671,7 +759,17 @@ class MainWindow(QMainWindow):
         self._file_info_label.setText(f"{encoding} · {line_ending}")
 
     def _load_diff(self, repo_path: Path, change: FileChange) -> None:
-        self._diff_view.clear_diff()
+        # confirm_and_clear_diff() (not the unconditional clear_diff())
+        # because this is the single choke point both "Refresh Diff" and
+        # "Ignore Whitespace" funnel through (_on_refresh_diff,
+        # _on_ignore_whitespace_toggled) -- neither used to consult unsaved
+        # edits at all before this reload wiped them. By the time
+        # _on_file_selected's own call here runs, any unsaved edits were
+        # already confirmed/discarded there, so has_unsaved_edits() reads
+        # False and this is a silent no-op guard for that path -- no
+        # double prompt.
+        if not self._diff_view.confirm_and_clear_diff():
+            return
         worker = DiffWorker(
             repo_path, change, ignore_whitespace=self._ignore_whitespace_action.isChecked()
         )

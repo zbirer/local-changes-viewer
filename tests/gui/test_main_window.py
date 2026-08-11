@@ -1,22 +1,52 @@
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QTextCursor
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 import local_changes_viewer.gui.main_window as main_window_module
 import local_changes_viewer.gui.settings as settings_module
+from local_changes_viewer.core.domain.diff import DiffResult
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.repository import BranchStatus, Repository
 from local_changes_viewer.core.domain.workspace import Workspace
+from local_changes_viewer.gui.diff_view import diff_view_widget as diff_view_widget_module
 from local_changes_viewer.gui.main_window import MainWindow
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 
 _BRANCH = BranchStatus(branch_name="main", ahead=0, behind=0)
+
+
+def _stub_diff() -> DiffResult:
+    return DiffResult(old_ref="HEAD", new_ref="working tree", hunks=[])
+
+
+def _patch_question_reply(monkeypatch: pytest.MonkeyPatch, reply) -> None:
+    """Bug 2's confirmation modal (confirm_and_clear_diff) lives in
+    diff_view_widget.py, so its QMessageBox is patched there. Bug 4's
+    confirmation lives in main_window.py's own _on_file_selected, which
+    imports QMessageBox directly -- patched on main_window_module too, or a
+    real (invisible-but-still-modal-event-loop) QMessageBox.question() would
+    block the test forever waiting for a button click that never comes,
+    even under the offscreen platform."""
+    stub = SimpleNamespace(question=lambda *a, **k: reply, StandardButton=QMessageBox.StandardButton)
+    monkeypatch.setattr(diff_view_widget_module, "QMessageBox", stub)
+    monkeypatch.setattr(main_window_module, "QMessageBox", stub)
+
+
+def _type_marker_into_edit_buffer(diff_view) -> None:
+    right = diff_view._side_by_side._right
+    cursor = right.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    right.setTextCursor(cursor)
+    QTest.keyClicks(right, "MARKER")
 
 
 def _repo(name: str, changes: list[FileChange]) -> Repository:
@@ -454,4 +484,120 @@ def test_on_workspace_ready_rebuilds_when_tree_is_empty(
         assert update_workspace_calls == []
         assert window._tree_view._model.invisibleRootItem().rowCount() == 1
     finally:
+        window.close()
+
+
+# ---------------------------------------------------------------------------
+# Bug 2: Ignore Whitespace (and, by the same _load_diff choke point, Refresh
+# Diff) must not silently wipe unsaved edits -- clear_diff() never consulted
+# has_unsaved_edits() at all before this fix.
+# ---------------------------------------------------------------------------
+
+
+def test_ignore_whitespace_toggle_with_unsaved_edits_prompts_and_declining_preserves_buffer(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        window._thread_pool.start = lambda *a, **k: None  # no real DiffWorker must run
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        file_path = repo_path / "sample.txt"
+        file_path.write_text("one\ntwo\nthree")
+        change = FileChange(
+            path=Path("sample.txt"), change_type=ChangeType.MODIFIED, diff=_stub_diff()
+        )
+        window._selected_change = change
+        window._selected_repo_path = repo_path
+        window._diff_view.set_diff(change.diff, str(change.path), file_path)
+        window._diff_view.show()
+        QTest.qWaitForWindowExposed(window._diff_view)
+
+        window._diff_view._edit_button.setChecked(True)
+        _type_marker_into_edit_buffer(window._diff_view)
+        assert window._diff_view.has_unsaved_edits()
+
+        _patch_question_reply(monkeypatch, QMessageBox.StandardButton.No)
+
+        # The real checkable QAction, not a direct call to
+        # _on_ignore_whitespace_toggled -- this is exactly what the
+        # Settings-menu checkbox click drives.
+        window._ignore_whitespace_action.setChecked(
+            not window._ignore_whitespace_action.isChecked()
+        )
+
+        assert window._diff_view.has_unsaved_edits(), "declining must preserve the buffer"
+        assert "MARKER" in window._diff_view._side_by_side._right.toPlainText()
+    finally:
+        window._diff_view.discard_edits_if_any()
+        window.close()
+
+
+# ---------------------------------------------------------------------------
+# Bug 4: clicking a different file in the tree while mid-edit must ask, and
+# declining must leave both the diff buffer AND the tree's own selection
+# highlight on the originally-edited file (Qt has already moved the
+# highlight onto the newly-clicked row by the time this handler runs).
+# ---------------------------------------------------------------------------
+
+
+def test_switching_files_mid_edit_prompts_and_declining_restores_tree_selection(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        window._always_reload_diff_action.setChecked(False)
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        (repo_path / "file_a.py").write_text("a\n")
+        (repo_path / "file_b.py").write_text("b\n")
+        change_a = FileChange(
+            path=Path("file_a.py"), change_type=ChangeType.MODIFIED, diff=_stub_diff()
+        )
+        change_b = FileChange(
+            path=Path("file_b.py"), change_type=ChangeType.MODIFIED, diff=_stub_diff()
+        )
+        workspace = Workspace(
+            root_path=tmp_path,
+            repositories=[
+                Repository(
+                    path=repo_path, name="repo", branch_status=_BRANCH,
+                    changes=[change_a, change_b],
+                )
+            ],
+        )
+        window._tree_view.set_workspace(workspace)
+        model = window._tree_view.model()
+        index_a = MainWindow._find_tree_index(model, repo_path, change_a)
+        index_b = MainWindow._find_tree_index(model, repo_path, change_b)
+        assert index_a.isValid() and index_b.isValid()
+
+        window.show()
+        QTest.qWaitForWindowExposed(window)
+
+        window._tree_view.setCurrentIndex(index_a)
+        assert window._selected_change is change_a
+
+        window._diff_view._edit_button.setChecked(True)
+        _type_marker_into_edit_buffer(window._diff_view)
+        assert window._diff_view.has_unsaved_edits()
+
+        _patch_question_reply(monkeypatch, QMessageBox.StandardButton.No)
+
+        # The real tree row change, exactly what a click on file_b's row
+        # drives -- Qt moves the tree's current index to index_b as part of
+        # this call, before _on_file_selected(change_b) ever runs.
+        window._tree_view.setCurrentIndex(index_b)
+
+        assert window._selected_change is change_a, "selection must stay on file_a"
+        assert window._diff_view.has_unsaved_edits(), "buffer must survive the decline"
+        assert "MARKER" in window._diff_view._side_by_side._right.toPlainText()
+        assert window._tree_view.currentIndex() == index_a, (
+            "tree highlight must move back onto file_a, not stay on the "
+            "file_b row Qt had already highlighted"
+        )
+    finally:
+        window._diff_view.discard_edits_if_any()
         window.close()

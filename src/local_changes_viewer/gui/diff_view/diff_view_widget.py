@@ -205,6 +205,14 @@ class DiffViewWidget(QWidget):
             self._header_label.setText(f"{diff.old_ref} → {diff.new_ref}")
 
     def clear_diff(self) -> None:
+        """Unconditional teardown -- wipes the edit buffer with no prompt.
+        Only safe for callers where there is nothing left to protect (e.g. a
+        fresh diff is about to replace this one and the caller has already
+        confirmed discarding, or the app is closing). A caller loading a new
+        diff on top of a possibly-still-being-edited file must go through
+        confirm_and_clear_diff() instead -- see that method's docstring for
+        the bug this split fixes.
+        """
         self._current_hunk_index = -1
         self._unified.clear_diff()
         self._side_by_side.clear_diff()
@@ -213,6 +221,30 @@ class DiffViewWidget(QWidget):
         self._edit_button.setToolTip(self._EDIT_TOOLTIP)
         self._save_button.setEnabled(False)
         self._header_label.setText("")
+
+    def confirm_and_clear_diff(self) -> bool:
+        """Guarded entry point for callers that reload/refresh a diff that
+        may still have unsaved edits sitting in it (e.g. "Refresh Diff" and
+        "Ignore Whitespace" in main_window.py). clear_diff() itself never
+        consulted has_unsaved_edits(), and worse, it used to call
+        setChecked(False) on the edit button only *after* wiping the buffer
+        -- by the time _on_edit_toggled(False) could have asked to confirm,
+        has_unsaved_edits() already read False, making the confirmation
+        structurally unreachable from this path. Consulting unsaved state
+        BEFORE anything is wiped, here, is what makes the guard reachable.
+        Returns False (untouched: buffer, edit mode, and file all intact) if
+        the user declines, so the caller can abort its own reload.
+        """
+        if self._side_by_side.has_unsaved_edits():
+            reply = QMessageBox.question(
+                self,
+                "Discard edits?",
+                "You have unsaved edits to this file. Discard them and reload the diff?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return False
+        self.clear_diff()
+        return True
 
     def has_unsaved_edits(self) -> bool:
         return self._side_by_side.has_unsaved_edits()
@@ -242,12 +274,41 @@ class DiffViewWidget(QWidget):
                 "You have unsaved edits to this file. Discard them?",
             )
             if reply != QMessageBox.StandardButton.Yes:
+                # setChecked(True) is a real False->True transition, which Qt
+                # re-emits synchronously as toggled(True) -- left unguarded,
+                # that re-enters this method from the top and calls
+                # enter_edit_mode() again, which unconditionally re-reads the
+                # file from disk and clobbers the very buffer the user just
+                # chose to keep (the button stays checked throughout, so
+                # nothing on screen would hint anything was lost). Blocking
+                # signals for this one call suppresses that spurious
+                # re-emission; enter_edit_mode()'s own already-editing no-op
+                # guard is the second, independent layer against the same
+                # hazard reached some other way.
+                self._edit_button.blockSignals(True)
                 self._edit_button.setChecked(True)
+                self._edit_button.blockSignals(False)
                 return
         self._side_by_side.exit_edit_mode()
         self._save_button.setEnabled(False)
 
     def _on_save_clicked(self) -> None:
+        # save_edits() itself does an unconditional write_bytes() with no
+        # mtime/size comparison -- a git pull, another editor, or a
+        # background refresh that rewrote the file since Edit began would
+        # otherwise be destroyed with no warning. The modal lives here, not
+        # in side_by_side_view.py: that module is the read-only-of-QMessageBox
+        # view layer, and disk_changed_since_edit() is the query it exposes
+        # for exactly this decision.
+        if self._side_by_side.disk_changed_since_edit():
+            reply = QMessageBox.question(
+                self,
+                "File changed on disk",
+                "This file has changed on disk since you started editing. "
+                "Overwrite it with your edits anyway?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         if self._side_by_side.save_edits():
             self.file_saved.emit(str(self._side_by_side.file_target()))
 

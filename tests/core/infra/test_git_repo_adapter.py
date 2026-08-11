@@ -1,3 +1,6 @@
+import socket
+import threading
+import time
 from pathlib import Path
 
 import git
@@ -6,6 +9,22 @@ import pytest
 from local_changes_viewer.core.domain.diff import DiffLineKind
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
+from local_changes_viewer.core.services import workspace_cache
+
+
+@pytest.fixture(autouse=True)
+def _redirect_default_branch_cache_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every test in this file exercises a fresh GitRepoAdapter, and several
+    # exercise _find_default_branch's network path — without this, they'd
+    # read/write the real ~/.local-changes-viewer/default_branch_cache.json
+    # on whatever machine runs the suite.
+    monkeypatch.setattr(
+        workspace_cache,
+        "_DEFAULT_BRANCH_CACHE_FILE_PATH",
+        tmp_path / "cache" / "default_branch_cache.json",
+    )
 
 
 def _init_repo_with_commit(path: Path) -> git.Repo:
@@ -443,3 +462,253 @@ def test_get_commit_file_diff_shows_added_content(tmp_path: Path, repo: git.Repo
         if line.kind == DiffLineKind.ADDED
     ]
     assert "hello" in added_lines
+
+
+def test_branch_status_zero_commits_reports_real_branch_name(tmp_path: Path):
+    # `git status --porcelain=v1 --branch` prints "## No commits yet on
+    # main" (verified against real git output) on a brand-new repo — this
+    # used to fall through _BRANCH_LINE_RE and report the literal string
+    # "No commits yet on main" as the branch name.
+    git.Repo.init(tmp_path, initial_branch="main")
+
+    status = GitRepoAdapter(tmp_path).get_branch_status()
+
+    assert status.branch_name == "main"
+    assert status.ahead == 0
+    assert status.behind == 0
+
+
+def test_branch_status_detached_head(tmp_path: Path, repo: git.Repo):
+    repo.git.checkout(repo.head.commit.hexsha)
+
+    status = GitRepoAdapter(tmp_path).get_branch_status()
+
+    assert status.branch_name == "HEAD"
+
+
+def test_find_default_branch_falls_back_to_local_symref_when_remote_unreachable(
+    tmp_path: Path,
+):
+    # refs/remotes/origin/HEAD is a local symbolic ref set by `git remote
+    # set-head` (or a real `git clone`) — it is NOT authoritative (see the
+    # disagreement test below), so it must only be used once both the cache
+    # and a live network probe have failed. Proven here by pointing origin
+    # at a URL that cannot be resolved: the network probe fails, and the
+    # stale-but-still-correct local symref is what's left to fall back to.
+    remote_bare = tmp_path / "remote.git"
+    git.Repo.init(remote_bare, bare=True)
+
+    local_path = tmp_path / "local_repo"
+    repo = _init_repo_with_commit(local_path)
+    repo.create_remote("origin", str(remote_bare))
+    repo.git.push("--set-upstream", "origin", "main")
+    repo.git.remote("set-head", "origin", "main")
+
+    # Break reachability after the local symref is already recorded.
+    repo.git.remote("set-url", "origin", "https://127.0.0.1.invalid/unreachable.git")
+
+    status = GitRepoAdapter(local_path).get_branch_status()
+
+    assert status.default_branch == "main"
+
+
+def test_find_default_branch_prefers_authoritative_remote_over_stale_local_symref(
+    tmp_path: Path,
+):
+    # Regression test for the exact bug just found on the user's real
+    # repos: refs/remotes/origin/HEAD is written once at clone time and is
+    # NOT refreshed by `git fetch` — only by an explicit
+    # `git remote set-head origin -a`. So it can silently disagree with the
+    # remote's actual current HEAD. When it does, the live (or cached)
+    # answer from ls-remote must win, never the stale local symref.
+    remote_bare = tmp_path / "remote.git"
+    remote_repo = git.Repo.init(remote_bare, bare=True)
+
+    local_path = tmp_path / "local_repo"
+    repo = _init_repo_with_commit(local_path)
+    repo.create_remote("origin", str(remote_bare))
+    repo.git.push("--set-upstream", "origin", "main")
+    repo.git.branch("develop")
+    repo.git.push("origin", "develop")
+
+    # The remote's own HEAD (what `ls-remote --symref origin HEAD` reports)
+    # now really points at "develop" — e.g. someone repointed the repo's
+    # default branch on the server after this clone was made.
+    remote_repo.git.symbolic_ref("HEAD", "refs/heads/develop")
+
+    repo.git.fetch("origin")
+    # Force the local mirror to disagree with the remote: simulates a clone
+    # made back when "main" was still the default, never refreshed since.
+    repo.git.symbolic_ref("refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+    status = GitRepoAdapter(local_path).get_branch_status()
+
+    assert status.default_branch == "develop"
+
+
+def test_find_default_branch_falls_back_to_ls_remote_when_symref_missing(tmp_path: Path):
+    # No local refs/remotes/origin/HEAD (never `set-head`'d) — the code
+    # must fall back to asking the remote directly and still get the right
+    # answer.
+    remote_bare = tmp_path / "remote.git"
+    git.Repo.init(remote_bare, bare=True)
+
+    local_path = tmp_path / "local_repo"
+    repo = _init_repo_with_commit(local_path)
+    repo.create_remote("origin", str(remote_bare))
+    repo.git.push("--set-upstream", "origin", "main")
+
+    status = GitRepoAdapter(local_path).get_branch_status()
+
+    assert status.default_branch == "main"
+
+
+def test_find_default_branch_none_when_no_origin_remote(
+    tmp_path: Path, repo: git.Repo, monkeypatch: pytest.MonkeyPatch
+):
+    # Isolate from this machine's system-level gitconfig: Apple's Command
+    # Line Tools ship one that sets init.defaultbranch=main, which `git
+    # config init.defaultBranch` (the final fallback) would otherwise pick
+    # up and mask the "nothing determinable" case under test here.
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+    status = GitRepoAdapter(tmp_path).get_branch_status()
+
+    assert status.default_branch is None
+
+
+def test_find_default_branch_memoizes_across_calls(
+    tmp_path: Path, repo: git.Repo, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    # Deliberately not "main": the system-level gitconfig's
+    # init.defaultbranch=main would make an unmemoized second call return
+    # the same value by coincidence, hiding a broken cache.
+    repo.git.config("init.defaultBranch", "trunk")
+    adapter = GitRepoAdapter(tmp_path)
+
+    first = adapter._find_default_branch()
+    # Delete the config the first call relied on: a second, non-memoized
+    # lookup would now return None instead of the cached "trunk".
+    repo.git.config("--unset", "init.defaultBranch")
+    second = adapter._find_default_branch()
+
+    assert first == "trunk"
+    assert second == "trunk"
+
+
+def test_find_default_branch_bounded_when_remote_never_responds(
+    tmp_path: Path, repo: git.Repo, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    # A remote that accepts the TCP connection but never speaks the git
+    # protocol reproduces the original hang (no local symref, network call
+    # blocks forever with no timeout). This proves the fix is genuinely
+    # bounded rather than just "usually fast".
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind(("127.0.0.1", 0))
+    server_socket.listen(1)
+    port = server_socket.getsockname()[1]
+
+    def _accept_and_stall() -> None:
+        try:
+            conn, _ = server_socket.accept()
+            time.sleep(30)
+            conn.close()
+        except OSError:
+            pass
+
+    server_thread = threading.Thread(target=_accept_and_stall, daemon=True)
+    server_thread.start()
+    try:
+        repo.create_remote("origin", f"git://127.0.0.1:{port}/repo.git")
+
+        started = time.monotonic()
+        status = GitRepoAdapter(tmp_path).get_branch_status()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 15, "default branch lookup did not honor its timeout"
+        assert status.default_branch is None
+    finally:
+        server_socket.close()
+
+
+def test_branch_status_finds_parent_branch_with_slash_in_name(tmp_path: Path, repo: git.Repo):
+    # Branch names containing '/' are common here (e.g. "TASK/foo-bar") —
+    # the parent-branch lookup must not split on '/' anywhere in its ref
+    # handling.
+    repo.git.checkout("-b", "TASK/foo-bar")
+    (tmp_path / "feature_file.txt").write_text("feature work\n")
+    repo.index.add(["feature_file.txt"])
+    repo.index.commit("feature commit")
+
+    status = GitRepoAdapter(tmp_path).get_branch_status()
+
+    assert status.branch_name == "TASK/foo-bar"
+    assert status.parent_branch == "main"
+
+
+def test_find_local_parent_branch_ignores_unrelated_orphan_branch(tmp_path: Path, repo: git.Repo):
+    # An orphan branch shares no history with `current` at all, so its
+    # merge-base is empty and it must be skipped rather than crashing or
+    # winning by default.
+    repo.git.checkout("--orphan", "unrelated")
+    (tmp_path / "orphan_file.txt").write_text("orphan\n")
+    repo.index.add(["orphan_file.txt"])
+    repo.index.commit("orphan root commit")
+    repo.git.checkout("main")
+
+    repo.git.branch("main-line")
+    repo.git.checkout("-b", "feature")
+    (tmp_path / "feature_file.txt").write_text("feature work\n")
+    repo.index.add(["feature_file.txt"])
+    repo.index.commit("feature commit")
+
+    status = GitRepoAdapter(tmp_path).get_branch_status()
+
+    assert status.parent_branch in ("main", "main-line")
+
+
+def test_find_local_parent_branch_matches_git_merge_base_across_merge_commit(
+    tmp_path: Path, repo: git.Repo
+):
+    # Regression test for the graph-based reimplementation: with a real
+    # merge commit in the history, the "most recent common ancestor" must
+    # still match what `git merge-base` itself would report, not just the
+    # newest-by-date node anywhere in the shared history. Commit dates are
+    # pinned explicitly (a fast test run can otherwise create several
+    # commits within the same wall-clock second, making the "most recent"
+    # comparison a coin flip on committed_date's 1-second resolution).
+    def _commit(message: str, offset_seconds: int) -> None:
+        date = f"2024-01-01T00:00:{offset_seconds:02d} +0000"
+        repo.index.commit(message, commit_date=date, author_date=date)
+
+    repo.git.checkout("-b", "feature")
+    (tmp_path / "feat.txt").write_text("x\n")
+    repo.index.add(["feat.txt"])
+    _commit("feature work", 10)
+
+    repo.git.checkout("main")
+    (tmp_path / "main2.txt").write_text("y\n")
+    repo.index.add(["main2.txt"])
+    _commit("main work", 20)
+    repo.git.merge("feature", "--no-ff", "-m", "merge feature")
+
+    repo.git.checkout("-b", "topic", "HEAD~1")  # branches off pre-merge main
+    (tmp_path / "topic.txt").write_text("z\n")
+    repo.index.add(["topic.txt"])
+    _commit("topic work", 40)
+    repo.git.checkout("main")
+
+    adapter = GitRepoAdapter(tmp_path)
+    # Ground truth from real `git merge-base`, to compare the new
+    # graph-based computation against.
+    real_merge_base = adapter._repo.git.merge_base("main", "topic")
+
+    parent = adapter._find_local_parent_branch("main")
+
+    # merge-base(main, feature) is "feature work" (date 10); merge-base(main,
+    # topic) is "main work" (date 20, main's own pre-merge tip) — the more
+    # recent of the two, so "topic" must win.
+    assert parent == "topic"
+    assert real_merge_base == adapter._repo.heads["main"].commit.parents[0].hexsha

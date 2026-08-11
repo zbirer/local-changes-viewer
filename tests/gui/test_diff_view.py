@@ -8,10 +8,10 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QTextCursor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from local_changes_viewer.core.domain.diff import DiffHunk, DiffLine, DiffLineKind, DiffResult
-from local_changes_viewer.gui.diff_view import side_by_side_view
+from local_changes_viewer.gui.diff_view import diff_view_widget, side_by_side_view
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.diff_view.side_by_side_view import SideBySideView
 
@@ -328,6 +328,101 @@ def test_cmd_s_shortcut_saves_through_the_same_path_as_the_save_button(
 
     assert not right.document().isModified()
     assert file_path.read_bytes() == b"one\r\ntwo\r\nthree_edited"
+
+
+# ---------------------------------------------------------------------------
+# Bug 1: declining "Discard edits?" when toggling Edit off must not destroy
+# the buffer. Qt flips the button to unchecked before emitting toggled(False)
+# -- setChecked(True) to put it back is a real transition Qt re-emits
+# synchronously, which used to re-enter enter_edit_mode() and re-read the
+# file from disk on top of the very buffer the user chose to keep.
+# ---------------------------------------------------------------------------
+
+
+def _patch_question_reply(monkeypatch: pytest.MonkeyPatch, reply) -> None:
+    """QMessageBox.question is a static-style call resolved through the name
+    `QMessageBox` in diff_view_widget's own module namespace (mirrors how
+    _patch_goto_dialog above patches QInputDialog in side_by_side_view) --
+    patched there, not on the real Qt class globally, so no real modal ever
+    blocks the test."""
+    monkeypatch.setattr(
+        diff_view_widget,
+        "QMessageBox",
+        SimpleNamespace(question=lambda *a, **k: reply, StandardButton=QMessageBox.StandardButton),
+    )
+
+
+def test_declining_discard_on_edit_toggle_off_preserves_buffer(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("one\ntwo\nthree")
+    widget = DiffViewWidget()
+    widget.set_diff(_empty_diff(), str(file_path), file_path)
+    widget.show()
+    QTest.qWaitForWindowExposed(widget)
+
+    widget._edit_button.setChecked(True)
+    assert widget._side_by_side.is_editing()
+    right = widget._side_by_side._right
+    cursor = right.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    right.setTextCursor(cursor)
+    QTest.keyClicks(right, "MARKER")
+    assert widget._side_by_side.has_unsaved_edits()
+
+    _patch_question_reply(monkeypatch, QMessageBox.StandardButton.No)
+
+    # Real button click, not a direct call to _on_edit_toggled: the button's
+    # own check-state is exactly what desynchronizes if the fix is wrong.
+    QTest.mouseClick(widget._edit_button, Qt.MouseButton.LeftButton)
+
+    assert widget._edit_button.isChecked(), "declining must leave Edit checked"
+    assert widget._side_by_side.is_editing(), "declining must not exit edit mode"
+    assert "MARKER" in right.toPlainText(), (
+        "declining re-read the file from disk and destroyed the buffer"
+    )
+    assert widget._side_by_side.has_unsaved_edits()
+
+
+# ---------------------------------------------------------------------------
+# Bug 3: Save must not silently clobber a file that changed on disk since
+# Edit began (no mtime/size comparison existed at all before this fix).
+# ---------------------------------------------------------------------------
+
+
+def test_save_with_externally_changed_file_prompts_and_declining_preserves_disk_and_buffer(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("one\ntwo\nthree")
+    widget = DiffViewWidget()
+    widget.set_diff(_empty_diff(), str(file_path), file_path)
+    widget.show()
+    QTest.qWaitForWindowExposed(widget)
+
+    widget._edit_button.setChecked(True)
+    right = widget._side_by_side._right
+    cursor = right.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    right.setTextCursor(cursor)
+    QTest.keyClicks(right, "_LOCAL")
+
+    # Simulate a git pull / another editor / a background refresh rewriting
+    # the file while Edit is open. A different size (not just a touch)
+    # guarantees the fingerprint differs regardless of filesystem mtime
+    # resolution.
+    file_path.write_text("one\ntwo\nthree\nEXTERNAL_CHANGE")
+
+    _patch_question_reply(monkeypatch, QMessageBox.StandardButton.No)
+
+    QTest.mouseClick(widget._save_button, Qt.MouseButton.LeftButton)
+
+    assert file_path.read_text() == "one\ntwo\nthree\nEXTERNAL_CHANGE", (
+        "declining the overwrite must leave the externally-changed file untouched"
+    )
+    assert right.toPlainText() == "one\ntwo\nthree_LOCAL", "buffer must survive the decline"
+    assert widget._side_by_side.has_unsaved_edits()
 
 
 # ---------------------------------------------------------------------------

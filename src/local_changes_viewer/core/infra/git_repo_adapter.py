@@ -7,10 +7,17 @@ from local_changes_viewer.core.domain.commit_log_entry import CommitLogEntry
 from local_changes_viewer.core.domain.diff import DiffHunk, DiffLine, DiffLineKind, DiffResult
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.repository import BranchStatus
+from local_changes_viewer.core.services import workspace_cache
 
 _BRANCH_LINE_RE = re.compile(
     r"^## (?P<branch>\S+?)(?:\.\.\.(?P<upstream>\S+))?(?: \[(?P<info>[^\]]+)\])?$"
 )
+# `git status --porcelain=v1 --branch` prints this instead of the usual
+# "## <branch>...<upstream>" line on a brand-new repo with zero commits
+# (verified against real git output: "## No commits yet on main"). It
+# doesn't match _BRANCH_LINE_RE, so without this it fell through to using
+# the whole "No commits yet on main" string as the branch name.
+_NO_COMMITS_LINE_RE = re.compile(r"^## No commits yet on (?P<branch>\S+)$")
 _AHEAD_BEHIND_RE = re.compile(r"(ahead|behind) (\d+)")
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _INDEX_LINE_RE = re.compile(r"^index (\w+)\.\.(\w+)")
@@ -21,10 +28,26 @@ _STATUS_CODE_TO_CHANGE_TYPE = {
 }
 
 
+_NOT_COMPUTED = object()  # sentinel: distinguishes "never computed" from a real None result
+
+# How long a cached default-branch answer is trusted before re-asking the
+# remote. A repo's default branch is a deliberate, infrequent repo-level
+# decision (a rename/re-point on GitHub, say), not something that drifts
+# gradually — so a full day is long enough that almost every scan in a
+# workday is a cache hit (no network call at all), while still bounding how
+# long a rename can go unnoticed to "worst case, one day," which is fine for
+# a UI annotation rather than something correctness-critical downstream.
+_DEFAULT_BRANCH_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
 class GitRepoAdapter:
     def __init__(self, repo_path: Path) -> None:
         self._repo_path = repo_path
         self._repo = git.Repo(repo_path)
+        # _find_default_branch's network fallback is a real round trip, so its
+        # result is memoized for the adapter's lifetime — a scan otherwise
+        # pays for it once per call site even though it can't change mid-scan.
+        self._default_branch_cache: object = _NOT_COMPUTED
 
     def list_changes(self, include_unpushed_commits: bool = False) -> list[FileChange]:
         output = self._repo.git.status("--porcelain=v1", "--ignored")
@@ -124,6 +147,10 @@ class GitRepoAdapter:
 
         if first_line == "## HEAD (no branch)":
             return BranchStatus(branch_name="HEAD", ahead=0, behind=0)
+
+        no_commits_match = _NO_COMMITS_LINE_RE.match(first_line)
+        if no_commits_match:
+            return BranchStatus(branch_name=no_commits_match.group("branch"), ahead=0, behind=0)
 
         match = _BRANCH_LINE_RE.match(first_line)
         if not match:
@@ -229,18 +256,94 @@ class GitRepoAdapter:
         return worktrees
 
     def _find_default_branch(self) -> str | None:
-        try:
-            output = self._repo.git.ls_remote("--symref", "origin", "HEAD")
-            for line in output.splitlines():
-                if line.startswith("ref:"):
-                    ref = line.split()[1]
-                    return ref.removeprefix("refs/heads/")
-        except git.GitCommandError:
-            pass
+        # Memoized: this is called once per get_branch_status() invocation,
+        # and get_branch_status() runs once per repo per scan, but a caller
+        # querying the same adapter twice (or the ls-remote fallback below
+        # firing) shouldn't pay for the lookup — and the network fallback in
+        # particular — more than once per adapter instance.
+        if self._default_branch_cache is not _NOT_COMPUTED:
+            return self._default_branch_cache  # type: ignore[return-value]
+        result = self._find_default_branch_uncached()
+        self._default_branch_cache = result
+        return result
+
+    def _find_default_branch_uncached(self) -> str | None:
+        # `ls-remote` is the only source here that actually asks the remote
+        # right now, so it's the only one that's authoritative — but it's a
+        # real network round trip (~2.3s measured on this box), which is why
+        # its answer is cached to disk per remote URL rather than skipped:
+        # skipping it (e.g. by trusting the local symref below instead) can
+        # return a wrong answer, not just a slow one (see the comment on
+        # _read_local_origin_head_symref). Paying ~2.3s once per remote per
+        # _DEFAULT_BRANCH_CACHE_TTL_SECONDS is an acceptable trade against
+        # paying it on every scan of every repo on that remote.
+        remote_url = self.get_remote_url("origin")
+        if remote_url is not None:
+            cached = workspace_cache.load_default_branch(
+                remote_url, max_age_seconds=_DEFAULT_BRANCH_CACHE_TTL_SECONDS
+            )
+            if cached is not None:
+                return cached
+
+            resolved = self._ls_remote_default_branch()
+            if resolved is not None:
+                workspace_cache.save_default_branch(remote_url, resolved)
+                return resolved
+
+        # Everything below is a local-only hint, reachable only once BOTH
+        # the cache and a live network probe (immediately above) have
+        # already failed — some stale-but-plausible answer beats none.
+        local_symref_hint = self._read_local_origin_head_symref()
+        if local_symref_hint is not None:
+            return local_symref_hint
+
+        # Absolute last resort. On a machine whose git ships a system-level
+        # gitconfig (e.g. Apple's Command Line Tools set
+        # init.defaultbranch=main), this can return a plausible-looking
+        # wrong answer -- but by this point the cache, a live network probe,
+        # and the local symref have all already failed to produce anything,
+        # so there is nothing more authoritative left to prefer over it.
         try:
             return self._repo.git.config("init.defaultBranch")
         except git.GitCommandError:
             return None
+
+    def _ls_remote_default_branch(self) -> str | None:
+        # Bounded so an unreachable/auth-prompting remote can never block a
+        # scan indefinitely (this used to run with no timeout at all).
+        try:
+            output = self._repo.git.ls_remote(
+                "--symref", "origin", "HEAD", kill_after_timeout=5
+            )
+        except git.GitCommandError:
+            return None
+        for line in output.splitlines():
+            if line.startswith("ref:"):
+                ref = line.split()[1]
+                return ref.removeprefix("refs/heads/")
+        return None
+
+    def _read_local_origin_head_symref(self) -> str | None:
+        # `refs/remotes/origin/HEAD` is a local symbolic ref written once by
+        # `git clone` (or an explicit `git remote set-head`). Unlike a
+        # branch ref, `git fetch` does NOT refresh it, so it's a snapshot
+        # that silently goes stale the moment the remote's actual default
+        # branch changes — measured disagreeing with `ls-remote` on both of
+        # the real repos this was tested against (dashboard: cached
+        # "develop", remote is really "main"; server: cached "main", remote
+        # is really "release/3.6.6"). That staleness is exactly why this is
+        # ranked below the cache and the network probe, never above them.
+        try:
+            ref = self._repo.git.symbolic_ref("refs/remotes/origin/HEAD")
+        except git.GitCommandError:
+            return None
+        # ref looks like "refs/remotes/origin/main". Branch names here
+        # routinely contain '/' (e.g. "TASK/foo-bar"), so strip the known
+        # prefix rather than splitting/partitioning on '/'.
+        prefix = "refs/remotes/origin/"
+        if ref.startswith(prefix):
+            return ref.removeprefix(prefix)
+        return None
 
     def _find_local_parent_branch(self, branch_name: str) -> str | None:
         try:
@@ -248,18 +351,75 @@ class GitRepoAdapter:
         except (IndexError, KeyError):
             return None
 
+        other_heads = [head for head in self._repo.heads if head.name != branch_name]
+        if not other_heads:
+            return None
+
+        # The obvious version of this loop calls `git merge-base` once per
+        # other local branch (plus a `committed_date` lookup on each
+        # result). That's ~1 subprocess spawn per branch — on a repo with
+        # ~105 local branches, measured at ~2.3-3.7s total, because forking
+        # a large GUI process is itself expensive on this box regardless of
+        # what the child does. Dumping the whole local-branch commit graph
+        # with a single `git rev-list` call and computing every merge base
+        # as a pure-Python graph query turns that into exactly one
+        # subprocess no matter how many branches exist.
+        try:
+            dump = self._repo.git.rev_list(
+                "--branches", "--topo-order", "--parents", pretty="format:%H %ct"
+            )
+        except git.GitCommandError:
+            return None
+
+        parents: dict[str, list[str]] = {}
+        children: dict[str, list[str]] = {}
+        committed_at: dict[str, int] = {}
+        lines = dump.splitlines()
+        # Output alternates "commit <sha> <parents...>" / "<sha> <ct>" per
+        # commit (see git-rev-list(1) --parents + --pretty=format combo);
+        # the format string is deliberately just hash+timestamp (no subject
+        # line) so neither line can itself contain embedded newlines.
+        for i in range(0, len(lines) - 1, 2):
+            header = lines[i].split()
+            sha, parent_shas = header[1], header[2:]
+            parents[sha] = parent_shas
+            for parent_sha in parent_shas:
+                children.setdefault(parent_sha, []).append(sha)
+            _, ct = lines[i + 1].split()
+            committed_at[sha] = int(ct)
+
+        def ancestors(start_sha: str) -> set[str]:
+            seen = {start_sha}
+            stack = [start_sha]
+            while stack:
+                node = stack.pop()
+                for parent_sha in parents.get(node, ()):
+                    if parent_sha not in seen:
+                        seen.add(parent_sha)
+                        stack.append(parent_sha)
+            return seen
+
+        current_ancestors = ancestors(current.commit.hexsha)
+
         best_branch: str | None = None
         best_commit_time = -1
-        for head in self._repo.heads:
-            if head.name == branch_name:
+        for head in other_heads:
+            common = ancestors(head.commit.hexsha) & current_ancestors
+            if not common:
                 continue
-            try:
-                merge_bases = self._repo.merge_base(current, head)
-            except git.GitCommandError:
-                continue
-            if not merge_bases:
-                continue
-            commit_time = merge_bases[0].committed_date
+            # The real merge base is the maximal element(s) of the common-
+            # ancestor set — a common ancestor with no descendant that is
+            # also a common ancestor. `common` itself is ancestor-closed
+            # (an ancestor of a common ancestor is common too), so picking
+            # "any" element would usually pick something far too old; this
+            # is what makes the result match `git merge-base` even across
+            # merge commits, not just on linear history.
+            merge_base_candidates = [
+                sha
+                for sha in common
+                if not any(child in common for child in children.get(sha, ()))
+            ]
+            commit_time = max(committed_at[sha] for sha in merge_base_candidates)
             if commit_time > best_commit_time:
                 best_commit_time = commit_time
                 best_branch = head.name

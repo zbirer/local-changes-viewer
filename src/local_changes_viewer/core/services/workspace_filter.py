@@ -1,4 +1,5 @@
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from local_changes_viewer.core.domain.file_change import FileChange
@@ -98,15 +99,10 @@ def filter_workspace(
         if max_age_minutes > 0:
             changes = [c for c in changes if _changed_within(repo.path, c, max_age_minutes)]
 
-        considered.append(
-            Repository(
-                path=repo.path,
-                name=repo.name,
-                branch_status=repo.branch_status,
-                changes=changes,
-                logical_parent_path=repo.logical_parent_path,
-            )
-        )
+        # dataclasses.replace() carries every other field (notably
+        # pull_request) through unchanged, so a future field added to
+        # Repository can't be silently dropped here the way pull_request was.
+        considered.append(replace(repo, changes=changes))
 
     if not hide_repos_without_changes:
         return Workspace(root_path=workspace.root_path, repositories=considered)

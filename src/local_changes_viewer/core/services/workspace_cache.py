@@ -6,6 +6,7 @@ they just no-op / return None and let the app fall back to a fresh scan.
 """
 
 import json
+import time
 from pathlib import Path
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
@@ -19,6 +20,57 @@ _CACHE_FILE_PATH = Path.home() / ".local-changes-viewer" / "workspace_cache.json
 # a cache written by a different version instead of trying to migrate it or
 # crashing on a field that no longer exists.
 _CACHE_VERSION = 1
+
+# Same directory, same JSON/version/try-except-swallow conventions as the
+# workspace cache above, but a separate file: this one is small, keyed by
+# remote URL, and has TTL/expiry semantics that don't fit the "wholesale
+# overwrite on every scan" shape save_workspace() uses.
+_DEFAULT_BRANCH_CACHE_FILE_PATH = (
+    Path.home() / ".local-changes-viewer" / "default_branch_cache.json"
+)
+_DEFAULT_BRANCH_CACHE_VERSION = 1
+
+
+def load_default_branch(remote_url: str, max_age_seconds: float) -> str | None:
+    """Returns the cached default branch for `remote_url` if a fresh-enough
+    entry exists, else None. GitRepoAdapter treats None as a cache miss and
+    goes on to ask the remote directly."""
+    try:
+        data = json.loads(_DEFAULT_BRANCH_CACHE_FILE_PATH.read_text())
+        if not isinstance(data, dict) or data.get("version") != _DEFAULT_BRANCH_CACHE_VERSION:
+            return None
+        entry = data.get("remotes", {}).get(remote_url)
+        if not entry:
+            return None
+        if time.time() - entry["resolved_at"] > max_age_seconds:
+            return None
+        return entry["branch"]
+    except Exception:
+        return None
+
+
+def save_default_branch(remote_url: str, branch_name: str) -> None:
+    """Records `branch_name` as the resolved default branch for
+    `remote_url`, timestamped now. Merges into the existing file (unlike
+    save_workspace(), this cache accumulates one entry per remote rather
+    than being replaced wholesale) so caching one repo's remote doesn't
+    evict every other repo's already-cached entry."""
+    try:
+        try:
+            data = json.loads(_DEFAULT_BRANCH_CACHE_FILE_PATH.read_text())
+            if not isinstance(data, dict) or data.get("version") != _DEFAULT_BRANCH_CACHE_VERSION:
+                data = {"version": _DEFAULT_BRANCH_CACHE_VERSION, "remotes": {}}
+        except Exception:
+            data = {"version": _DEFAULT_BRANCH_CACHE_VERSION, "remotes": {}}
+
+        data.setdefault("remotes", {})[remote_url] = {
+            "branch": branch_name,
+            "resolved_at": time.time(),
+        }
+        _DEFAULT_BRANCH_CACHE_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _DEFAULT_BRANCH_CACHE_FILE_PATH.write_text(json.dumps(data))
+    except Exception:
+        pass
 
 
 def save_workspace(workspace: Workspace) -> None:

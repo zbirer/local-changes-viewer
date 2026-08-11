@@ -1,3 +1,5 @@
+import html
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
@@ -17,6 +19,12 @@ from local_changes_viewer.gui.formatting import format_timestamp
 
 def _label(text: str) -> QLabel:
     label = QLabel(text)
+    # Every value shown here comes straight from the GitHub API (PR title,
+    # branch names, author names, ...). QLabel's default AutoText format
+    # sniffs the string and renders it as rich text if it looks like markup,
+    # which lets anyone who can open a PR/comment inject HTML into this
+    # dialog. Force PlainText so API text is always shown literally.
+    label.setTextFormat(Qt.TextFormat.PlainText)
     label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     return label
 
@@ -48,7 +56,11 @@ class PullRequestInfoDialog(QDialog):
         form = QFormLayout()
         form.addRow("Title:", _label(details.title))
         form.addRow("Number:", _label(f"#{details.number}"))
-        url_label = QLabel(f'<a href="{details.url}">{details.url}</a>')
+        # The URL is API-supplied and interpolated into HTML markup, so it
+        # must be escaped -- otherwise a crafted URL could break out of the
+        # href attribute and inject arbitrary markup into this dialog.
+        escaped_url = html.escape(details.url)
+        url_label = QLabel(f'<a href="{escaped_url}">{escaped_url}</a>')
         url_label.setOpenExternalLinks(True)
         form.addRow("URL:", url_label)
         form.addRow("From branch:", _branch_row(details.head_ref))
