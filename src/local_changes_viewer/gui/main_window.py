@@ -63,6 +63,7 @@ from local_changes_viewer.gui.pull_requests_panel import PullRequestsPanel
 from local_changes_viewer.gui.pull_request_info_dialog import PullRequestInfoDialog
 from local_changes_viewer.gui.pull_request_issues_dialog import PullRequestIssuesDialog
 from local_changes_viewer.gui.settings import AppSettings
+from local_changes_viewer.gui.settings_dialog import SettingsDialog
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 from local_changes_viewer.gui.workers.my_pull_requests_worker import MyPullRequestsWorker
 from local_changes_viewer.gui.workers.pull_request_details_worker import PullRequestDetailsWorker
@@ -251,6 +252,12 @@ class MainWindow(QMainWindow):
         decrease_font_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
         decrease_font_action.triggered.connect(self._diff_view.decrease_font_size)
         view_menu.addAction(decrease_font_action)
+
+        view_menu.addSeparator()
+
+        settings_dialog_action = QAction("Settings…", self)
+        settings_dialog_action.triggered.connect(self._on_open_settings_dialog)
+        view_menu.addAction(settings_dialog_action)
 
         view_menu.addSeparator()
 
@@ -837,6 +844,12 @@ class MainWindow(QMainWindow):
         )
         if not ok:
             return
+        self._set_auto_refresh_minutes(minutes)
+
+    def _set_auto_refresh_minutes(self, minutes: int) -> None:
+        """Persists and applies the auto-refresh interval. Shared by the
+        Auto Refresh… dialog and SettingsDialog's spinbox so both surfaces
+        go through the same persist+apply path (D1)."""
         applog.log(f"Set auto refresh interval: {minutes} minute(s)", level=applog.LogLevel.INFO)
         self._settings.set_auto_refresh_minutes(minutes)
         self._apply_auto_refresh_interval(minutes)
@@ -920,6 +933,11 @@ class MainWindow(QMainWindow):
         )
         if not ok:
             return
+        self._set_log_level(level_name)
+
+    def _set_log_level(self, level_name: str) -> None:
+        """Persists and applies the log level. Shared by the Log Level…
+        dialog and SettingsDialog's combo box (D1)."""
         applog.log(f"Set log level: {level_name}", level=applog.LogLevel.INFO)
         self._settings.set_log_level(level_name)
         applog.set_level(applog.level_from_name(level_name))
@@ -936,6 +954,11 @@ class MainWindow(QMainWindow):
         )
         if not ok:
             return
+        self._set_tooltip_font_size(size)
+
+    def _set_tooltip_font_size(self, size: int) -> None:
+        """Persists and applies the tooltip font size. Shared by the
+        Tooltip Font Size… dialog and SettingsDialog's spinbox (D1)."""
         applog.log(f"Set tooltip font size: {size}", level=applog.LogLevel.INFO)
         self._settings.set_tooltip_font_size(size)
         self._apply_tooltip_font_size(size)
@@ -1187,6 +1210,10 @@ class MainWindow(QMainWindow):
         applog.log(f"Pull request action failed: {message}", level=applog.LogLevel.ERROR)
         self.statusBar().clearMessage()
         QMessageBox.warning(self, "Pull Request", f"Action failed: {message}")
+
+    def _on_open_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self, self)
+        dialog.exec()
 
     def _on_manage_folder_filters(self) -> None:
         dialog = FolderFilterDialog(self._folder_filter_rules, self)
