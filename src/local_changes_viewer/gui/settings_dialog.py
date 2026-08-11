@@ -120,7 +120,9 @@ class SettingsDialog(QDialog):
         top_layout.addStretch(1)
         return top
 
-    def _checkbox_row(self, label: str, explanation: str, on_toggled) -> QCheckBox:
+    def _checkbox_row(
+        self, label: str, explanation: str, on_toggled
+    ) -> tuple[QCheckBox, QWidget]:
         checkbox = QCheckBox(label)
         checkbox.toggled.connect(on_toggled)
         return checkbox, self._row(checkbox, explanation)
@@ -186,7 +188,7 @@ class SettingsDialog(QDialog):
         self._hide_empty_repos_checkbox, row = self._checkbox_row(
             "Hide repos without changes",
             "Repositories and worktrees with nothing to show are omitted "
-            "from the tree -- including clean git worktrees.",
+            "from the tree, including clean git worktrees.",
             self._on_hide_empty_repos_toggled,
         )
         layout.addWidget(row)
