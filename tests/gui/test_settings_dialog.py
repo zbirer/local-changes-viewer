@@ -143,6 +143,29 @@ def test_constructing_dialog_does_not_mutate_any_setting(qapp, window: MainWindo
         dialog.close()
 
 
+def test_population_never_rewrites_out_of_range_or_unlisted_persisted_values(
+    qapp, window: MainWindow
+) -> None:
+    """Regression test for the bug where a value a control's range/list
+    didn't (yet) represent -- VERBOSE was missing from the log-level combo,
+    and 36 was outside the tooltip-font-size spinbox's old 0-32 range --
+    got silently narrowed by population and then rewritten to the
+    narrowed value by this instant-apply dialog. Both controls must now
+    display the real persisted value, and population must never write
+    back regardless."""
+    window._settings.set_log_level("VERBOSE")
+    window._settings.set_tooltip_font_size(36)
+
+    dialog = SettingsDialog(window)
+    try:
+        assert dialog._log_level_combo.currentText() == "VERBOSE"
+        assert dialog._tooltip_font_size_spinbox.value() == 36
+        assert window._settings.log_level() == "VERBOSE"
+        assert window._settings.tooltip_font_size() == 36
+    finally:
+        dialog.close()
+
+
 def test_folder_filter_summary_reflects_current_rules(qapp, window: MainWindow) -> None:
     window._folder_filter_rules = [
         FolderFilterRule(text="build", mode=FolderFilterMode.CONTAINS),

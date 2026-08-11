@@ -11,6 +11,14 @@ class LogLevel(IntEnum):
     VERBOSE = 4
 
 
+# Single source of truth for every level name, in declaration order. Any UI
+# surface offering a choice of log level (the Log Level… dialog,
+# SettingsDialog's combo box) must source its list from here rather than
+# hardcoding its own -- otherwise a surface can silently omit a level (e.g.
+# VERBOSE) that a user already has selected, and instant-apply persistence
+# would then rewrite their setting out from under them.
+LOG_LEVEL_NAMES = [level.name for level in LogLevel]
+
 _LEVEL_BY_NAME = {level.name: level for level in LogLevel}
 
 _ENTRIES: list[str] = []

@@ -920,7 +920,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_configure_log_level(self) -> None:
-        levels = [level.name for level in applog.LogLevel]
+        levels = applog.LOG_LEVEL_NAMES
         current = self._settings.log_level()
         current_index = levels.index(current) if current in levels else levels.index("INFO")
         level_name, ok = QInputDialog.getItem(

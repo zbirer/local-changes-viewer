@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from local_changes_viewer.gui import applog
+
 if TYPE_CHECKING:
     # Only for type hints -- importing MainWindow at runtime would be
     # circular (main_window.py imports this module to open the dialog).
@@ -25,7 +27,16 @@ if TYPE_CHECKING:
 # labels elsewhere in the app (commit_log_dialog.py, diff_view_widget.py).
 _EXPLANATION_STYLE = "color: #6B7280;"
 
-_LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
+# Sourced from applog.LOG_LEVEL_NAMES (not a hardcoded list here) so this
+# combo can never drift from -- and silently narrow -- the level set the
+# legacy Log Level… dialog offers. A user on VERBOSE must see VERBOSE here,
+# not have it disappear the moment this dialog opens.
+_LOG_LEVELS = applog.LOG_LEVEL_NAMES
+
+# Matches the legacy Tooltip Font Size… dialog's range exactly (main_window
+# _on_configure_tooltip_font_size uses QInputDialog.getInt(..., 0, 36)) so a
+# persisted value from that dialog is never out of this spinbox's range.
+_TOOLTIP_FONT_SIZE_MAX = 36
 
 
 def _explanation_label(text: str) -> QLabel:
@@ -53,7 +64,7 @@ class SettingsDialog(QDialog):
     def __init__(self, main_window: "MainWindow", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(560, 640)
+        self.resize(640, 700)
         self.setMinimumWidth(560)
         self._main_window = main_window
         # True only while __init__ is populating widgets from current
@@ -206,7 +217,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(row)
 
         self._tooltip_font_size_spinbox = QSpinBox()
-        self._tooltip_font_size_spinbox.setRange(0, 32)
+        self._tooltip_font_size_spinbox.setRange(0, _TOOLTIP_FONT_SIZE_MAX)
         self._tooltip_font_size_spinbox.setSpecialValueText("System default")
         self._tooltip_font_size_spinbox.valueChanged.connect(self._on_tooltip_font_size_changed)
         layout.addWidget(
@@ -273,7 +284,7 @@ class SettingsDialog(QDialog):
             self._row(
                 self._titled_control("Log level:", self._log_level_combo),
                 "Controls how much detail is written to the in-memory and "
-                "on-disk app log; DEBUG is the most verbose of these four.",
+                "on-disk app log; VERBOSE logs the most, ERROR the least.",
             )
         )
 
