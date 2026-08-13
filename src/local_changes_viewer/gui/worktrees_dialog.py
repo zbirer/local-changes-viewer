@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -141,6 +142,7 @@ class WorktreesDialog(QDialog):
         menu = QMenu(self)
         menu.addAction("Delete", lambda: self._on_delete(worktree))
         menu.addAction("Show Changes", lambda: self._on_show_changes(worktree))
+        menu.addAction("Copy Path", lambda: self._on_copy_path(worktree))
         menu.exec(self._table.viewport().mapToGlobal(position))
 
     def _on_show_changes(self, worktree: WorktreeInfo) -> None:
@@ -148,3 +150,6 @@ class WorktreesDialog(QDialog):
             worktree.path, adapter_factory=self._adapter_factory, parent=self
         )
         dialog.exec()
+
+    def _on_copy_path(self, worktree: WorktreeInfo) -> None:
+        QGuiApplication.clipboard().setText(str(worktree.path))

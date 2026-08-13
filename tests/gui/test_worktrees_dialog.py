@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QPoint
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
@@ -157,6 +158,16 @@ def test_context_menu_show_changes_opens_worktree_changes_dialog(
 
     assert opened[0] == (wt_path, dialog._adapter_factory)
     assert opened[1][0] == "exec"
+
+
+def test_context_menu_copy_path_sets_clipboard_to_worktree_path(qapp, tmp_path: Path) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = WorktreesDialog(tmp_path, adapter_factory=lambda p: fake)
+
+    dialog._on_copy_path(_info(wt_path))
+
+    assert QGuiApplication.clipboard().text() == str(wt_path)
 
 
 def test_context_menu_ignores_click_outside_any_row(qapp, tmp_path: Path) -> None:
