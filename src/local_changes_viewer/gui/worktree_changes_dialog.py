@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from local_changes_viewer.core.domain.file_change import FileChange
+from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
 from local_changes_viewer.gui.diff_view.side_by_side_view import SideBySideView
 from local_changes_viewer.gui.diff_view.unified_view import UnifiedView
@@ -87,6 +87,7 @@ class WorktreeChangesDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "Show Changes failed", f"Failed to read changes: {exc}")
             changes = []
+        changes = [c for c in changes if c.change_type != ChangeType.IGNORED]
 
         for change in changes:
             status = "Committed" if change.is_unpushed_commit else "Not committed"

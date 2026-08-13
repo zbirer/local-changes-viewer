@@ -54,6 +54,19 @@ def test_dialog_lists_changes_with_committed_status(qapp, tmp_path: Path) -> Non
     assert "b.py" in dialog._file_list.item(1).text()
 
 
+def test_dialog_filters_out_ignored_files(qapp, tmp_path: Path) -> None:
+    changes = [
+        FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED),
+        FileChange(path=Path(".claude/settings.local.json"), change_type=ChangeType.IGNORED),
+    ]
+    fake = FakeAdapter(tmp_path, changes=changes)
+
+    dialog = WorktreeChangesDialog(tmp_path, adapter_factory=lambda p: fake)
+
+    assert dialog._file_list.count() == 1
+    assert "a.py" in dialog._file_list.item(0).text()
+
+
 def test_dialog_shows_no_files_when_no_changes(qapp, tmp_path: Path) -> None:
     fake = FakeAdapter(tmp_path, changes=[])
 
