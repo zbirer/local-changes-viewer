@@ -5,11 +5,9 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
-    QHBoxLayout,
     QHeaderView,
     QMenu,
     QMessageBox,
-    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -21,7 +19,6 @@ from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
 from local_changes_viewer.gui.worktree_changes_dialog import WorktreeChangesDialog
 
 _COLUMNS = ("Path", "Branch", "Last Commit / Modified", "Unpushed Changes", "Created")
-_DELETE_COLUMN = len(_COLUMNS)
 
 
 class WorktreesDialog(QDialog):
@@ -36,8 +33,8 @@ class WorktreesDialog(QDialog):
         parent_width = parent.width() if parent is not None else 900
         self.resize(int(parent_width * 0.7), 400)
 
-        self._table = QTableWidget(0, len(_COLUMNS) + 1)
-        self._table.setHorizontalHeaderLabels((*_COLUMNS, ""))
+        self._table = QTableWidget(0, len(_COLUMNS))
+        self._table.setHorizontalHeaderLabels(_COLUMNS)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -45,10 +42,10 @@ class WorktreesDialog(QDialog):
         header = self._table.horizontalHeader()
         for column in range(len(_COLUMNS)):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(_DELETE_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
         header.setStretchLastSection(False)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._on_context_menu_requested)
+        self._table.cellDoubleClicked.connect(self._on_cell_double_clicked)
 
         self._row_worktrees: list[WorktreeInfo] = []
 
@@ -79,20 +76,11 @@ class WorktreesDialog(QDialog):
                 item.setToolTip(value)
                 self._table.setItem(row, column, item)
 
-            delete_button = QPushButton("🗑")
-            delete_button.setToolTip(f"Delete worktree at {info.path}")
-            delete_button.clicked.connect(lambda _checked=False, wt=info: self._on_delete(wt))
-            button_container = QWidget()
-            button_layout = QHBoxLayout(button_container)
-            button_layout.setContentsMargins(0, 0, 0, 0)
-            button_layout.addWidget(delete_button)
-            self._table.setCellWidget(row, _DELETE_COLUMN, button_container)
-
         if not details:
             self._table.setRowCount(1)
             placeholder = QTableWidgetItem("No linked worktrees")
             self._table.setItem(0, 0, placeholder)
-            self._table.setSpan(0, 0, 1, len(_COLUMNS) + 1)
+            self._table.setSpan(0, 0, 1, len(_COLUMNS))
 
         self._table.resizeColumnsToContents()
 
@@ -132,6 +120,11 @@ class WorktreesDialog(QDialog):
 
         self.deleted_any = True
         self._reload()
+
+    def _on_cell_double_clicked(self, row: int, _column: int) -> None:
+        if row < 0 or row >= len(self._row_worktrees):
+            return
+        self._on_show_changes(self._row_worktrees[row])
 
     def _on_context_menu_requested(self, position) -> None:
         row = self._table.rowAt(position.y())

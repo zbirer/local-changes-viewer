@@ -160,6 +160,40 @@ def test_context_menu_show_changes_opens_worktree_changes_dialog(
     assert opened[1][0] == "exec"
 
 
+def test_double_click_row_opens_worktree_changes_dialog(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = WorktreesDialog(tmp_path, adapter_factory=lambda p: fake)
+
+    opened: list[tuple[Path, object]] = []
+
+    class FakeChangesDialog:
+        def __init__(self, worktree_path, adapter_factory=None, parent=None):
+            opened.append((worktree_path, adapter_factory))
+
+        def exec(self):
+            opened.append(("exec", None))
+
+    monkeypatch.setattr(
+        "local_changes_viewer.gui.worktrees_dialog.WorktreeChangesDialog", FakeChangesDialog
+    )
+
+    dialog._on_cell_double_clicked(0, 0)
+
+    assert opened[0] == (wt_path, dialog._adapter_factory)
+    assert opened[1][0] == "exec"
+
+
+def test_double_click_ignores_click_outside_any_row(qapp, tmp_path: Path) -> None:
+    fake = FakeAdapter(tmp_path, details=[])
+    dialog = WorktreesDialog(tmp_path, adapter_factory=lambda p: fake)
+
+    # Should not raise even though the placeholder row has no worktree.
+    dialog._on_cell_double_clicked(0, 0)
+
+
 def test_context_menu_copy_path_sets_clipboard_to_worktree_path(qapp, tmp_path: Path) -> None:
     wt_path = tmp_path / "wt" / "feature-x"
     fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
