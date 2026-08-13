@@ -72,6 +72,7 @@ from local_changes_viewer.gui.workers.pull_request_threads_worker import PullReq
 from local_changes_viewer.gui.workers.repo_refresh_worker import RepoRefreshWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
 from local_changes_viewer.gui.workers.watch_paths_worker import WatchPathsWorker
+from local_changes_viewer.gui.worktrees_dialog import WorktreesDialog
 from local_changes_viewer.gui.workspace_watcher import WorkspaceFileWatcher
 from local_changes_viewer.gui.workspace_tree.aggregate_list import AggregateChangeList
 from local_changes_viewer.gui.workspace_tree.tree_model import (
@@ -1397,6 +1398,9 @@ class MainWindow(QMainWindow):
                 menu.addAction(
                     "Show Log", lambda: self._on_show_log(Path(folder_path))
                 )
+                menu.addAction(
+                    "List Worktrees", lambda: self._on_list_worktrees(Path(folder_path))
+                )
             if not index.parent().isValid():
                 repo_name = Path(folder_path).name
                 menu.addSeparator()
@@ -1456,6 +1460,13 @@ class MainWindow(QMainWindow):
         applog.log(f"Show Log: {repo_path}", level=applog.LogLevel.INFO)
         dialog = CommitLogDialog(repo_path, parent=self)
         dialog.exec()
+
+    def _on_list_worktrees(self, repo_path: Path) -> None:
+        applog.log(f"List Worktrees: {repo_path}", level=applog.LogLevel.INFO)
+        dialog = WorktreesDialog(repo_path, parent=self)
+        dialog.exec()
+        if dialog.deleted_any:
+            self._on_refresh()
 
     def _on_refresh_repo(self, repo_path: Path) -> None:
         if repo_path in self._refreshing_repo_paths:

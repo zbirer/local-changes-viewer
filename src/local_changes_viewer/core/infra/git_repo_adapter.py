@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 from pathlib import Path
 
 import git
@@ -7,6 +8,7 @@ from local_changes_viewer.core.domain.commit_log_entry import CommitLogEntry
 from local_changes_viewer.core.domain.diff import DiffHunk, DiffLine, DiffLineKind, DiffResult
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.repository import BranchStatus
+from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
 from local_changes_viewer.core.services import workspace_cache
 
 _BRANCH_LINE_RE = re.compile(
@@ -254,6 +256,102 @@ class GitRepoAdapter:
                 if path.resolve() != self._repo_path.resolve():
                     worktrees.append(path)
         return worktrees
+
+    def list_worktree_details(self) -> list[WorktreeInfo]:
+        details: list[WorktreeInfo] = []
+        for path in self.list_worktrees():
+            if not path.exists():
+                # Stale administrative entry for a worktree removed outside
+                # the app (e.g. `rm -rf` instead of `git worktree remove`) --
+                # nothing on disk left to report on.
+                continue
+            adapter = GitRepoAdapter(path)
+            try:
+                branch_name = adapter.get_branch_status().branch_name
+            except (git.GitCommandError, IndexError):
+                branch_name = ""
+            last_activity: datetime | None = None
+            try:
+                commits = adapter.get_recent_commits(limit=1)
+                if commits:
+                    last_activity = commits[0].committed_datetime
+            except git.GitCommandError:
+                pass
+            try:
+                changes = adapter.list_changes()
+            except git.GitCommandError:
+                changes = []
+            for change in changes:
+                # A dirty working tree can be more recent than the last
+                # commit -- e.g. an uncommitted edit made just now on top of
+                # a week-old commit -- so the reported activity time is
+                # whichever of the two is newer, not the commit time alone.
+                mtime = GitRepoAdapter._get_modification_time(path / change.path)
+                if mtime is not None and (last_activity is None or mtime > last_activity):
+                    last_activity = mtime
+            try:
+                has_unpushed = adapter.has_unpushed_changes()
+            except git.GitCommandError:
+                has_unpushed = False
+            details.append(
+                WorktreeInfo(
+                    path=path,
+                    branch_name=branch_name,
+                    last_activity=last_activity,
+                    has_unpushed_changes=has_unpushed,
+                    created_at=self._get_creation_time(path),
+                )
+            )
+        return details
+
+    def has_unpushed_changes(self) -> bool:
+        if self.list_changes():
+            return True
+
+        upstream = self._get_upstream_ref()
+        if upstream is None:
+            # No upstream configured at all -- any commit here has nowhere
+            # it could have been pushed to, so a repo with at least one
+            # commit counts as unpushed.
+            try:
+                return bool(self._repo.head.commit)
+            except (ValueError, TypeError):
+                return False
+
+        try:
+            output = self._repo.git.rev_list("--count", f"{upstream}..HEAD")
+        except git.GitCommandError:
+            return False
+        return int(output.strip() or "0") > 0
+
+    def remove_worktree(self, path: Path, force: bool = False) -> None:
+        args = ["remove", str(path)]
+        if force:
+            args.append("--force")
+        self._repo.git.worktree(*args)
+
+    @staticmethod
+    def _get_creation_time(path: Path) -> datetime | None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        # st_birthtime (true creation time) is only available on some
+        # platforms (e.g. macOS/BSD); elsewhere this falls back to
+        # st_ctime, which on Linux is metadata-change time, not creation --
+        # the best available approximation there.
+        timestamp = getattr(stat, "st_birthtime", None)
+        if timestamp is None:
+            timestamp = stat.st_ctime
+        return datetime.fromtimestamp(timestamp).astimezone()
+
+    @staticmethod
+    def _get_modification_time(path: Path) -> datetime | None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        return datetime.fromtimestamp(stat.st_mtime).astimezone()
 
     def _find_default_branch(self) -> str | None:
         # Memoized: this is called once per get_branch_status() invocation,

@@ -34,14 +34,14 @@ tests.
 
 ## Categories
 
-- [Workspace Tree & Navigation](#workspace-tree--navigation) — F1–F16
+- [Workspace Tree & Navigation](#workspace-tree--navigation) — F1–F16, F89
 - [Scanning, Refresh & Caching](#scanning-refresh--caching) — F17–F28
 - [Filtering](#filtering) — F29–F36
 - [Profiles](#profiles) — F37–F43
 - [Git Change Detection](#git-change-detection) — F44–F52
 - [GitHub Integration & Pull Requests](#github-integration--pull-requests) — F53–F64
 - [Diff Viewing & Editing](#diff-viewing--editing) — F65–F78, F87
-- [Settings, Persistence & Logging](#settings-persistence--logging) — F79–F86
+- [Settings, Persistence & Logging](#settings-persistence--logging) — F79–F86, F88
 
 ---
 
@@ -516,3 +516,8 @@ TESTS: `tests/gui/test_diff_view.py::test_edit_disabled_with_explaining_tooltip_
 WHAT: A single tabbed dialog, one tab per group -- Scanning / Display / Filters & Profiles / Diagnostics -- shows every user-configurable setting alongside a plain-English explanation and the right control (checkbox, spinbox, dropdown, or button); the tallest tab fits at the dialog's default size with no scrolling. Every control drives the same existing QAction or persist+apply helper the corresponding menu item already uses, so behavior is identical to using the menus; there is no OK/Cancel, changes apply instantly. This belongs to the Settings, Persistence & Logging category (see `## Categories`); it is numbered last because renumbering existing features is not allowed.
 WHERE: `src/local_changes_viewer/gui/settings_dialog.py`
 TESTS: `tests/gui/test_settings_dialog.py::test_dialog_reflects_current_action_states`, `tests/gui/test_settings_dialog.py::test_toggling_ignore_md_checkbox_flips_action_and_refreshes_display`, `tests/gui/test_settings_dialog.py::test_toggling_watch_file_changes_checkbox_flips_action_and_persists_setting`, `tests/gui/test_settings_dialog.py::test_auto_refresh_spinbox_persists_and_applies_interval`, `tests/gui/test_settings_dialog.py::test_tooltip_font_size_spinbox_persists_value`, `tests/gui/test_settings_dialog.py::test_log_level_combo_persists_value`, `tests/gui/test_settings_dialog.py::test_constructing_dialog_does_not_mutate_any_setting`, `tests/gui/test_settings_dialog.py::test_folder_filter_summary_reflects_current_rules`, `tests/gui/test_settings_dialog.py::test_manage_folder_filters_button_refreshes_summary_after_dialog_closes`, `tests/gui/test_settings_dialog.py::test_profiles_summary_reflects_current_profiles_and_active_profile`, `tests/gui/test_settings_dialog.py::test_manage_profiles_button_refreshes_summary_after_dialog_closes`, `tests/gui/test_settings_dialog.py::test_view_menu_has_settings_action_that_opens_dialog`
+
+### F89. Repo-root context menu: "List Worktrees" dialog with per-worktree delete
+WHAT: A repo-root context action opens a dialog table of that repo's linked worktrees, each row showing its path, branch, last commit-or-modification time, whether it has unpushed changes (uncommitted or committed-but-unpushed), a best-effort creation time, and a delete button that removes the worktree from disk (with a force-delete fallback if it has uncommitted/unpushed changes). This belongs to the Workspace Tree & Navigation category (see `## Categories`); it is numbered last because renumbering existing features is not allowed.
+WHERE: `src/local_changes_viewer/gui/worktrees_dialog.py`
+TESTS: `tests/core/infra/test_git_repo_adapter.py::test_list_worktree_details_reports_branch_and_clean_pushed_state`, `tests/core/infra/test_git_repo_adapter.py::test_list_worktree_details_flags_uncommitted_changes_as_unpushed`, `tests/core/infra/test_git_repo_adapter.py::test_list_worktree_details_flags_commits_ahead_of_upstream_as_unpushed`, `tests/core/infra/test_git_repo_adapter.py::test_list_worktree_details_skips_worktree_path_that_no_longer_exists_on_disk`, `tests/core/infra/test_git_repo_adapter.py::test_has_unpushed_changes_false_for_clean_pushed_branch`, `tests/core/infra/test_git_repo_adapter.py::test_has_unpushed_changes_true_with_no_upstream_configured`, `tests/core/infra/test_git_repo_adapter.py::test_remove_worktree_deletes_it_from_worktree_list`, `tests/core/infra/test_git_repo_adapter.py::test_remove_worktree_force_removes_worktree_with_uncommitted_changes`, `tests/gui/test_worktrees_dialog.py::test_dialog_lists_worktrees_with_details`, `tests/gui/test_worktrees_dialog.py::test_dialog_shows_placeholder_when_no_worktrees`, `tests/gui/test_worktrees_dialog.py::test_delete_button_removes_worktree_after_confirmation`, `tests/gui/test_worktrees_dialog.py::test_delete_button_does_nothing_when_confirmation_declined`, `tests/gui/test_worktrees_dialog.py::test_delete_button_offers_force_delete_when_removal_fails`

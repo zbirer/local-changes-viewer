@@ -1,3 +1,4 @@
+import shutil
 import socket
 import threading
 import time
@@ -311,6 +312,98 @@ def test_list_worktrees_returns_linked_worktree_paths(tmp_path: Path, repo: git.
 
 
 def test_list_worktrees_returns_empty_list_when_no_linked_worktrees(tmp_path: Path, repo: git.Repo):
+    assert GitRepoAdapter(tmp_path).list_worktrees() == []
+
+
+def test_list_worktree_details_reports_branch_and_clean_pushed_state(
+    tmp_path: Path,
+):
+    local_path, repo = _init_repo_with_pushed_commit(tmp_path)
+    worktree_path = tmp_path / "wt" / "feature-x"
+    repo.git.worktree("add", str(worktree_path), "-b", "feature-x")
+    wt_repo = git.Repo(worktree_path)
+    wt_repo.git.push("--set-upstream", "origin", "feature-x")
+
+    details = GitRepoAdapter(local_path).list_worktree_details()
+
+    assert len(details) == 1
+    info = details[0]
+    assert info.path == worktree_path
+    assert info.branch_name == "feature-x"
+    assert info.has_unpushed_changes is False
+    assert info.last_activity is not None
+    assert info.created_at is not None
+
+
+def test_list_worktree_details_flags_uncommitted_changes_as_unpushed(tmp_path: Path):
+    local_path, repo = _init_repo_with_pushed_commit(tmp_path)
+    worktree_path = tmp_path / "wt" / "feature-x"
+    repo.git.worktree("add", str(worktree_path), "-b", "feature-x")
+    (worktree_path / "committed.txt").write_text("dirty\n")
+
+    details = GitRepoAdapter(local_path).list_worktree_details()
+
+    assert details[0].has_unpushed_changes is True
+
+
+def test_list_worktree_details_flags_commits_ahead_of_upstream_as_unpushed(tmp_path: Path):
+    local_path, repo = _init_repo_with_pushed_commit(tmp_path)
+    worktree_path = tmp_path / "wt" / "feature-x"
+    repo.git.worktree("add", str(worktree_path), "-b", "feature-x")
+    wt_repo = git.Repo(worktree_path)
+    wt_repo.git.push("--set-upstream", "origin", "feature-x")
+    (worktree_path / "new.txt").write_text("x\n")
+    wt_repo.index.add(["new.txt"])
+    wt_repo.index.commit("local only commit")
+
+    details = GitRepoAdapter(local_path).list_worktree_details()
+
+    assert details[0].has_unpushed_changes is True
+
+
+def test_list_worktree_details_skips_worktree_path_that_no_longer_exists_on_disk(
+    tmp_path: Path,
+):
+    local_path, repo = _init_repo_with_pushed_commit(tmp_path)
+    worktree_path = tmp_path / "wt" / "feature-x"
+    repo.git.worktree("add", str(worktree_path), "-b", "feature-x")
+    shutil.rmtree(worktree_path)
+
+    assert GitRepoAdapter(local_path).list_worktree_details() == []
+
+
+def test_has_unpushed_changes_false_for_clean_pushed_branch(tmp_path: Path):
+    local_path, _ = _init_repo_with_pushed_commit(tmp_path)
+
+    assert GitRepoAdapter(local_path).has_unpushed_changes() is False
+
+
+def test_has_unpushed_changes_true_with_no_upstream_configured(tmp_path: Path, repo: git.Repo):
+    assert GitRepoAdapter(tmp_path).has_unpushed_changes() is True
+
+
+def test_remove_worktree_deletes_it_from_worktree_list(tmp_path: Path, repo: git.Repo):
+    worktree_path = tmp_path / "wt" / "feature-x"
+    repo.git.worktree("add", str(worktree_path), "-b", "feature-x")
+
+    GitRepoAdapter(tmp_path).remove_worktree(worktree_path)
+
+    assert GitRepoAdapter(tmp_path).list_worktrees() == []
+    assert not worktree_path.exists()
+
+
+def test_remove_worktree_force_removes_worktree_with_uncommitted_changes(
+    tmp_path: Path, repo: git.Repo
+):
+    worktree_path = tmp_path / "wt" / "feature-x"
+    repo.git.worktree("add", str(worktree_path), "-b", "feature-x")
+    (worktree_path / "dirty.txt").write_text("uncommitted\n")
+
+    with pytest.raises(git.GitCommandError):
+        GitRepoAdapter(tmp_path).remove_worktree(worktree_path)
+
+    GitRepoAdapter(tmp_path).remove_worktree(worktree_path, force=True)
+
     assert GitRepoAdapter(tmp_path).list_worktrees() == []
 
 
