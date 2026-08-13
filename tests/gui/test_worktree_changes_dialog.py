@@ -67,6 +67,16 @@ def test_dialog_filters_out_ignored_files(qapp, tmp_path: Path) -> None:
     assert "a.py" in dialog._file_list.item(0).text()
 
 
+def test_file_list_item_tooltip_shows_full_text(qapp, tmp_path: Path) -> None:
+    changes = [FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)]
+    fake = FakeAdapter(tmp_path, changes=changes)
+
+    dialog = WorktreeChangesDialog(tmp_path, adapter_factory=lambda p: fake)
+
+    item = dialog._file_list.item(0)
+    assert item.toolTip() == item.text()
+
+
 def test_dialog_shows_no_files_when_no_changes(qapp, tmp_path: Path) -> None:
     fake = FakeAdapter(tmp_path, changes=[])
 

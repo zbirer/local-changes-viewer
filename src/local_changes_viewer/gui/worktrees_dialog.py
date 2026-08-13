@@ -19,6 +19,7 @@ from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
 from local_changes_viewer.gui.worktree_changes_dialog import WorktreeChangesDialog
 
 _COLUMNS = ("Path", "Branch", "Last Commit / Modified", "Unpushed Changes", "Created")
+_WORKTREE_ROLE = Qt.ItemDataRole.UserRole
 
 
 class WorktreesDialog(QDialog):
@@ -43,6 +44,7 @@ class WorktreesDialog(QDialog):
         for column in range(len(_COLUMNS)):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(False)
+        self._table.setSortingEnabled(True)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._on_context_menu_requested)
         self._table.cellDoubleClicked.connect(self._on_cell_double_clicked)
@@ -62,6 +64,7 @@ class WorktreesDialog(QDialog):
             details = []
 
         self._row_worktrees = list(details)
+        self._table.setSortingEnabled(False)
         self._table.setRowCount(len(details))
         for row, info in enumerate(details):
             values = (
@@ -74,6 +77,8 @@ class WorktreesDialog(QDialog):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
+                if column == 0:
+                    item.setData(_WORKTREE_ROLE, info)
                 self._table.setItem(row, column, item)
 
         if not details:
@@ -82,7 +87,14 @@ class WorktreesDialog(QDialog):
             self._table.setItem(0, 0, placeholder)
             self._table.setSpan(0, 0, 1, len(_COLUMNS))
 
+        self._table.setSortingEnabled(True)
         self._table.resizeColumnsToContents()
+
+    def _worktree_at_row(self, row: int) -> WorktreeInfo | None:
+        item = self._table.item(row, 0)
+        if item is None:
+            return None
+        return item.data(_WORKTREE_ROLE)
 
     def _on_delete(self, worktree: WorktreeInfo) -> None:
         confirm = QMessageBox.question(
@@ -122,15 +134,18 @@ class WorktreesDialog(QDialog):
         self._reload()
 
     def _on_cell_double_clicked(self, row: int, _column: int) -> None:
-        if row < 0 or row >= len(self._row_worktrees):
+        worktree = self._worktree_at_row(row)
+        if worktree is None:
             return
-        self._on_show_changes(self._row_worktrees[row])
+        self._on_show_changes(worktree)
 
     def _on_context_menu_requested(self, position) -> None:
         row = self._table.rowAt(position.y())
-        if row < 0 or row >= len(self._row_worktrees):
+        if row < 0:
             return
-        worktree = self._row_worktrees[row]
+        worktree = self._worktree_at_row(row)
+        if worktree is None:
+            return
 
         menu = QMenu(self)
         menu.addAction("Delete", lambda: self._on_delete(worktree))

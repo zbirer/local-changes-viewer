@@ -91,7 +91,9 @@ class WorktreeChangesDialog(QDialog):
 
         for change in changes:
             status = "Committed" if change.is_unpushed_commit else "Not committed"
-            item = QListWidgetItem(f"[{status}] {change.change_type.name.title()}  {change.path}")
+            text = f"[{status}] {change.change_type.name.title()}  {change.path}"
+            item = QListWidgetItem(text)
+            item.setToolTip(text)
             item.setData(_FILE_CHANGE_ROLE, change)
             self._file_list.addItem(item)
 

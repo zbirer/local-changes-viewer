@@ -171,7 +171,9 @@ class CommitLogDialog(QDialog):
             return
 
         for change in changes:
-            item = QListWidgetItem(f"{change.change_type.name.title()}  {change.path}")
+            text = f"{change.change_type.name.title()}  {change.path}"
+            item = QListWidgetItem(text)
+            item.setToolTip(text)
             item.setData(_FILE_CHANGE_ROLE, change)
             self._file_list.addItem(item)
 

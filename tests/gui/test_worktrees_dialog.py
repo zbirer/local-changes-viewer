@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -202,6 +202,36 @@ def test_context_menu_copy_path_sets_clipboard_to_worktree_path(qapp, tmp_path: 
     dialog._on_copy_path(_info(wt_path))
 
     assert QGuiApplication.clipboard().text() == str(wt_path)
+
+
+def test_clicking_header_sorts_table_and_toggles_order_on_repeat_click(
+    qapp, tmp_path: Path
+) -> None:
+    wt_a = tmp_path / "wt" / "a"
+    wt_b = tmp_path / "wt" / "b"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_b), _info(wt_a)])
+
+    dialog = WorktreesDialog(tmp_path, adapter_factory=lambda p: fake)
+
+    assert dialog._table.isSortingEnabled() is True
+
+    dialog._table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+    assert [dialog._table.item(r, 0).text() for r in range(2)] == [str(wt_a), str(wt_b)]
+
+    dialog._table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+    assert [dialog._table.item(r, 0).text() for r in range(2)] == [str(wt_b), str(wt_a)]
+
+
+def test_row_lookup_follows_worktree_after_sorting(qapp, tmp_path: Path) -> None:
+    wt_a = tmp_path / "wt" / "a"
+    wt_b = tmp_path / "wt" / "b"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_b), _info(wt_a)])
+
+    dialog = WorktreesDialog(tmp_path, adapter_factory=lambda p: fake)
+    dialog._table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+
+    assert dialog._worktree_at_row(0).path == wt_a
+    assert dialog._worktree_at_row(1).path == wt_b
 
 
 def test_context_menu_ignores_click_outside_any_row(qapp, tmp_path: Path) -> None:
