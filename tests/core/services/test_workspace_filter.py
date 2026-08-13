@@ -449,3 +449,65 @@ def test_logs_repo_hidden_because_no_changes() -> None:
     filter_workspace(workspace, hide_repos_without_changes=True, on_log=messages.append)
 
     assert any(str(repo.path) in msg and "no changes" in msg for msg in messages)
+
+
+def test_hide_repos_without_changes_never_hides_worktree_with_no_changes() -> None:
+    """Worktrees are navigational structure the user relies on to jump
+    between branches (mirroring what "List Worktrees" already shows
+    unconditionally), so they must always render — clean or dirty — even
+    when the "hide repos without changes" setting is on."""
+    root = Path("/root")
+    parent_repo = Repository(
+        path=root / "dashboard",
+        name="dashboard",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)],
+    )
+    clean_worktree = Repository(
+        path=root / "dashboard" / ".worktrees" / "clean-wt",
+        name="clean-wt",
+        branch_status=_BRANCH,
+        changes=[],
+        logical_parent_path=root / "dashboard",
+    )
+    workspace = Workspace(root_path=root, repositories=[parent_repo, clean_worktree])
+
+    result = filter_workspace(workspace, hide_repos_without_changes=True)
+
+    assert [r.name for r in result.repositories] == ["dashboard", "clean-wt"]
+
+
+def test_hide_repos_without_changes_still_drops_empty_top_level_repo() -> None:
+    """Regression guard for the worktree exemption above: a regular
+    top-level repo (no logical_parent_path) with zero changes must still
+    be dropped exactly as before."""
+    repo_with_changes = _repo(
+        "repo_a", [FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)]
+    )
+    empty_top_level_repo = _repo("repo_b", [])
+    workspace = Workspace(
+        root_path=Path("/root"), repositories=[repo_with_changes, empty_top_level_repo]
+    )
+
+    result = filter_workspace(workspace, hide_repos_without_changes=True)
+
+    assert [r.name for r in result.repositories] == ["repo_a"]
+
+
+def test_no_hidden_log_for_worktree_with_no_changes() -> None:
+    """The "hidden — no changes" log line must not fire for a worktree,
+    since the new exemption means it isn't actually hidden."""
+    root = Path("/root")
+    clean_worktree = Repository(
+        path=root / "dashboard" / ".worktrees" / "clean-wt",
+        name="clean-wt",
+        branch_status=_BRANCH,
+        changes=[],
+        logical_parent_path=root / "dashboard",
+    )
+    workspace = Workspace(root_path=root, repositories=[clean_worktree])
+    messages: list[str] = []
+
+    filter_workspace(workspace, hide_repos_without_changes=True, on_log=messages.append)
+
+    assert messages == []

@@ -227,10 +227,10 @@ WHAT: Toggling this setting removes all Markdown-file changes from the display, 
 WHERE: `src/local_changes_viewer/core/services/workspace_filter.py:90`
 TESTS: `tests/core/services/test_workspace_filter.py::test_ignore_md_files_filters_by_suffix_case_insensitive`
 
-### F35. "Hide repos without changes" hides empty repos, keeping a parent with a changed nested worktree
-WHAT: Repos with zero changes drop out of the tree, unless a nested worktree beneath them still has changes.
-WHERE: `src/local_changes_viewer/core/services/workspace_filter.py:57`
-TESTS: `tests/core/services/test_workspace_filter.py::test_hide_repos_without_changes_drops_empty_repos`, `tests/core/services/test_workspace_filter.py::test_hide_repos_without_changes_after_ignoring_md_files`
+### F35. "Hide repos without changes" hides empty repos, keeping a parent with a changed nested worktree, and never hides worktrees themselves
+WHAT: Regular (non-worktree) repos with zero changes drop out of the tree, unless a nested worktree beneath them still has changes. Worktree/nested repos (identified by `logical_parent_path` being set) are exempt from this rule entirely and always render regardless of the setting or whether they have changes, matching what "List Worktrees" already shows unconditionally -- so the user can always navigate to any worktree, clean or dirty. The "hidden — no changes" debug log line never fires for a worktree, since it isn't actually hidden.
+WHERE: `src/local_changes_viewer/core/services/workspace_filter.py:157`
+TESTS: `tests/core/services/test_workspace_filter.py::test_hide_repos_without_changes_drops_empty_repos`, `tests/core/services/test_workspace_filter.py::test_hide_repos_without_changes_after_ignoring_md_files`, `tests/core/services/test_workspace_filter.py::test_hide_repos_without_changes_never_hides_worktree_with_no_changes`, `tests/core/services/test_workspace_filter.py::test_hide_repos_without_changes_still_drops_empty_top_level_repo`, `tests/core/services/test_workspace_filter.py::test_no_hidden_log_for_worktree_with_no_changes`
 
 ### F36. Last-Commit-Time filter (toolbar slider / Ctrl+D toggle) hides files older than N minutes
 WHAT: Limits the visible changes to files whose mtime is within the last N minutes; a missing file is treated as still-recent.

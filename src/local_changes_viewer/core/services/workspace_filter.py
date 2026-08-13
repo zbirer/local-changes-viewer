@@ -146,9 +146,17 @@ def filter_workspace(
     # A parent repo with no changes of its own is still kept when a nested
     # worktree underneath it has changes, so that worktree isn't orphaned as
     # a top-level item once its parent's row is dropped.
+    #
+    # Worktrees (logical_parent_path set) are exempt from this filter
+    # entirely: they're navigational structure the user relies on to jump
+    # between branches (mirroring what "List Worktrees" already shows
+    # unconditionally), not something to gate behind "has changes". Only
+    # regular top-level repos are subject to the hide-when-empty rule.
     repositories = []
     for r in considered:
-        if _repo_or_descendant_has_changes(r, children_by_parent):
+        if r.logical_parent_path is not None:
+            repositories.append(r)
+        elif _repo_or_descendant_has_changes(r, children_by_parent):
             repositories.append(r)
         else:
             on_log(f"{r.path}: hidden — no changes")
