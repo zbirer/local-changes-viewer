@@ -41,8 +41,10 @@ class WorktreesDialog(QDialog):
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(_PATH_COLUMN, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(_PATH_COLUMN, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(_DELETE_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
+        header.resizeSection(_PATH_COLUMN, 320)
+        header.setStretchLastSection(False)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._table)
