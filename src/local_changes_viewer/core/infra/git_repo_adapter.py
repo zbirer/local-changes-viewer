@@ -96,11 +96,11 @@ class GitRepoAdapter:
         return changes
 
     def _list_unpushed_commit_changes(self) -> list[FileChange]:
-        upstream = self._get_upstream_ref()
-        if upstream is None:
+        base = self._get_unpushed_diff_base()
+        if base is None:
             return []
         try:
-            output = self._repo.git.diff("--no-color", "--name-status", "-M", f"{upstream}...HEAD")
+            output = self._repo.git.diff("--no-color", "--name-status", "-M", f"{base}...HEAD")
         except git.GitCommandError:
             return []
 
@@ -125,17 +125,52 @@ class GitRepoAdapter:
                     change_type=change_type,
                     old_path=old_path,
                     is_unpushed_commit=True,
-                    commit_message=self._get_commit_messages(upstream, path),
+                    commit_message=self._get_commit_messages(base, path),
                 )
             )
         return changes
 
-    def _get_commit_messages(self, upstream: str, path: Path) -> str | None:
+    def _get_commit_messages(self, base: str, path: Path) -> str | None:
         try:
-            output = self._repo.git.log("--format=%s", f"{upstream}..HEAD", "--", str(path))
+            output = self._repo.git.log("--format=%s", f"{base}..HEAD", "--", str(path))
         except git.GitCommandError:
             return None
         return output.strip() or None
+
+    def _get_unpushed_diff_base(self) -> str | None:
+        # The ref to diff HEAD against when reporting "unpushed" commits/files.
+        # A configured upstream is authoritative. Without one (e.g. a local
+        # feature branch that was never pushed), there is nothing to diff
+        # against by definition -- but has_unpushed_changes() still reports
+        # such a branch as unpushed (any commit here "has nowhere it could
+        # have been pushed to"), so file-level listing/diffing falls back to
+        # the repo's default branch to stay consistent with that verdict,
+        # rather than silently showing no files for a branch flagged "Yes".
+        upstream = self._get_upstream_ref()
+        if upstream is not None:
+            return upstream
+        default_branch = self._find_default_branch()
+        if default_branch is None:
+            return None
+        try:
+            current_branch = self._repo.active_branch.name
+        except TypeError:
+            current_branch = None
+        if default_branch == current_branch:
+            # Without a remote, the "default branch" heuristic can fall back
+            # to git's global init.defaultBranch config, which may just name
+            # whatever branch is already checked out here -- diffing a
+            # branch against itself always yields zero, which would wrongly
+            # say "nothing unpushed" for a branch that in fact has nowhere
+            # to be pushed to at all.
+            return None
+        for candidate in (f"origin/{default_branch}", default_branch):
+            try:
+                self._repo.git.rev_parse("--verify", "--quiet", candidate)
+            except git.GitCommandError:
+                continue
+            return candidate
+        return None
 
     def _get_upstream_ref(self) -> str | None:
         try:
@@ -308,18 +343,19 @@ class GitRepoAdapter:
         if self.list_changes():
             return True
 
-        upstream = self._get_upstream_ref()
-        if upstream is None:
-            # No upstream configured at all -- any commit here has nowhere
-            # it could have been pushed to, so a repo with at least one
-            # commit counts as unpushed.
+        base = self._get_unpushed_diff_base()
+        if base is None:
+            # No upstream configured and no default branch to compare
+            # against -- any commit here has nowhere it could have been
+            # pushed to, so a repo with at least one commit counts as
+            # unpushed.
             try:
                 return bool(self._repo.head.commit)
             except (ValueError, TypeError):
                 return False
 
         try:
-            output = self._repo.git.rev_list("--count", f"{upstream}..HEAD")
+            output = self._repo.git.rev_list("--count", f"{base}..HEAD")
         except git.GitCommandError:
             return False
         return int(output.strip() or "0") > 0
@@ -533,9 +569,9 @@ class GitRepoAdapter:
             args.append("--ignore-all-space")
 
         if change.is_unpushed_commit:
-            upstream = self._get_upstream_ref() or "HEAD"
-            args.append(f"{upstream}...HEAD")
-            old_ref, new_ref = upstream, "HEAD"
+            base = self._get_unpushed_diff_base() or "HEAD"
+            args.append(f"{base}...HEAD")
+            old_ref, new_ref = base, "HEAD"
         else:
             args.append("HEAD")
             old_ref, new_ref = "HEAD", "working tree"

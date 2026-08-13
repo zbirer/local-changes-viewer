@@ -382,6 +382,26 @@ def test_has_unpushed_changes_true_with_no_upstream_configured(tmp_path: Path, r
     assert GitRepoAdapter(tmp_path).has_unpushed_changes() is True
 
 
+def test_list_changes_reports_local_only_commits_with_no_upstream_configured(
+    tmp_path: Path, repo: git.Repo
+):
+    repo.git.checkout("-b", "feature-x")
+    (tmp_path / "new.txt").write_text("x\n")
+    repo.index.add(["new.txt"])
+    repo.index.commit("local only commit")
+
+    adapter = GitRepoAdapter(tmp_path)
+    changes = adapter.list_changes(include_unpushed_commits=True)
+
+    assert adapter.has_unpushed_changes() is True
+    matching = [c for c in changes if c.path == Path("new.txt")]
+    assert len(matching) == 1
+    assert matching[0].is_unpushed_commit is True
+
+    diff = adapter.compute_diff(matching[0])
+    assert any(line.text == "x" for hunk in diff.hunks for line in hunk.lines)
+
+
 def test_remove_worktree_deletes_it_from_worktree_list(tmp_path: Path, repo: git.Repo):
     worktree_path = tmp_path / "wt" / "feature-x"
     repo.git.worktree("add", str(worktree_path), "-b", "feature-x")
