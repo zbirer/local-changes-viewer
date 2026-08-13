@@ -174,9 +174,9 @@ WHERE: `src/local_changes_viewer/core/services/workspace_scanner_service.py:348`
 TESTS: `tests/core/services/test_workspace_scanner_service.py::test_scan_skips_repo_that_fails_to_read`, `tests/core/services/test_workspace_scanner_service.py::test_scan_does_not_call_on_repo_ready_for_broken_repo`
 
 ### F25. Scan discovers linked git worktrees as separate repo rows with a logical parent
-WHAT: Worktrees of a discovered repo are scanned and shown as their own tree rows, tracked back to their parent repo.
+WHAT: Worktrees of a discovered repo are scanned and shown as their own tree rows, tracked back to their parent repo, even when the worktree's own directory is excluded by the parent repo's .gitignore -- discovery goes through `git worktree list --porcelain` (GitRepoAdapter.list_worktrees), which never consults gitignore, so an unrelated ignored directory (e.g. node_modules) that isn't a registered worktree still never becomes a repo row.
 WHERE: `src/local_changes_viewer/core/services/workspace_scanner_service.py:270`
-TESTS: `tests/core/services/test_workspace_scanner_service.py::test_scan_includes_linked_worktrees_as_separate_repos`, `tests/core/services/test_workspace_scanner_service.py::test_scan_records_logical_parent_for_sibling_directory_worktree`, `tests/core/services/test_workspace_scanner_service.py::test_scan_skips_repo_when_listing_worktrees_fails`, `tests/core/services/test_workspace_scanner_service.py::test_scan_skips_stale_worktree_paths_that_no_longer_exist`
+TESTS: `tests/core/services/test_workspace_scanner_service.py::test_scan_includes_linked_worktrees_as_separate_repos`, `tests/core/services/test_workspace_scanner_service.py::test_scan_records_logical_parent_for_sibling_directory_worktree`, `tests/core/services/test_workspace_scanner_service.py::test_scan_skips_repo_when_listing_worktrees_fails`, `tests/core/services/test_workspace_scanner_service.py::test_scan_skips_stale_worktree_paths_that_no_longer_exist`, `tests/core/services/test_workspace_scanner_service.py::test_scan_discovers_gitignored_worktree_as_nested_repo_but_not_other_ignored_dirs`
 
 ### F26. "Show ignored files" setting includes git-ignored files in the change list
 WHAT: Toggling this setting shows or hides files git reports as ignored.

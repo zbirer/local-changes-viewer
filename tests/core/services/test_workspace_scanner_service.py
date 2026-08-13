@@ -2,6 +2,7 @@ import re
 import time
 from pathlib import Path
 
+import git
 import pytest
 from git.exc import NoSuchPathError
 
@@ -977,3 +978,40 @@ def test_scan_refetches_pr_immediately_when_branch_changes_within_ttl(
 
     assert len(github_client.calls) == 2
     assert github_client.calls[1] == ("getexpain", "repo_a", "feature-x")
+
+
+def test_scan_discovers_gitignored_worktree_as_nested_repo_but_not_other_ignored_dirs(
+    tmp_path: Path,
+):
+    # Real git end-to-end (no fakes): a worktree directory that the repo's
+    # own .gitignore excludes must still surface as its own nested repo row
+    # (via `git worktree list --porcelain`, which is entirely independent of
+    # gitignore -- see GitRepoAdapter.list_worktrees), while an unrelated
+    # ignored directory that is NOT a worktree (e.g. a vendored
+    # node_modules) must not turn into a repo row just because it's on disk.
+    repo_path = tmp_path / "main_repo"
+    repo_path.mkdir()
+    repo = git.Repo.init(repo_path, initial_branch="main")
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "Test User")
+        cw.set_value("user", "email", "test@example.com")
+    (repo_path / ".gitignore").write_text(
+        "node_modules/\n.claude/worktrees/\n"
+    )
+    (repo_path / "README.md").write_text("hello\n")
+    repo.index.add([".gitignore", "README.md"])
+    repo.index.commit("init")
+
+    (repo_path / "node_modules").mkdir()
+    (repo_path / "node_modules" / "pkg.js").write_text("x\n")
+
+    worktree_path = repo_path / ".claude" / "worktrees" / "feature-x"
+    repo.git.worktree("add", str(worktree_path), "-b", "feature-x")
+
+    service = WorkspaceScannerService()
+    workspace = service.scan(tmp_path)
+
+    repos_by_name = {r.name: r for r in workspace.repositories}
+    assert set(repos_by_name) == {"main_repo", "feature-x"}
+    assert repos_by_name["feature-x"].logical_parent_path == repo_path
+    assert not any("node_modules" in str(r.path) for r in workspace.repositories)
