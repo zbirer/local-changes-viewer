@@ -18,7 +18,6 @@ from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
 
 _COLUMNS = ("Path", "Branch", "Last Commit / Modified", "Unpushed Changes", "Created")
-_PATH_COLUMN = 0
 _DELETE_COLUMN = len(_COLUMNS)
 
 
@@ -41,9 +40,9 @@ class WorktreesDialog(QDialog):
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(_PATH_COLUMN, QHeaderView.ResizeMode.Interactive)
+        for column in range(len(_COLUMNS)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(_DELETE_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
-        header.resizeSection(_PATH_COLUMN, 320)
         header.setStretchLastSection(False)
 
         layout = QVBoxLayout(self)
@@ -86,6 +85,8 @@ class WorktreesDialog(QDialog):
             placeholder = QTableWidgetItem("No linked worktrees")
             self._table.setItem(0, 0, placeholder)
             self._table.setSpan(0, 0, 1, len(_COLUMNS) + 1)
+
+        self._table.resizeColumnsToContents()
 
     def _on_delete(self, worktree: WorktreeInfo) -> None:
         confirm = QMessageBox.question(
