@@ -74,10 +74,10 @@ WHAT: Modified/added/deleted/renamed/untracked/ignored files render in different
 WHERE: `src/local_changes_viewer/gui/workspace_tree/tree_model.py:392`
 TESTS: NONE
 
-### F6. Nested repos/worktrees render as sub-trees, hidden when empty
-WHAT: A worktree or nested repo appears as its own sub-branch inside its parent's tree, but only if it (or a descendant) has changes.
+### F6. Nested repos/worktrees always render as sub-trees, regardless of changes
+WHAT: A worktree or nested repo appears as its own sub-branch inside its parent's tree unconditionally, matching top-level repos and matching WorktreesDialog's listing (which queries `git worktree list` directly) -- including a worktree with zero uncommitted changes. Hiding repos with no changes (nested or top-level) is exclusively the job of the separate, opt-in "Hide repos without changes" setting (F35), applied before the workspace ever reaches the tree.
 WHERE: `src/local_changes_viewer/gui/workspace_tree/tree_model.py:113`
-TESTS: `tests/gui/test_tree_model.py::test_sync_nested_repos_does_not_crash_when_repo_has_both_a_direct_worktree_and_a_filesystem_nested_repo`
+TESTS: `tests/gui/test_tree_model.py::test_sync_nested_repos_does_not_crash_when_repo_has_both_a_direct_worktree_and_a_filesystem_nested_repo`, `tests/gui/test_tree_model.py::test_set_workspace_renders_clean_worktree_as_nested_repo_row`, `tests/gui/test_tree_model.py::test_set_workspace_renders_all_worktrees_when_repo_has_several`
 
 ### F7. Tree survives duplicate repo paths without going empty
 WHAT: If two scan results share a path, the tree still renders exactly one row for it instead of collapsing to nothing.

@@ -117,15 +117,19 @@ class RepoTreeModel(QStandardItemModel):
         nested: list,
         children_by_parent: dict,
     ) -> None:
-        # Filter out nested repos (e.g. worktrees) with no changes anywhere in
-        # their own subtree, so a container folder like ".worktrees" doesn't
-        # show up when none of the worktrees inside it have changes.
-        nested = [
-            child
-            for child in nested
-            if self._repo_has_changes(child, children_by_parent)
-        ]
-
+        # Nested repos (worktrees included) render unconditionally here, the
+        # same way top-level roots do in _sync_level -- WorktreesDialog lists
+        # every worktree straight from `git worktree list` regardless of its
+        # dirty state, and this tree must match that, not silently hide a
+        # clean worktree the user right-clicked to find. Hiding repos with no
+        # changes is exclusively the job of the opt-in, descendant-aware
+        # "Hide repos without changes" setting (F35), applied earlier in
+        # workspace_filter.filter_workspace before a Workspace ever reaches
+        # this model -- filtering it again here unconditionally, independent
+        # of that setting, is exactly the bug this comment replaces: a nested
+        # worktree with no uncommitted changes never appeared in the tree
+        # even with the setting off (its default), even though the same
+        # worktree was correctly listed by WorktreesDialog.
         dir_items: dict[Path, QStandardItem] = {}
         children_by_container: dict[int, tuple[QStandardItem, list]] = {}
         live_dir_keys: set[str] = set()
@@ -175,15 +179,6 @@ class RepoTreeModel(QStandardItemModel):
                     item.removeRow(row)
                 else:
                     RepoTreeModel._prune_stale_dirs(child, live_dir_keys)
-
-    @staticmethod
-    def _repo_has_changes(repo, children_by_parent: dict) -> bool:
-        if repo.changes:
-            return True
-        return any(
-            RepoTreeModel._repo_has_changes(child, children_by_parent)
-            for child in children_by_parent.get(str(repo.path), [])
-        )
 
     @staticmethod
     def _find_child_by_key(parent_item: QStandardItem, key: str) -> QStandardItem | None:

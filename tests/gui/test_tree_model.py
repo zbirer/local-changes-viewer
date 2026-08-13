@@ -3,12 +3,14 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import git
 import pytest
 from PySide6.QtWidgets import QApplication
 
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.repository import BranchStatus, Repository
 from local_changes_viewer.core.domain.workspace import Workspace
+from local_changes_viewer.core.services.workspace_scanner_service import WorkspaceScannerService
 from local_changes_viewer.gui.workspace_tree.tree_model import NODE_KEY_ROLE, RepoTreeModel
 
 _BRANCH = BranchStatus(branch_name="main", ahead=0, behind=0)
@@ -123,3 +125,121 @@ def test_sync_nested_repos_does_not_crash_when_repo_has_both_a_direct_worktree_a
     assert any(
         key is not None and str(key).startswith("nested-dir::") for key in child_keys
     ), "the nested repo's intermediate directory node must survive the sync"
+
+
+def _init_repo(repo_path: Path) -> git.Repo:
+    repo_path.mkdir(parents=True, exist_ok=True)
+    repo = git.Repo.init(repo_path, initial_branch="main")
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "Test User")
+        cw.set_value("user", "email", "test@example.com")
+    (repo_path / "README.md").write_text("hello\n")
+    repo.index.add(["README.md"])
+    repo.index.commit("init")
+    return repo
+
+
+def _all_repo_keys(item) -> set:
+    """Every NODE_KEY_ROLE value under `item` whose node kind is a repo row
+    (recursively), used below to check a worktree surfaced as its own nested
+    repo item rather than merely appearing as a filesystem child under some
+    other row."""
+    from local_changes_viewer.gui.workspace_tree.tree_model import _NODE_KIND_REPO, _NODE_KIND_ROLE
+
+    keys = set()
+    for row in range(item.rowCount()):
+        child = item.child(row)
+        if child.data(_NODE_KIND_ROLE) == _NODE_KIND_REPO:
+            keys.add(child.data(NODE_KEY_ROLE))
+        keys |= _all_repo_keys(child)
+    return keys
+
+
+def test_set_workspace_renders_clean_worktree_as_nested_repo_row(qapp, tmp_path: Path) -> None:
+    """Regression test for a real-world bug report: a git worktree nested
+    inside its parent repo's own directory tree (e.g. `.claude/worktrees/x`,
+    the exact shape `git worktree add` produces for an in-tree worktree) that
+    currently has NO uncommitted changes must still render as its own nested
+    repo row in the tree -- the same way `WorktreesDialog` (which queries `git
+    worktree list` directly) always lists it regardless of its dirty state.
+
+    This goes through the REAL WorkspaceScannerService.scan() (no fakes/mocks)
+    against a REAL git repo + real `git worktree add`, then feeds the
+    resulting Workspace into a REAL RepoTreeModel, because the previous
+    regression test for this class of bug
+    (test_scan_discovers_gitignored_worktree_as_nested_repo_but_not_other_ignored_dirs
+    in test_workspace_scanner_service.py) only asserted on the scanner's
+    Workspace.repositories list -- it never checked that RepoTreeModel
+    actually renders the worktree as a nested tree row, which is where the
+    real bug lived: _sync_nested_repos unconditionally dropped any nested
+    repo (worktree or not) with no changes anywhere in its own subtree,
+    regardless of the separate, user-facing "Hide repos without changes"
+    setting (see F35) which already implements this correctly and is off by
+    default.
+    """
+    repo_path = tmp_path / "dashboard"
+    repo = _init_repo(repo_path)
+
+    worktree_path = repo_path / ".claude" / "worktrees" / "vibrant-sinoussi-809799"
+    repo.git.worktree("add", str(worktree_path), "-b", "vibrant-sinoussi-809799")
+    # Deliberately leave the worktree clean (no edits) -- this is the exact
+    # shape that was hidden by the bug.
+
+    workspace = WorkspaceScannerService().scan(tmp_path)
+
+    model = RepoTreeModel()
+    model.set_workspace(workspace)
+
+    root = model.invisibleRootItem()
+    assert root.rowCount() == 1, "the parent repo should be the only top-level row"
+    parent_item = root.child(0)
+    assert parent_item.data(NODE_KEY_ROLE) == str(repo_path)
+
+    assert str(worktree_path) in _all_repo_keys(parent_item), (
+        "a clean (no-changes) nested worktree must still render as its own "
+        "nested repo row, matching WorktreesDialog's listing"
+    )
+
+
+def test_set_workspace_renders_all_worktrees_when_repo_has_several(
+    qapp, tmp_path: Path
+) -> None:
+    """The real dashboard repo behind the bug report has several linked
+    worktrees at once (some with changes, some clean). Reproduces that exact
+    shape: a repo with two nested worktrees under `.claude/worktrees/`, one
+    dirty and one clean, plus a third nested under the older `.worktrees/`
+    layout -- all three must render as nested repo rows regardless of which
+    ones have changes.
+    """
+    repo_path = tmp_path / "dashboard"
+    repo = _init_repo(repo_path)
+
+    dirty_worktree = repo_path / ".claude" / "worktrees" / "bugbot-silent-wrong-answer"
+    repo.git.worktree("add", str(dirty_worktree), "-b", "bugbot-silent-wrong-answer")
+    (dirty_worktree / "scratch.txt").write_text("wip\n")
+
+    clean_worktree = repo_path / ".claude" / "worktrees" / "vibrant-sinoussi-809799"
+    repo.git.worktree("add", str(clean_worktree), "-b", "vibrant-sinoussi-809799")
+
+    legacy_worktree = repo_path / ".worktrees" / "legacy-feature"
+    repo.git.worktree("add", str(legacy_worktree), "-b", "legacy-feature")
+
+    workspace = WorkspaceScannerService().scan(tmp_path)
+    assert {r.name for r in workspace.repositories} == {
+        "dashboard",
+        "bugbot-silent-wrong-answer",
+        "vibrant-sinoussi-809799",
+        "legacy-feature",
+    }
+
+    model = RepoTreeModel()
+    model.set_workspace(workspace)
+
+    root = model.invisibleRootItem()
+    assert root.rowCount() == 1
+    parent_item = root.child(0)
+    repo_keys = _all_repo_keys(parent_item)
+
+    assert str(dirty_worktree) in repo_keys
+    assert str(clean_worktree) in repo_keys
+    assert str(legacy_worktree) in repo_keys
