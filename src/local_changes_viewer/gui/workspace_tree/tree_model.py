@@ -23,6 +23,8 @@ FILE_CHANGE_ROLE = Qt.ItemDataRole.UserRole + 2
 REPO_PATH_ROLE = Qt.ItemDataRole.UserRole + 3
 _CHANGE_SIGNATURE_ROLE = Qt.ItemDataRole.UserRole + 4
 FOLDER_PATH_ROLE = Qt.ItemDataRole.UserRole + 5
+_NODE_KIND_ROLE = Qt.ItemDataRole.UserRole + 6
+_NODE_KIND_REPO = "repo"
 
 _REFRESH_HIGHLIGHT_COLOR = QColor("#FEF3C7")
 _REFRESH_HIGHLIGHT_TEXT_COLOR = QColor("#1F2937")
@@ -57,9 +59,23 @@ class RepoTreeModel(QStandardItemModel):
         repos: list,
         children_by_parent: dict,
     ) -> None:
+        # A container passed here may be a repo_item that ALSO holds unrelated
+        # children -- its own change/dir rows (added by _add_changes) and, for
+        # a directly-nested repo (e.g. a git worktree discovered via a logical
+        # parent, which has no filesystem-relative intermediate directory),
+        # sibling "nested-dir::" container items built by _sync_nested_repos
+        # for OTHER nested repos. Those rows are keyed too, but with formats
+        # that never match a repo path, so without this kind filter every one
+        # of them looked "stale" here and got removeRow'd out from under a
+        # reference already captured (and about to be recursed into) by
+        # _sync_nested_repos -- the exact crash in this file's history:
+        # RuntimeError: libshiboken: Internal C++ object (QStandardItem)
+        # already deleted, raised from the next level's _sync_level call.
         existing_by_key: dict[str, QStandardItem] = {}
         for row in range(container_item.rowCount()):
             item = container_item.child(row)
+            if item.data(_NODE_KIND_ROLE) != _NODE_KIND_REPO:
+                continue
             key = item.data(NODE_KEY_ROLE)
             if key is not None:
                 existing_by_key[key] = item
@@ -67,6 +83,8 @@ class RepoTreeModel(QStandardItemModel):
         new_keys = {str(repo.path) for repo in repos}
         for row in reversed(range(container_item.rowCount())):
             item = container_item.child(row)
+            if item.data(_NODE_KIND_ROLE) != _NODE_KIND_REPO:
+                continue
             key = item.data(NODE_KEY_ROLE)
             if key is not None and key not in new_keys:
                 container_item.removeRow(row)
@@ -278,6 +296,7 @@ class RepoTreeModel(QStandardItemModel):
         repo_item = QStandardItem("")
         repo_item.setEditable(False)
         repo_item.setData(str(repo.path), NODE_KEY_ROLE)
+        repo_item.setData(_NODE_KIND_REPO, _NODE_KIND_ROLE)
         repo_item.setData(str(repo.path), FOLDER_PATH_ROLE)
         repo_item.setData(self._change_signature(repo), _CHANGE_SIGNATURE_ROLE)
         repo_item.setBackground(QBrush(_REPO_BG_COLOR))

@@ -55,3 +55,71 @@ def test_partition_deduplicates_repositories_sharing_a_path(qapp) -> None:
     root = model.invisibleRootItem()
     assert root.rowCount() == 1
     assert root.child(0).data(NODE_KEY_ROLE) == str(repo_path)
+
+
+def test_sync_nested_repos_does_not_crash_when_repo_has_both_a_direct_worktree_and_a_filesystem_nested_repo(
+    qapp,
+) -> None:
+    """Regression test for a RuntimeError crash ("libshiboken: Internal C++
+    object (PySide6.QtGui.QStandardItem) already deleted") when a repo has two
+    kinds of nested children at once: a git worktree discovered via
+    logical_parent_path (which lives in a sibling directory, so it becomes a
+    DIRECT child of the repo_item with no intermediate directory node) and a
+    second nested repo that lives at a filesystem subpath (which gets an
+    intermediate "nested-dir::" container item appended as a sibling under the
+    same repo_item).
+
+    _sync_nested_repos processes each nested child's container via
+    _sync_level. When it processed the worktree's container (the repo_item
+    itself), _sync_level's stale-row removal treated the *other* child's
+    "nested-dir::" container item -- a sibling row on the same repo_item, keyed
+    with a format that never matches a repo path -- as a stale repo row and
+    removed it. _sync_nested_repos then tried to recurse into that
+    already-deleted container for the filesystem-nested repo, crashing with
+    the RuntimeError above. This exercises that exact shape in one
+    update_workspace call, without needing to trigger a real Qt deletion
+    outside the model.
+    """
+    repo_path = Path("/repos/parent-repo")
+    worktree_path = Path("/repos/parent-repo-worktree-feature")
+    nested_repo_path = repo_path / "vendor" / "nested-repo"
+
+    parent_repo = Repository(
+        path=repo_path,
+        name="parent-repo",
+        branch_status=_BRANCH,
+    )
+    worktree_repo = Repository(
+        path=worktree_path,
+        name="parent-repo-worktree-feature",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("b.txt"), change_type=ChangeType.MODIFIED)],
+        logical_parent_path=repo_path,
+    )
+    nested_repo = Repository(
+        path=nested_repo_path,
+        name="nested-repo",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("c.txt"), change_type=ChangeType.MODIFIED)],
+    )
+    workspace = Workspace(
+        root_path=Path("/repos"),
+        repositories=[parent_repo, worktree_repo, nested_repo],
+    )
+
+    model = RepoTreeModel()
+    # This must not raise RuntimeError.
+    model.update_workspace(workspace)
+
+    root = model.invisibleRootItem()
+    assert root.rowCount() == 1
+    parent_item = root.child(0)
+    assert parent_item.data(NODE_KEY_ROLE) == str(repo_path)
+
+    child_keys = {
+        parent_item.child(row).data(NODE_KEY_ROLE) for row in range(parent_item.rowCount())
+    }
+    assert str(worktree_path) in child_keys
+    assert any(
+        key is not None and str(key).startswith("nested-dir::") for key in child_keys
+    ), "the nested repo's intermediate directory node must survive the sync"

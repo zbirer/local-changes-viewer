@@ -76,8 +76,8 @@ TESTS: NONE
 
 ### F6. Nested repos/worktrees render as sub-trees, hidden when empty
 WHAT: A worktree or nested repo appears as its own sub-branch inside its parent's tree, but only if it (or a descendant) has changes.
-WHERE: `src/local_changes_viewer/gui/workspace_tree/tree_model.py:95`
-TESTS: NONE
+WHERE: `src/local_changes_viewer/gui/workspace_tree/tree_model.py:113`
+TESTS: `tests/gui/test_tree_model.py::test_sync_nested_repos_does_not_crash_when_repo_has_both_a_direct_worktree_and_a_filesystem_nested_repo`
 
 ### F7. Tree survives duplicate repo paths without going empty
 WHAT: If two scan results share a path, the tree still renders exactly one row for it instead of collapsing to nothing.
