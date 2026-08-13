@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
@@ -120,3 +121,48 @@ def test_delete_button_offers_force_delete_when_removal_fails(
 
     assert fake.removed == [(wt_path, True)]
     assert dialog.deleted_any is True
+
+
+def test_reload_tracks_worktree_for_each_row(qapp, tmp_path: Path) -> None:
+    wt_a = tmp_path / "wt" / "a"
+    wt_b = tmp_path / "wt" / "b"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_a), _info(wt_b)])
+
+    dialog = WorktreesDialog(tmp_path, adapter_factory=lambda p: fake)
+
+    assert [wt.path for wt in dialog._row_worktrees] == [wt_a, wt_b]
+
+
+def test_context_menu_show_changes_opens_worktree_changes_dialog(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = WorktreesDialog(tmp_path, adapter_factory=lambda p: fake)
+
+    opened: list[tuple[Path, object]] = []
+
+    class FakeChangesDialog:
+        def __init__(self, worktree_path, adapter_factory=None, parent=None):
+            opened.append((worktree_path, adapter_factory))
+
+        def exec(self):
+            opened.append(("exec", None))
+
+    monkeypatch.setattr(
+        "local_changes_viewer.gui.worktrees_dialog.WorktreeChangesDialog", FakeChangesDialog
+    )
+
+    dialog._on_show_changes(_info(wt_path))
+
+    assert opened[0] == (wt_path, dialog._adapter_factory)
+    assert opened[1][0] == "exec"
+
+
+def test_context_menu_ignores_click_outside_any_row(qapp, tmp_path: Path) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = WorktreesDialog(tmp_path, adapter_factory=lambda p: fake)
+
+    # Should not raise even though no row exists at this position.
+    dialog._on_context_menu_requested(QPoint(0, 10_000))

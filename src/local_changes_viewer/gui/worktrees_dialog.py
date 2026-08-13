@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QHeaderView,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
+from local_changes_viewer.gui.worktree_changes_dialog import WorktreeChangesDialog
 
 _COLUMNS = ("Path", "Branch", "Last Commit / Modified", "Unpushed Changes", "Created")
 _DELETE_COLUMN = len(_COLUMNS)
@@ -44,6 +46,10 @@ class WorktreesDialog(QDialog):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(_DELETE_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
         header.setStretchLastSection(False)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_context_menu_requested)
+
+        self._row_worktrees: list[WorktreeInfo] = []
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._table)
@@ -57,6 +63,7 @@ class WorktreesDialog(QDialog):
             QMessageBox.warning(self, "List Worktrees failed", f"Failed to list worktrees: {exc}")
             details = []
 
+        self._row_worktrees = list(details)
         self._table.setRowCount(len(details))
         for row, info in enumerate(details):
             values = (
@@ -124,3 +131,20 @@ class WorktreesDialog(QDialog):
 
         self.deleted_any = True
         self._reload()
+
+    def _on_context_menu_requested(self, position) -> None:
+        row = self._table.rowAt(position.y())
+        if row < 0 or row >= len(self._row_worktrees):
+            return
+        worktree = self._row_worktrees[row]
+
+        menu = QMenu(self)
+        menu.addAction("Delete", lambda: self._on_delete(worktree))
+        menu.addAction("Show Changes", lambda: self._on_show_changes(worktree))
+        menu.exec(self._table.viewport().mapToGlobal(position))
+
+    def _on_show_changes(self, worktree: WorktreeInfo) -> None:
+        dialog = WorktreeChangesDialog(
+            worktree.path, adapter_factory=self._adapter_factory, parent=self
+        )
+        dialog.exec()
