@@ -139,6 +139,22 @@ def _init_repo(repo_path: Path) -> git.Repo:
     return repo
 
 
+def _find_repo_item_by_key(item, key: str):
+    """Recursively locate the repo-kind QStandardItem whose NODE_KEY_ROLE is
+    `key`, so a test can inspect its displayed text() (e.g. for the
+    "[external] " prefix) without depending on tree depth/shape."""
+    from local_changes_viewer.gui.workspace_tree.tree_model import _NODE_KIND_REPO, _NODE_KIND_ROLE
+
+    for row in range(item.rowCount()):
+        child = item.child(row)
+        if child.data(_NODE_KIND_ROLE) == _NODE_KIND_REPO and child.data(NODE_KEY_ROLE) == key:
+            return child
+        found = _find_repo_item_by_key(child, key)
+        if found is not None:
+            return found
+    return None
+
+
 def _all_repo_keys(item) -> set:
     """Every NODE_KEY_ROLE value under `item` whose node kind is a repo row
     (recursively), used below to check a worktree surfaced as its own nested
@@ -243,3 +259,66 @@ def test_set_workspace_renders_all_worktrees_when_repo_has_several(
     assert str(dirty_worktree) in repo_keys
     assert str(clean_worktree) in repo_keys
     assert str(legacy_worktree) in repo_keys
+
+
+def test_set_workspace_renders_internal_worktree_name_without_external_prefix(
+    qapp, tmp_path: Path
+) -> None:
+    """A worktree added inside its parent repo's own directory tree (e.g.
+    `.claude/worktrees/name`, matching `dashboard`'s real `vibrant-sinoussi-809799`
+    worktree) lives on disk *inside* its parent, so it must render with its
+    plain name -- no `[external] ` prefix -- in the tree label.
+    """
+    repo_path = tmp_path / "dashboard"
+    repo = _init_repo(repo_path)
+
+    internal_worktree = repo_path / ".claude" / "worktrees" / "vibrant-sinoussi-809799"
+    repo.git.worktree("add", str(internal_worktree), "-b", "vibrant-sinoussi-809799")
+
+    workspace = WorkspaceScannerService().scan(tmp_path)
+
+    model = RepoTreeModel()
+    model.set_workspace(workspace)
+
+    root = model.invisibleRootItem()
+    parent_item = root.child(0)
+    worktree_item = _find_repo_item_by_key(parent_item, str(internal_worktree))
+    assert worktree_item is not None
+    assert worktree_item.text().startswith("vibrant-sinoussi-809799")
+    assert "[external]" not in worktree_item.text()
+
+
+def test_set_workspace_renders_external_worktree_name_with_external_prefix(
+    qapp, tmp_path: Path
+) -> None:
+    """A worktree added OUTSIDE its parent repo's own directory tree (e.g.
+    a sibling directory, matching `dashboard`'s real
+    `~/dev/.worktrees/dashboard-eh-12404` worktree) is physically external to
+    its parent even though it's still logically nested under it in the tree,
+    so its label must be prefixed with `[external] ` to distinguish it from
+    an in-tree worktree.
+    """
+    workspace_root = tmp_path / "workspace"
+    repo_path = workspace_root / "dashboard"
+    repo = _init_repo(repo_path)
+
+    # Sibling of `workspace_root`/`repo_path`, entirely outside the parent
+    # repo's own directory -- the exact shape of the real external worktrees
+    # (`~/dev/.worktrees/dashboard-eh-12404`, `~/dev/worktrees/dashboard-eh-12404`).
+    external_worktree = tmp_path / "external-worktrees" / "dashboard-bugbot-security-rules"
+    repo.git.worktree(
+        "add", str(external_worktree), "-b", "dashboard-bugbot-security-rules"
+    )
+
+    workspace = WorkspaceScannerService().scan(workspace_root)
+
+    model = RepoTreeModel()
+    model.set_workspace(workspace)
+
+    root = model.invisibleRootItem()
+    parent_item = root.child(0)
+    assert parent_item.data(NODE_KEY_ROLE) == str(repo_path)
+
+    worktree_item = _find_repo_item_by_key(parent_item, str(external_worktree))
+    assert worktree_item is not None
+    assert worktree_item.text().startswith("[external] dashboard-bugbot-security-rules")

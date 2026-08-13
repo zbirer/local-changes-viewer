@@ -302,8 +302,11 @@ class RepoTreeModel(QStandardItemModel):
     @staticmethod
     def _update_repo_item(repo_item: QStandardItem, repo) -> None:
         branch = repo.branch_status
+        display_name = repo.name
+        if RepoTreeModel._is_external_worktree(repo):
+            display_name = f"[external] {display_name}"
         label = (
-            f"{repo.name}  [{branch.branch_name}, +{branch.ahead}/-{branch.behind}]"
+            f"{display_name}  [{branch.branch_name}, +{branch.ahead}/-{branch.behind}]"
             f"  ({len(repo.changes)})"
         )
         if repo.pull_request is not None:
@@ -311,6 +314,22 @@ class RepoTreeModel(QStandardItemModel):
         if repo_item.text() != label:
             repo_item.setText(label)
         repo_item.setToolTip(RepoTreeModel._repo_tooltip(repo))
+
+    @staticmethod
+    def _is_external_worktree(repo) -> bool:
+        # A nested repo is a worktree when logical_parent_path is set (F6). It
+        # is "external" when its own directory lives outside its parent's
+        # directory tree entirely -- a sibling or elsewhere on disk (e.g.
+        # ~/dev/.worktrees/dashboard-eh-12404 next to ~/dev/dashboard) rather
+        # than nested inside it (e.g. dashboard/.claude/worktrees/x, which
+        # renders unprefixed). Cosmetic only: callers must apply this to the
+        # *displayed* label alone, never to repo.name/NODE_KEY_ROLE/
+        # REPO_PATH_ROLE, which stay on the real path for tree identity,
+        # collapse-state tracking, and path-based lookups.
+        parent = getattr(repo, "logical_parent_path", None)
+        if parent is None:
+            return False
+        return not repo.path.is_relative_to(parent)
 
     @staticmethod
     def _change_signature(repo) -> tuple:
