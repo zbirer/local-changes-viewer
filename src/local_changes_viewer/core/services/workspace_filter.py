@@ -79,6 +79,7 @@ def filter_workspace(
     *,
     ignore_md_files: bool = False,
     hide_repos_without_changes: bool = False,
+    hide_changeless_worktrees: bool = False,
     folder_filter_rules: list[FolderFilterRule] | None = None,
     max_age_minutes: int = 0,
     profile: Profile | None = None,
@@ -133,7 +134,7 @@ def filter_workspace(
         # Repository can't be silently dropped here the way pull_request was.
         considered.append(replace(repo, changes=changes))
 
-    if not hide_repos_without_changes:
+    if not hide_repos_without_changes and not hide_changeless_worktrees:
         return Workspace(root_path=workspace.root_path, repositories=considered)
 
     by_path = {str(r.path): r for r in considered}
@@ -143,21 +144,33 @@ def filter_workspace(
         if parent is not None and str(parent) in by_path:
             children_by_parent.setdefault(str(parent), []).append(r)
 
-    # A parent repo with no changes of its own is still kept when a nested
-    # worktree underneath it has changes, so that worktree isn't orphaned as
-    # a top-level item once its parent's row is dropped.
-    #
-    # Worktrees (logical_parent_path set) are exempt from this filter
-    # entirely: they're navigational structure the user relies on to jump
-    # between branches (mirroring what "List Worktrees" already shows
-    # unconditionally), not something to gate behind "has changes". Only
-    # regular top-level repos are subject to the hide-when-empty rule.
+    # Two independent, off-by-default switches share this loop, deliberately
+    # kept as two separate booleans rather than one combined flag: worktrees
+    # are navigational structure the user relies on to jump between branches
+    # (mirroring what "List Worktrees" already shows unconditionally), so
+    # "Hide repos without changes" (hide_repos_without_changes) exempts them
+    # entirely -- see F35. But that exemption means a workspace with many
+    # long-lived, mostly-clean worktrees has no way to declutter *them*
+    # specifically, hence "Hide empty worktrees" (hide_changeless_worktrees,
+    # F95) as its own opt-in control, so a user can hide clean worktrees
+    # without also hiding clean regular repos, or vice versa. A parent repo
+    # with no changes of its own is still kept when a nested worktree
+    # beneath it has changes, so that worktree isn't orphaned as a
+    # top-level item once its parent's row is dropped.
     repositories = []
     for r in considered:
         if r.logical_parent_path is not None:
+            if hide_changeless_worktrees and not _repo_or_descendant_has_changes(
+                r, children_by_parent
+            ):
+                on_log(f"{r.path}: hidden — worktree has no changes")
+                continue
             repositories.append(r)
-        elif _repo_or_descendant_has_changes(r, children_by_parent):
-            repositories.append(r)
+        elif hide_repos_without_changes:
+            if _repo_or_descendant_has_changes(r, children_by_parent):
+                repositories.append(r)
+            else:
+                on_log(f"{r.path}: hidden — no changes")
         else:
-            on_log(f"{r.path}: hidden — no changes")
+            repositories.append(r)
     return Workspace(root_path=workspace.root_path, repositories=repositories)

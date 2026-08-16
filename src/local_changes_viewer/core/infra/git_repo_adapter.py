@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -11,6 +12,7 @@ from local_changes_viewer.core.domain.commit_log_entry import CommitLogEntry
 from local_changes_viewer.core.domain.diff import DiffHunk, DiffLine, DiffLineKind, DiffResult
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.repository import BranchStatus
+from local_changes_viewer.core.domain.stash_entry import StashEntry
 from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
 from local_changes_viewer.core.services import workspace_cache
 
@@ -26,6 +28,14 @@ _NO_COMMITS_LINE_RE = re.compile(r"^## No commits yet on (?P<branch>\S+)$")
 _AHEAD_BEHIND_RE = re.compile(r"(ahead|behind) (\d+)")
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _INDEX_LINE_RE = re.compile(r"^index (\w+)\.\.(\w+)")
+# `stash list`/`stash show`/`stash apply`/`stash pop` all take a ref of this
+# exact shape ("stash@{0}", "stash@{12}", ...) -- every ref this adapter ever
+# passes to git comes straight out of parsing `git stash list`'s own output
+# (see list_stashes), so this is a belt-and-suspenders check, not a real
+# parser: it exists purely so a caller passing an arbitrary/malformed string
+# (e.g. from a corrupted parse, or a caller that skipped list_stashes
+# entirely) can never turn into an arbitrary git argument.
+_STASH_REF_RE = re.compile(r"^stash@\{\d+\}$")
 
 _STATUS_CODE_TO_CHANGE_TYPE = {
     "??": ChangeType.UNTRACKED,
@@ -292,7 +302,7 @@ class GitRepoAdapter:
             args.append(str(old_path))
         args.append(str(file_path))
         raw = self._repo.git.show(*args)
-        return self._parse_unified_diff(
+        return self.parse_unified_diff(
             raw, old_ref=f"{commit_hexsha[:8]}~1", new_ref=commit_hexsha[:8]
         )
 
@@ -389,6 +399,65 @@ class GitRepoAdapter:
         if force:
             args.append("--force")
         self._repo.git.worktree(*args)
+
+    def list_stashes(self) -> list[StashEntry]:
+        """Lists this repo's stash entries, newest first (git's own natural
+        order for `git stash list`).
+
+        Uses an explicit NUL-separated `--pretty=format:` rather than the
+        default one-line-per-entry text: a stash message routinely contains
+        `:` (git's own default "On <branch>: <msg>" prefix) and can contain
+        `|` or anything else the user typed, so any human-readable delimiter
+        risks corrupting the split -- NUL is the one byte that can never
+        appear in any of these fields (ref, subject, ISO date, author name).
+        """
+        try:
+            output = self._repo.git.stash(
+                "list", "--pretty=format:%gd%x00%gs%x00%aI%x00%an"
+            )
+        except git.GitCommandError:
+            return []
+
+        entries: list[StashEntry] = []
+        for line in output.splitlines():
+            if not line:
+                continue
+            ref, message, date_str, author = line.split("\x00")
+            created_at = datetime.fromisoformat(date_str) if date_str else None
+            entries.append(
+                StashEntry(ref=ref, message=message, created_at=created_at, author=author)
+            )
+        return entries
+
+    def stash_diff(self, ref: str) -> str:
+        self._validate_stash_ref(ref)
+        try:
+            return self._repo.git.stash(
+                "show", "--patch", "--no-color", "--include-untracked", ref
+            )
+        except git.GitCommandError:
+            # Older git builds don't support --include-untracked on `stash
+            # show` -- fall back to the plain (tracked-only) diff rather
+            # than surfacing that flag's own error to the user.
+            return self._repo.git.stash("show", "--patch", "--no-color", ref)
+
+    def apply_stash(self, ref: str) -> None:
+        self._validate_stash_ref(ref)
+        self._repo.git.stash("apply", ref)
+
+    def pop_stash(self, ref: str) -> None:
+        self._validate_stash_ref(ref)
+        self._repo.git.stash("pop", ref)
+
+    @staticmethod
+    def _validate_stash_ref(ref: str) -> None:
+        # Every ref this adapter is asked to act on comes from parsing this
+        # adapter's own `list_stashes()` output -- this guards against a
+        # malformed/hostile ref (e.g. "; rm -rf /") ever reaching git as an
+        # argument, by rejecting anything that isn't exactly "stash@{N}"
+        # before it's passed along.
+        if not _STASH_REF_RE.match(ref):
+            raise ValueError(f"Invalid stash ref: {ref!r}")
 
     @staticmethod
     def _get_creation_time(path: Path) -> datetime | None:
@@ -636,7 +705,7 @@ class GitRepoAdapter:
         args.append(str(change.path))
 
         raw = self._repo.git.diff(*args)
-        return self._parse_unified_diff(raw, old_ref=old_ref, new_ref=new_ref)
+        return self.parse_unified_diff(raw, old_ref=old_ref, new_ref=new_ref)
 
     def _diff_untracked(self, change: FileChange) -> DiffResult:
         """Renders an untracked path's content as an all-ADDED "diff".
@@ -732,7 +801,7 @@ class GitRepoAdapter:
         return DiffResult(old_ref="(none)", new_ref="working tree", hunks=hunks)
 
     @staticmethod
-    def _parse_unified_diff(raw: str, old_ref: str, new_ref: str) -> DiffResult:
+    def parse_unified_diff(raw: str, old_ref: str, new_ref: str) -> DiffResult:
         hunks: list[DiffHunk] = []
         current_hunk: DiffHunk | None = None
         old_lineno = new_lineno = 0
@@ -801,10 +870,13 @@ class GitRepoAdapter:
             return ChangeType.DELETED
         return ChangeType.MODIFIED
 
-    def build_patch(self, relpath: Path, untracked_paths: list[Path]) -> str:
-        """Builds a raw, `git apply`-able unified diff for `relpath` (a file or a
-        directory in this repo), covering both tracked changes and the untracked
-        files named in `untracked_paths`.
+    def build_patch(self, tracked_paths: list[Path], untracked_paths: list[Path]) -> str:
+        """Builds a raw, `git apply`-able unified diff covering exactly the tracked
+        files named in `tracked_paths` and the untracked files named in
+        `untracked_paths` -- an explicit selection (e.g. the "Create patch" dialog's
+        checked rows) rather than "everything under some target path", so a caller
+        can hand it a narrowed-down subset without this method re-deriving scope
+        from a directory itself.
 
         Built straight from git rather than from `DiffResult`/`diff_formatting.py`:
         those exist to *render* a diff (parsed hunks, `--unified=100000` full-file
@@ -814,14 +886,19 @@ class GitRepoAdapter:
         through `git apply` needs git's own patch text, not a re-render of data that
         was shaped for the viewer.
 
-        Tracked changes come from a single `git diff HEAD -- <relpath>`, so both
-        staged and unstaged edits land in one patch. Untracked files aren't in git's
-        index at all, so they can't go through that same diff — each is generated
-        separately via `git diff --no-index -- /dev/null <file>`, which is also how
-        `git apply` learns to create a brand-new file rather than patch one that
-        doesn't exist yet.
+        Tracked changes come from a single `git diff HEAD -- <path> <path> ...`
+        (one pathspec per selected tracked file), so both staged and unstaged edits
+        land in one patch and only the named files are covered. Untracked files
+        aren't in git's index at all, so they can't go through that same diff —
+        each is generated separately via `git diff --no-index -- /dev/null <file>`,
+        which is also how `git apply` learns to create a brand-new file rather than
+        patch one that doesn't exist yet.
         """
-        tracked = self._repo.git.diff("--no-color", "HEAD", "--", str(relpath))
+        tracked = ""
+        if tracked_paths:
+            tracked = self._repo.git.diff(
+                "--no-color", "HEAD", "--", *(str(path) for path in tracked_paths)
+            )
         if tracked and not tracked.endswith("\n"):
             tracked += "\n"
 
@@ -838,6 +915,57 @@ class GitRepoAdapter:
                     untracked_chunks.append(chunk)
 
         return tracked + "".join(untracked_chunks)
+
+    def apply_patch(self, patch_text: str, selected_paths: Collection[Path]) -> None:
+        """Applies `patch_text` to this repo's working tree, restricted to
+        `selected_paths` (one `--include=<posix path>` per selected file, so
+        an unchecked file in the patch never gets touched even though it's
+        still part of the same patch text).
+
+        Fed on stdin rather than through a temp file -- `subprocess.run`'s
+        `input=` (not GitPython's `self._repo.git.apply(istream=...)`, which
+        needs a real file object with a `fileno()` and can't take a plain
+        string/StringIO; verified against the installed GitPython by hand).
+        This mirrors `_diff_new_file`'s existing subprocess-over-GitPython
+        precedent below.
+
+        `git.Repo.git.diff(...)` (as `build_patch` above uses to build a
+        patch) strips the trailing newline from its output, and `git apply`
+        then reads the final hunk line as truncated ("corrupt patch") --
+        verified by hand against this GitPython version. Any patch text this
+        method receives could have come from exactly that path (round-
+        tripped through "Create patch" -> saved to disk -> re-applied here),
+        so a missing trailing newline is restored defensively before either
+        git-apply invocation, rather than trusting every caller to have kept
+        one.
+
+        Runs `--check` first and only proceeds to the real apply if that
+        succeeds, so a bad patch (or a selection git can't cleanly apply)
+        raises before touching the working tree at all rather than leaving
+        it half-patched.
+        """
+        text = patch_text
+        if text and not text.endswith("\n"):
+            text += "\n"
+        include_args = [f"--include={path.as_posix()}" for path in selected_paths]
+
+        self._run_git_apply(["--check", *include_args], text)
+        self._run_git_apply(include_args, text)
+
+    def _run_git_apply(self, args: list[str], patch_text: str) -> None:
+        command = ["git", "apply", *args]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=self._repo_path,
+                input=patch_text,
+                text=True,
+                capture_output=True,
+            )
+        except OSError as error:
+            raise git.GitCommandError(command, 1, str(error)) from error
+        if result.returncode != 0:
+            raise git.GitCommandError(command, result.returncode, result.stderr)
 
     def _diff_new_file(self, relpath: Path) -> str:
         try:

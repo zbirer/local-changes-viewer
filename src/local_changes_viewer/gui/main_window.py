@@ -2,6 +2,8 @@ import threading
 import time
 from pathlib import Path
 
+import git
+
 from PySide6.QtCore import QModelIndex, QProcess, Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
@@ -13,6 +15,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -67,12 +71,15 @@ from local_changes_viewer.gui.help_dialog import (
     show_toolbar_help,
 )
 from local_changes_viewer.gui.my_pull_requests_dialog import MyPullRequestsDialog
+from local_changes_viewer.gui.patch_file_selection_dialog import PatchFileSelectionDialog
+from local_changes_viewer.gui.patch_text_input_dialog import PatchTextInputDialog
 from local_changes_viewer.gui.profile_dialog import ProfileDialog
 from local_changes_viewer.gui.pull_requests_panel import PullRequestsPanel
 from local_changes_viewer.gui.pull_request_info_dialog import PullRequestInfoDialog
 from local_changes_viewer.gui.pull_request_issues_dialog import PullRequestIssuesDialog
 from local_changes_viewer.gui.settings import AppSettings
 from local_changes_viewer.gui.settings_dialog import SettingsDialog
+from local_changes_viewer.gui.stashes_dialog import StashesDialog
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 from local_changes_viewer.gui.workers.my_pull_requests_worker import MyPullRequestsWorker
 from local_changes_viewer.gui.workers.pull_request_details_worker import PullRequestDetailsWorker
@@ -199,6 +206,28 @@ class MainWindow(QMainWindow):
         # to stay arrow-shaped across every native style the way plain arrows
         # are.
         button_side = self._filter_box.sizeHint().height()
+
+        # "Hide empty worktrees" is the worktree-specific counterpart to the
+        # "Hide repos without changes" setting (F35): F35 deliberately
+        # exempts every worktree from its own rule (see f61bf6b/1c278f2 --
+        # a worktree is navigational structure the user jumps between
+        # branches with, not something to gate behind "has changes" the way
+        # a stale regular repo is). That exemption is right for F35, but it
+        # leaves no way to declutter a workspace with many long-lived,
+        # mostly-clean worktrees -- so this checkbox is a second, independent
+        # switch that targets only worktrees, off by default so a user who
+        # never touches it sees no change from today's behavior.
+        self._hide_changeless_worktrees_checkbox = QCheckBox("Hide empty worktrees")
+        self._hide_changeless_worktrees_checkbox.setToolTip(
+            "Checked: worktrees with no changed files are hidden from the "
+            "folder tree.\nUnchecked (default): every worktree is always "
+            'shown, regardless of changes -- matching "List Worktrees".'
+        )
+        self._hide_changeless_worktrees_checkbox.setFixedHeight(button_side)
+        self._hide_changeless_worktrees_checkbox.toggled.connect(
+            self._on_display_filter_toggled
+        )
+
         self._collapse_all_folders_button = QToolButton()
         self._collapse_all_folders_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
@@ -240,6 +269,7 @@ class MainWindow(QMainWindow):
         filter_row_layout.setContentsMargins(0, 0, 0, 0)
         filter_row_layout.setSpacing(2)
         filter_row_layout.addWidget(self._filter_box)
+        filter_row_layout.addWidget(self._hide_changeless_worktrees_checkbox)
         filter_row_layout.addWidget(self._collapse_all_folders_button)
         filter_row_layout.addWidget(self._expand_all_folders_button)
         tree_layout.addWidget(filter_row)
@@ -510,6 +540,9 @@ class MainWindow(QMainWindow):
         )
         self._ignore_md_action.setChecked(self._settings.ignore_md_files())
         self._hide_empty_repos_action.setChecked(self._settings.hide_repos_without_changes())
+        self._hide_changeless_worktrees_checkbox.setChecked(
+            self._settings.hide_changeless_worktrees()
+        )
         self._sync_scroll_action.setChecked(self._settings.sync_side_by_side_scroll())
         self._diff_view.set_sync_scroll(self._sync_scroll_action.isChecked())
         self._always_reload_diff_action.setChecked(self._settings.always_reload_diff())
@@ -546,6 +579,9 @@ class MainWindow(QMainWindow):
         )
         self._settings.set_ignore_md_files(self._ignore_md_action.isChecked())
         self._settings.set_hide_repos_without_changes(self._hide_empty_repos_action.isChecked())
+        self._settings.set_hide_changeless_worktrees(
+            self._hide_changeless_worktrees_checkbox.isChecked()
+        )
         self._settings.set_sync_side_by_side_scroll(self._sync_scroll_action.isChecked())
         self._settings.set_always_reload_diff(self._always_reload_diff_action.isChecked())
         super().closeEvent(event)
@@ -607,6 +643,7 @@ class MainWindow(QMainWindow):
             self._workspace,
             ignore_md_files=self._ignore_md_action.isChecked(),
             hide_repos_without_changes=self._hide_empty_repos_action.isChecked(),
+            hide_changeless_worktrees=self._hide_changeless_worktrees_checkbox.isChecked(),
             folder_filter_rules=self._folder_filter_rules,
             max_age_minutes=self._time_filter_minutes,
             profile=self._active_profile(),
@@ -1459,7 +1496,13 @@ class MainWindow(QMainWindow):
                     "Show Log", lambda: self._on_show_log(Path(folder_path))
                 )
                 menu.addAction(
+                    "Show stashes...", lambda: self._on_show_stashes_for_repo(folder_path)
+                )
+                menu.addAction(
                     "List Worktrees", lambda: self._on_list_worktrees(Path(folder_path))
+                )
+                menu.addAction(
+                    "Apply patch...", lambda: self._on_apply_patch_for_repo(folder_path)
                 )
                 repo = self._find_repository(Path(folder_path))
                 if repo is not None and repo.logical_parent_path is not None:
@@ -1538,6 +1581,14 @@ class MainWindow(QMainWindow):
         if dialog.deleted_any:
             self._on_refresh()
 
+    def _on_show_stashes_for_repo(self, folder_path: str) -> None:
+        repo_path = Path(folder_path)
+        applog.log(f"Show Stashes: {repo_path}", level=applog.LogLevel.INFO)
+        dialog = StashesDialog(repo_path, parent=self)
+        dialog.exec()
+        if dialog.restored:
+            self._on_refresh_repo(repo_path)
+
     def _find_repository(self, repo_path: Path) -> Repository | None:
         if self._workspace is None:
             return None
@@ -1579,8 +1630,9 @@ class MainWindow(QMainWindow):
             f"Create Patch: {repo_path / self._selected_change.path}",
             level=applog.LogLevel.INFO,
         )
-        patch = self._patch_service.build_patch(repo, self._selected_change.path)
-        self._present_patch(patch, f"{self._selected_change.path.name}.patch")
+        self._create_patch_with_selection(
+            repo, self._selected_change.path, f"{self._selected_change.path.name}.patch"
+        )
 
     def _on_create_patch_for_folder(self, folder_path: str) -> None:
         repo = self._find_owning_repository(Path(folder_path))
@@ -1589,8 +1641,36 @@ class MainWindow(QMainWindow):
             return
         applog.log(f"Create Patch: {folder_path}", level=applog.LogLevel.INFO)
         relpath = Path(folder_path).relative_to(repo.path)
-        patch = self._patch_service.build_patch(repo, relpath)
-        self._present_patch(patch, f"{Path(folder_path).name}.patch")
+        self._create_patch_with_selection(repo, relpath, f"{Path(folder_path).name}.patch")
+
+    def _create_patch_with_selection(
+        self, repo: Repository, target_relpath: Path, suggested_file_name: str
+    ) -> None:
+        """Shared by both "Create patch" menu entries (file row and folder/
+        repo-root row): resolve what's in scope, let the user de-select what
+        they don't want, then build the patch for only what's left checked.
+
+        A single-file target still goes through the dialog (it lists one
+        checked row) rather than skipping straight to the old immediate-build
+        behavior -- taking the user's own words literally beats a "helpful"
+        special case, and it means there's exactly one path to test instead
+        of two that can silently drift apart.
+        """
+        changes = self._patch_service.files_in_scope(repo, target_relpath)
+        if not changes:
+            # Same "nothing to patch" info message _present_patch already
+            # shows for an empty patch string -- reused rather than
+            # duplicated, since an empty scope and an empty patch are the
+            # same user-facing outcome.
+            self._present_patch("", suggested_file_name)
+            return
+
+        dialog = PatchFileSelectionDialog(changes, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        patch = self._patch_service.build_patch(repo, dialog.selected_paths())
+        self._present_patch(patch, suggested_file_name)
 
     def _present_patch(self, patch: str, suggested_file_name: str) -> None:
         if not patch:
@@ -1627,6 +1707,85 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Create Patch", f"Failed to save patch: {error}")
                 return
             self.statusBar().showMessage(f"Patch saved to {file_path}", 3000)
+
+    def _on_apply_patch_for_repo(self, folder_path: str) -> None:
+        """Repo-root-only inverse of "Create patch": ask where the patch
+        text comes from, parse it, let the user narrow it down to a subset
+        of the files it touches (reusing PatchFileSelectionDialog exactly as
+        "Create patch" does), then apply just that subset.
+        """
+        repo = self._find_owning_repository(Path(folder_path))
+        if repo is None:
+            self.statusBar().showMessage("Could not find repository to apply patch to", 3000)
+            return
+
+        chooser = QMessageBox(self)
+        chooser.setWindowTitle("Apply Patch")
+        chooser.setText("Where is the patch coming from?")
+        file_button = chooser.addButton("From File…", QMessageBox.ButtonRole.AcceptRole)
+        clipboard_button = chooser.addButton(
+            "From Clipboard", QMessageBox.ButtonRole.ActionRole
+        )
+        cancel_button = chooser.addButton(QMessageBox.StandardButton.Cancel)
+        chooser.setDefaultButton(cancel_button)
+        chooser.setEscapeButton(cancel_button)
+        chooser.exec()
+        clicked = chooser.clickedButton()
+
+        if clicked is file_button:
+            patch_text = self._read_patch_from_file()
+        elif clicked is clipboard_button:
+            patch_text = self._read_patch_from_clipboard()
+        else:
+            return
+
+        if patch_text is None:
+            return
+
+        applog.log(f"Apply Patch: {folder_path}", level=applog.LogLevel.INFO)
+        self._apply_patch_with_selection(repo, patch_text, Path(folder_path))
+
+    def _read_patch_from_file(self) -> str | None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Apply Patch", "", "Patch Files (*.patch *.diff)"
+        )
+        if not file_path:
+            return None
+        try:
+            return Path(file_path).read_text()
+        except (OSError, UnicodeDecodeError) as error:
+            QMessageBox.warning(self, "Apply Patch", f"Failed to read patch file: {error}")
+            return None
+
+    def _read_patch_from_clipboard(self) -> str | None:
+        dialog = PatchTextInputDialog(QGuiApplication.clipboard().text(), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.patch_text()
+
+    def _apply_patch_with_selection(
+        self, repo: Repository, patch_text: str, folder_path: Path
+    ) -> None:
+        changes = self._patch_service.parse_patch(patch_text)
+        if not changes:
+            QMessageBox.information(self, "Apply Patch", "No files found in patch.")
+            return
+
+        dialog = PatchFileSelectionDialog(changes, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        selected_paths = dialog.selected_paths()
+        try:
+            self._patch_service.apply_patch(repo, patch_text, selected_paths)
+        except git.GitCommandError as error:
+            QMessageBox.critical(self, "Apply Patch", f"Failed to apply patch: {error}")
+            return
+
+        QMessageBox.information(
+            self, "Apply Patch", f"Applied patch to {len(selected_paths)} file(s)."
+        )
+        self._on_refresh_repo(folder_path)
 
     def _on_start_worktree(self, repo_path: Path) -> None:
         applog.log(f"Start Worktree: {repo_path}", level=applog.LogLevel.INFO)
@@ -1941,6 +2100,7 @@ class MainWindow(QMainWindow):
             self._workspace,
             ignore_md_files=self._ignore_md_action.isChecked(),
             hide_repos_without_changes=self._hide_empty_repos_action.isChecked(),
+            hide_changeless_worktrees=self._hide_changeless_worktrees_checkbox.isChecked(),
             folder_filter_rules=self._folder_filter_rules,
             max_age_minutes=self._time_filter_minutes,
             profile=self._active_profile(),

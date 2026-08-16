@@ -233,6 +233,35 @@ def test_compute_diff_for_untracked_file(tmp_path: Path, repo: git.Repo):
     assert [line.new_lineno for line in lines] == [1, 2]
 
 
+def test_parse_unified_diff_is_public_and_parses_a_single_file_chunk(
+    tmp_path: Path, repo: git.Repo
+):
+    # Public entry point used by StashesDialog to turn one file's chunk of a
+    # multi-file stash patch (from PatchService.split_patch) into the same
+    # DiffResult shape compute_diff produces -- no private staticmethod
+    # reach-in needed.
+    (tmp_path / "committed.txt").write_text("original content\nsecond line\nthird line\n")
+    repo.index.add(["committed.txt"])
+    repo.index.commit("expand")
+    (tmp_path / "committed.txt").write_text("original content\nSECOND LINE\nthird line\n")
+    raw = repo.git.diff("--no-color", "HEAD", "--", "committed.txt")
+
+    result = GitRepoAdapter.parse_unified_diff(raw, old_ref="HEAD", new_ref="working tree")
+
+    assert result.old_ref == "HEAD"
+    assert result.new_ref == "working tree"
+    assert len(result.hunks) == 1
+    lines = result.hunks[0].lines
+    assert [line.kind for line in lines] == [
+        DiffLineKind.CONTEXT,
+        DiffLineKind.REMOVED,
+        DiffLineKind.ADDED,
+        DiffLineKind.CONTEXT,
+    ]
+    assert lines[1].text == "second line"
+    assert lines[2].text == "SECOND LINE"
+
+
 def test_compute_diff_for_untracked_directory_does_not_crash(tmp_path: Path, repo: git.Repo):
     # Real trigger (user report): `git status` collapses an untracked
     # directory (e.g. node_modules) into one porcelain entry with a trailing
@@ -952,7 +981,7 @@ def _assert_patch_applies_cleanly(source_repo_path: Path, patch: str, clone_dir:
 def test_build_patch_covers_modified_tracked_file(tmp_path: Path, repo: git.Repo):
     (tmp_path / "committed.txt").write_text("original CONTENT\n")
 
-    patch = GitRepoAdapter(tmp_path).build_patch(Path("committed.txt"), [])
+    patch = GitRepoAdapter(tmp_path).build_patch([Path("committed.txt")], [])
 
     assert "diff --git a/committed.txt b/committed.txt" in patch
     assert "-original content" in patch
@@ -963,7 +992,7 @@ def test_build_patch_covers_staged_change(tmp_path: Path, repo: git.Repo):
     (tmp_path / "committed.txt").write_text("staged content\n")
     repo.index.add(["committed.txt"])
 
-    patch = GitRepoAdapter(tmp_path).build_patch(Path("committed.txt"), [])
+    patch = GitRepoAdapter(tmp_path).build_patch([Path("committed.txt")], [])
 
     assert "diff --git a/committed.txt b/committed.txt" in patch
     assert "+staged content" in patch
@@ -972,9 +1001,7 @@ def test_build_patch_covers_staged_change(tmp_path: Path, repo: git.Repo):
 def test_build_patch_covers_untracked_new_file(tmp_path: Path, repo: git.Repo):
     (tmp_path / "new_file.txt").write_text("brand new\n")
 
-    patch = GitRepoAdapter(tmp_path).build_patch(
-        Path("new_file.txt"), [Path("new_file.txt")]
-    )
+    patch = GitRepoAdapter(tmp_path).build_patch([], [Path("new_file.txt")])
 
     assert "diff --git a/new_file.txt b/new_file.txt" in patch
     assert "new file mode" in patch
@@ -997,12 +1024,36 @@ def test_build_patch_for_folder_covers_every_changed_file_under_it(
     (tmp_path / "committed.txt").write_text("outside change\n")
 
     patch = GitRepoAdapter(tmp_path).build_patch(
-        Path("sub"), [Path("sub/untracked.txt")]
+        [Path("sub/tracked.txt")], [Path("sub/untracked.txt")]
     )
 
     assert "diff --git a/sub/tracked.txt b/sub/tracked.txt" in patch
     assert "diff --git a/sub/untracked.txt b/sub/untracked.txt" in patch
     assert "committed.txt" not in patch
+
+
+def test_build_patch_with_a_subset_of_tracked_paths_excludes_the_rest_and_applies_cleanly(
+    tmp_path: Path, repo: git.Repo
+):
+    """The point of the file-selection dialog: two files changed under the
+    same scope, but only one is named in `tracked_paths` -- the other must
+    not merely be absent from the text, the resulting patch must still be
+    something `git apply` accepts on its own (a patch naming only some of a
+    commit's files is still perfectly valid, but a naive implementation
+    could easily emit a header for one file with no hunk, or vice versa)."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "second.txt").write_text("second original\n")
+    repo.index.add(["sub/second.txt"])
+    repo.index.commit("add sub/second.txt")
+
+    (tmp_path / "committed.txt").write_text("changed committed\n")
+    (tmp_path / "sub" / "second.txt").write_text("changed second\n")
+
+    patch = GitRepoAdapter(tmp_path).build_patch([Path("committed.txt")], [])
+
+    assert "diff --git a/committed.txt b/committed.txt" in patch
+    assert "second.txt" not in patch
+    _assert_patch_applies_cleanly(tmp_path, patch, tmp_path.parent / "clean_checkout_subset")
 
 
 def test_build_patch_expands_a_collapsed_untracked_directory_entry(
@@ -1015,7 +1066,7 @@ def test_build_patch_expands_a_collapsed_untracked_directory_entry(
     (tmp_path / "new_dir" / "a.txt").write_text("a content\n")
     (tmp_path / "new_dir" / "b.txt").write_text("b content\n")
 
-    patch = GitRepoAdapter(tmp_path).build_patch(Path("new_dir"), [Path("new_dir")])
+    patch = GitRepoAdapter(tmp_path).build_patch([], [Path("new_dir")])
 
     assert "diff --git a/new_dir/a.txt b/new_dir/a.txt" in patch
     assert "diff --git a/new_dir/b.txt b/new_dir/b.txt" in patch
@@ -1024,7 +1075,7 @@ def test_build_patch_expands_a_collapsed_untracked_directory_entry(
 def test_build_patch_returns_empty_string_when_nothing_to_patch(
     tmp_path: Path, repo: git.Repo
 ):
-    patch = GitRepoAdapter(tmp_path).build_patch(Path("."), [])
+    patch = GitRepoAdapter(tmp_path).build_patch([], [])
 
     assert patch == ""
 
@@ -1034,7 +1085,7 @@ def test_build_patch_skips_binary_untracked_file_without_raising(
 ):
     (tmp_path / "image.bin").write_bytes(bytes([0, 1, 2, 3, 0, 255]))
 
-    patch = GitRepoAdapter(tmp_path).build_patch(Path("image.bin"), [Path("image.bin")])
+    patch = GitRepoAdapter(tmp_path).build_patch([], [Path("image.bin")])
 
     assert patch == ""
 
@@ -1053,7 +1104,7 @@ def test_build_patch_output_applies_cleanly_with_git_apply_check(
     (tmp_path / "sub" / "new_file.txt").write_text("brand new\n")
 
     patch = GitRepoAdapter(tmp_path).build_patch(
-        Path("."), [Path("sub/new_file.txt")]
+        [Path("committed.txt"), Path("sub/nested.txt")], [Path("sub/new_file.txt")]
     )
 
     _assert_patch_applies_cleanly(tmp_path, patch, tmp_path.parent / "clean_checkout_whole_repo")
@@ -1071,7 +1122,162 @@ def test_build_patch_for_a_single_folder_applies_cleanly_with_git_apply_check(
     (tmp_path / "sub" / "new_file.txt").write_text("brand new\n")
 
     patch = GitRepoAdapter(tmp_path).build_patch(
-        Path("sub"), [Path("sub/new_file.txt")]
+        [Path("sub/nested.txt")], [Path("sub/new_file.txt")]
     )
 
     _assert_patch_applies_cleanly(tmp_path, patch, tmp_path.parent / "clean_checkout_folder")
+
+
+# ---------------------------------------------------------------------------
+# apply_patch: the "Apply patch..." feature's inverse of build_patch.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_patch_restricted_to_one_selected_path_touches_only_that_file(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "second.txt").write_text("original second\n")
+    repo.index.add(["second.txt"])
+    repo.index.commit("add second.txt")
+
+    (tmp_path / "committed.txt").write_text("changed committed\n")
+    (tmp_path / "second.txt").write_text("changed second\n")
+
+    patch = GitRepoAdapter(tmp_path).build_patch(
+        [Path("committed.txt"), Path("second.txt")], []
+    )
+
+    # Reset the working tree back to HEAD -- build_patch above read the
+    # working tree's current edits, apply_patch below re-applies them from
+    # the patch text alone, restricted to a single file.
+    repo.git.checkout("--", "committed.txt", "second.txt")
+    assert (tmp_path / "committed.txt").read_text() == "original content\n"
+    assert (tmp_path / "second.txt").read_text() == "original second\n"
+
+    GitRepoAdapter(tmp_path).apply_patch(patch, [Path("committed.txt")])
+
+    assert (tmp_path / "committed.txt").read_text() == "changed committed\n"
+    # The unselected file must stay untouched even though it's in the same
+    # patch text -- this is the whole point of --include.
+    assert (tmp_path / "second.txt").read_text() == "original second\n"
+
+
+def test_apply_patch_raises_and_leaves_the_working_tree_untouched_on_a_bad_patch(
+    tmp_path: Path, repo: git.Repo
+):
+    original = (tmp_path / "committed.txt").read_text()
+
+    with pytest.raises(git.GitCommandError):
+        GitRepoAdapter(tmp_path).apply_patch(
+            "not a valid patch at all\njust garbage text\n", [Path("committed.txt")]
+        )
+
+    assert (tmp_path / "committed.txt").read_text() == original
+    # The dry-run --check must fail before any real apply runs, so nothing
+    # ever lands as a staged/working-tree change either.
+    assert GitRepoAdapter(tmp_path).list_changes() == []
+
+
+def test_apply_patch_raises_when_the_check_dry_run_would_fail_to_apply_cleanly(
+    tmp_path: Path, repo: git.Repo
+):
+    # A patch built against a *different* base content than what's currently
+    # on disk (context lines won't match) -- --check must catch this and
+    # refuse the real apply, rather than half-applying hunks that do match.
+    (tmp_path / "committed.txt").write_text("some other content entirely\n")
+    stale_patch = GitRepoAdapter(tmp_path).build_patch([Path("committed.txt")], [])
+    repo.git.checkout("--", "committed.txt")
+    (tmp_path / "committed.txt").write_text("a completely unrelated diverged version\n")
+
+    with pytest.raises(git.GitCommandError):
+        GitRepoAdapter(tmp_path).apply_patch(stale_patch, [Path("committed.txt")])
+
+    assert (tmp_path / "committed.txt").read_text() == "a completely unrelated diverged version\n"
+
+
+# ---------------------------------------------------------------------------
+# list_stashes / stash_diff / apply_stash / pop_stash
+# ---------------------------------------------------------------------------
+
+
+def test_list_stashes_returns_empty_list_for_a_repo_with_no_stashes(
+    tmp_path: Path, repo: git.Repo
+):
+    assert GitRepoAdapter(tmp_path).list_stashes() == []
+
+
+def test_list_stashes_returns_newest_first_with_real_fields(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "committed.txt").write_text("first change\n")
+    repo.git.stash("push", "-m", "first stash")
+    (tmp_path / "committed.txt").write_text("second change\n")
+    repo.git.stash("push", "-m", "second stash")
+
+    entries = GitRepoAdapter(tmp_path).list_stashes()
+
+    assert [e.message for e in entries] == [
+        "On main: second stash",
+        "On main: first stash",
+    ]
+    assert [e.ref for e in entries] == ["stash@{0}", "stash@{1}"]
+    assert all(e.created_at is not None for e in entries)
+    assert all(e.author == "Test User" for e in entries)
+
+
+def test_list_stashes_message_with_colon_and_pipe_parses_intact(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "committed.txt").write_text("changed\n")
+    repo.git.stash("push", "-m", "fix: broken thing | second half")
+
+    entries = GitRepoAdapter(tmp_path).list_stashes()
+
+    assert len(entries) == 1
+    assert entries[0].message == "On main: fix: broken thing | second half"
+
+
+def test_stash_diff_contains_the_changed_file_name(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "committed.txt").write_text("stashed change\n")
+    repo.git.stash("push", "-m", "diff test")
+    ref = GitRepoAdapter(tmp_path).list_stashes()[0].ref
+
+    diff = GitRepoAdapter(tmp_path).stash_diff(ref)
+
+    assert "committed.txt" in diff
+    assert "stashed change" in diff
+
+
+def test_apply_stash_restores_file_content_and_keeps_the_stash_entry(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "committed.txt").write_text("applied change\n")
+    repo.git.stash("push", "-m", "apply test")
+    ref = GitRepoAdapter(tmp_path).list_stashes()[0].ref
+
+    GitRepoAdapter(tmp_path).apply_stash(ref)
+
+    assert (tmp_path / "committed.txt").read_text() == "applied change\n"
+    assert len(GitRepoAdapter(tmp_path).list_stashes()) == 1
+
+
+def test_pop_stash_restores_file_content_and_removes_the_stash_entry(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "committed.txt").write_text("popped change\n")
+    repo.git.stash("push", "-m", "pop test")
+    ref = GitRepoAdapter(tmp_path).list_stashes()[0].ref
+
+    GitRepoAdapter(tmp_path).pop_stash(ref)
+
+    assert (tmp_path / "committed.txt").read_text() == "popped change\n"
+    assert GitRepoAdapter(tmp_path).list_stashes() == []
+
+
+@pytest.mark.parametrize("bad_ref", ["; rm -rf /", "stash@{x}", "stash@0", "", "stash@{0}; ls"])
+def test_stash_operations_reject_a_malformed_ref_without_invoking_git(
+    tmp_path: Path, repo: git.Repo, bad_ref: str
+):
+    adapter = GitRepoAdapter(tmp_path)
+    with pytest.raises(ValueError):
+        adapter.stash_diff(bad_ref)
+    with pytest.raises(ValueError):
+        adapter.apply_stash(bad_ref)
+    with pytest.raises(ValueError):
+        adapter.pop_stash(bad_ref)

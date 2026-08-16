@@ -1,11 +1,12 @@
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QGuiApplication,
     QKeySequence,
     QPainter,
     QShortcut,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -87,6 +89,11 @@ class _DiffPane(QPlainTextEdit):
         # Qt's block count changes immediately but a snapshot list can't.
         self.sequential_line_numbers = False
         self._on_marker_click = on_marker_click
+        # Set by SideBySideView.set_file_target(), same absolute path for
+        # both the left (old) and right (new) pane -- there is only ever
+        # one on-disk file, "Copy Location" just reads whichever side's
+        # line number the click landed on.
+        self.abs_file_path: Path | None = None
         self._line_numbers_visible = True
         self._gutter = _GutterWidget(self)
         self.blockCountChanged.connect(self._update_gutter_width)
@@ -101,6 +108,49 @@ class _DiffPane(QPlainTextEdit):
                 self._on_marker_click(fold_key)
                 return
         super().mousePressEvent(event)
+
+    def _location_at(self, pos: QPoint) -> tuple[Path, int] | None:
+        """Maps a right-click position to the `(abs_path, line)` pair
+        "Copy Location" should put on the clipboard, or None where the row
+        under the click has no real line of its own. The per-row line
+        number is already resolved for us by _lineno_for_block -- the same
+        lookup paint_gutter uses -- so a fold-marker row (line_numbers
+        holds None there, see _rebuild) and the blank filler row an
+        unpaired REMOVED/ADDED line leaves on the opposite pane both come
+        back None here too, rather than this method having to reinvent
+        that logic and risk drifting from what the gutter actually shows.
+        """
+        if self.abs_file_path is None:
+            return None
+        block_number = self.cursorForPosition(pos).blockNumber()
+        lineno = self._lineno_for_block(block_number)
+        if lineno is None:
+            return None
+        return self.abs_file_path, lineno
+
+    def _build_context_menu(self, pos: QPoint) -> QMenu:
+        """Split out from contextMenuEvent so tests can build the menu and
+        trigger its "Copy Location" action without calling QMenu.exec() --
+        under the offscreen platform used in tests, exec() opens a real
+        native modal loop that never gets a click to close it and hangs
+        forever (see test_main_window.py's _capture_menu for the same
+        constraint on a different menu).
+        """
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+        location = self._location_at(pos)
+        copy_location_action = menu.addAction("Copy Location")
+        copy_location_action.setEnabled(location is not None)
+        if location is not None:
+            abs_path, lineno = location
+            copy_location_action.triggered.connect(
+                lambda: QGuiApplication.clipboard().setText(f"{abs_path}:{lineno}")
+            )
+        return menu
+
+    def contextMenuEvent(self, event) -> None:
+        menu = self._build_context_menu(event.pos())
+        menu.exec(event.globalPos())
 
     def set_font_point_size(self, size: int) -> None:
         font = self.font()
@@ -357,6 +407,8 @@ class SideBySideView(QWidget):
 
     def set_file_target(self, abs_file_path: Path | None) -> None:
         self._abs_file_path = abs_file_path
+        self._left.abs_file_path = abs_file_path
+        self._right.abs_file_path = abs_file_path
 
     def file_target(self) -> Path | None:
         return self._abs_file_path
@@ -754,6 +806,8 @@ class SideBySideView(QWidget):
         self._editing = False
         self._edit_disk_stat = None
         self._right.setReadOnly(True)
+        self._left.abs_file_path = None
+        self._right.abs_file_path = None
         self._left.fold_keys = []
         self._right.fold_keys = []
         self._left.line_numbers = []

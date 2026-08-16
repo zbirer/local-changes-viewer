@@ -511,3 +511,123 @@ def test_no_hidden_log_for_worktree_with_no_changes() -> None:
     filter_workspace(workspace, hide_repos_without_changes=True, on_log=messages.append)
 
     assert messages == []
+
+
+def _worktree(name: str, changes: list[FileChange], parent: Path) -> Repository:
+    return Repository(
+        path=parent / ".worktrees" / name,
+        name=name,
+        branch_status=_BRANCH,
+        changes=changes,
+        logical_parent_path=parent,
+    )
+
+
+def test_hide_changeless_worktrees_defaults_to_off_and_changes_nothing() -> None:
+    """F91's whole point is a default that preserves today's behavior: a
+    caller that never passes hide_changeless_worktrees must see every
+    worktree, clean or dirty, exactly as before this setting existed."""
+    parent = Path("/root/dashboard")
+    clean_worktree = _worktree("clean-wt", [], parent)
+    workspace = Workspace(root_path=Path("/root"), repositories=[clean_worktree])
+
+    result = filter_workspace(workspace)
+
+    assert [r.name for r in result.repositories] == ["clean-wt"]
+
+
+def test_hide_changeless_worktrees_hides_only_the_changeless_worktree() -> None:
+    """The new setting targets worktrees specifically -- a regular repo with
+    no changes must NOT be affected by it (that stays F35's job)."""
+    parent = _repo("dashboard", [FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)])
+    clean_worktree = _worktree("clean-wt", [], parent.path)
+    dirty_worktree = _worktree(
+        "dirty-wt", [FileChange(path=Path("b.py"), change_type=ChangeType.MODIFIED)], parent.path
+    )
+    empty_regular_repo = _repo("empty_repo", [])
+    workspace = Workspace(
+        root_path=Path("/root"),
+        repositories=[parent, clean_worktree, dirty_worktree, empty_regular_repo],
+    )
+
+    result = filter_workspace(workspace, hide_changeless_worktrees=True)
+
+    names = [r.name for r in result.repositories]
+    assert "clean-wt" not in names
+    assert "dirty-wt" in names
+    # Regular repos are untouched by this setting, even a changeless one,
+    # since hide_repos_without_changes (the setting that governs them) is
+    # off here -- the two settings act independently.
+    assert "empty_repo" in names
+    assert "dashboard" in names
+
+
+def test_hide_changeless_worktrees_composes_with_hide_repos_without_changes() -> None:
+    """All four on/off combinations of the two independent settings must
+    compose without one fighting the other: hide_repos_without_changes only
+    ever touches regular repos, hide_changeless_worktrees only ever touches
+    worktrees."""
+    parent = _repo("dashboard", [FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)])
+    clean_worktree = _worktree("clean-wt", [], parent.path)
+    empty_regular_repo = _repo("empty_repo", [])
+    workspace = Workspace(
+        root_path=Path("/root"),
+        repositories=[parent, clean_worktree, empty_regular_repo],
+    )
+
+    both_off = filter_workspace(
+        workspace, hide_repos_without_changes=False, hide_changeless_worktrees=False
+    )
+    assert {r.name for r in both_off.repositories} == {"dashboard", "clean-wt", "empty_repo"}
+
+    only_hide_worktrees = filter_workspace(
+        workspace, hide_repos_without_changes=False, hide_changeless_worktrees=True
+    )
+    assert {r.name for r in only_hide_worktrees.repositories} == {"dashboard", "empty_repo"}
+
+    only_hide_repos = filter_workspace(
+        workspace, hide_repos_without_changes=True, hide_changeless_worktrees=False
+    )
+    assert {r.name for r in only_hide_repos.repositories} == {"dashboard", "clean-wt"}
+
+    both_on = filter_workspace(
+        workspace, hide_repos_without_changes=True, hide_changeless_worktrees=True
+    )
+    assert {r.name for r in both_on.repositories} == {"dashboard"}
+
+
+def test_hide_changeless_worktrees_keeps_worktree_with_changed_descendant() -> None:
+    """Mirrors _repo_or_descendant_has_changes' existing rule for regular
+    repos (F35): a changeless worktree that itself has no changes but has a
+    changed nested worktree beneath it must stay, so that nested worktree
+    isn't orphaned once its parent row is dropped."""
+    parent = _repo("dashboard", [])
+    changeless_worktree = _worktree("mid-wt", [], parent.path)
+    nested_dirty_worktree = Repository(
+        path=changeless_worktree.path / ".worktrees" / "inner-wt",
+        name="inner-wt",
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("c.py"), change_type=ChangeType.MODIFIED)],
+        logical_parent_path=changeless_worktree.path,
+    )
+    workspace = Workspace(
+        root_path=Path("/root"),
+        repositories=[parent, changeless_worktree, nested_dirty_worktree],
+    )
+
+    result = filter_workspace(workspace, hide_changeless_worktrees=True)
+
+    # "dashboard" survives too: hide_repos_without_changes is off here, so
+    # this setting never touches the regular (non-worktree) parent repo.
+    assert {r.name for r in result.repositories} == {"dashboard", "mid-wt", "inner-wt"}
+
+
+def test_hide_changeless_worktrees_logs_worktree_specific_hidden_reason() -> None:
+    parent = Path("/root/dashboard")
+    clean_worktree = _worktree("clean-wt", [], parent)
+    workspace = Workspace(root_path=Path("/root"), repositories=[clean_worktree])
+    messages: list[str] = []
+
+    filter_workspace(workspace, hide_changeless_worktrees=True, on_log=messages.append)
+
+    assert messages == [f"{clean_worktree.path}: hidden — worktree has no changes"]

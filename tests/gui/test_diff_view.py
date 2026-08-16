@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QKeySequence, QTextCursor
+from PySide6.QtGui import QGuiApplication, QKeySequence, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -14,6 +14,7 @@ from local_changes_viewer.core.domain.diff import DiffHunk, DiffLine, DiffLineKi
 from local_changes_viewer.gui.diff_view import diff_view_widget, side_by_side_view
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.diff_view.side_by_side_view import SideBySideView
+from local_changes_viewer.gui.diff_view.unified_view import UnifiedView
 
 
 @pytest.fixture(scope="session")
@@ -534,3 +535,196 @@ def test_edit_enabled_with_normal_tooltip_for_working_tree_diff(
 
     assert widget._edit_button.isEnabled()
     assert widget._edit_button.toolTip() == "Edit the file in place"
+
+
+# ---------------------------------------------------------------------------
+# "Copy Location" context-menu action on the diff panes (unified and both
+# side-by-side panes). Reachability is proven the same way test_main_window.py
+# proves "Create patch" reachable: build the real menu and trigger the real
+# QAction, never grep the source for the string.
+#
+# The menu is built via each pane's `_build_context_menu(pos)` rather than by
+# firing a full contextMenuEvent -- that helper is exactly what
+# contextMenuEvent delegates to, minus the final `menu.exec(...)` call.
+# QMenu.exec() opens a real native modal loop; under the offscreen platform
+# used here it never gets a click to close it and hangs the test process
+# forever (verified: even a QTimer.singleShot()-scheduled QAction.trigger()
+# does not make an executing exec() return, because a menu only closes
+# itself in response to real event-loop-delivered activation, not a
+# programmatic one). _build_context_menu is the position-to-menu mapping
+# under test; exec() itself is inert Qt plumbing this repo's other
+# context-menu tests (see test_main_window.py's _capture_menu) sidestep the
+# exact same way.
+# ---------------------------------------------------------------------------
+
+
+def _pos_for_block(editor, block_number: int):
+    """The viewport position that lands a click on `block_number`'s row --
+    computed from Qt's own layout (cursorRect), not guessed pixel math, so
+    it stays correct regardless of font metrics or gutter width."""
+    block = editor.document().findBlockByNumber(block_number)
+    cursor = QTextCursor(block)
+    return editor.cursorRect(cursor).center()
+
+
+def _copy_location_action(pane, pos):
+    menu = pane._build_context_menu(pos)
+    return next(a for a in menu.actions() if a.text() == "Copy Location")
+
+
+def _unified_view_with_offset_hunk(tmp_path: Path) -> tuple[UnifiedView, Path]:
+    """One hunk starting at old line 11 / new line 21 (not line 1, so a
+    visual-row-index bug can't pass by coincidence) with a pure removal and
+    a pure addition on separate rows -- proving the unified view picks
+    old_lineno for a REMOVED row and new_lineno for an ADDED row, never the
+    other side's number."""
+    abs_path = tmp_path / "sample.txt"
+    abs_path.write_text("content")
+    hunk = DiffHunk(
+        old_start=10,
+        old_count=2,
+        new_start=20,
+        new_count=2,
+        lines=[
+            DiffLine(DiffLineKind.CONTEXT, 10, 20, "context"),
+            DiffLine(DiffLineKind.REMOVED, 11, None, "removed line"),
+            DiffLine(DiffLineKind.ADDED, None, 21, "added line"),
+        ],
+    )
+    diff = DiffResult(old_ref="HEAD", new_ref="working tree", hunks=[hunk])
+    view = UnifiedView()
+    view.set_diff(diff, str(abs_path))
+    view.set_file_target(abs_path)
+    view.show()
+    QTest.qWaitForWindowExposed(view)
+    return view, abs_path
+
+
+def test_unified_view_copy_location_reports_added_and_removed_real_line_numbers(
+    qapp, tmp_path: Path
+) -> None:
+    view, abs_path = _unified_view_with_offset_hunk(tmp_path)
+    try:
+        # block0 is the "@@ ... @@" hunk header, block1 the context line,
+        # block2 the REMOVED row, block3 the ADDED row -- see _rebuild().
+        removed_action = _copy_location_action(view, _pos_for_block(view, 2))
+        assert removed_action.isEnabled()
+        removed_action.trigger()
+        assert QGuiApplication.clipboard().text() == f"{abs_path}:11"
+
+        added_action = _copy_location_action(view, _pos_for_block(view, 3))
+        assert added_action.isEnabled()
+        added_action.trigger()
+        assert QGuiApplication.clipboard().text() == f"{abs_path}:21"
+    finally:
+        view.close()
+
+
+def test_unified_view_copy_location_disabled_for_collapsed_fold_marker_row(
+    qapp, tmp_path: Path
+) -> None:
+    abs_path = tmp_path / "sample.txt"
+    abs_path.write_text("content")
+    # A whole-hunk run of 6 unchanged lines starting at old line 5 / new
+    # line 8 (not line 1) folds entirely (fold_context's FOLD_THRESHOLD is
+    # 3, and this hunk has no head/tail margin to keep any of it visible) --
+    # its one visible row is the "click to expand" marker, which has no
+    # DiffLine and therefore no real file location to copy.
+    hunk = DiffHunk(
+        old_start=5,
+        old_count=6,
+        new_start=8,
+        new_count=6,
+        lines=[
+            DiffLine(DiffLineKind.CONTEXT, 5 + i, 8 + i, f"line{i}") for i in range(6)
+        ],
+    )
+    diff = DiffResult(old_ref="HEAD", new_ref="working tree", hunks=[hunk])
+    view = UnifiedView()
+    view.set_diff(diff, str(abs_path))
+    view.set_file_target(abs_path)
+    view.show()
+    QTest.qWaitForWindowExposed(view)
+    try:
+        QGuiApplication.clipboard().setText("untouched")
+        # block0 is the hunk header, block1 the fold marker row.
+        action = _copy_location_action(view, _pos_for_block(view, 1))
+        assert not action.isEnabled()
+        assert QGuiApplication.clipboard().text() == "untouched"
+    finally:
+        view.close()
+
+
+def _side_by_side_view_with_offset_hunk(tmp_path: Path) -> tuple[SideBySideView, Path]:
+    """One hunk starting at old line 10 / new line 20 (not line 1) with an
+    uneven REMOVED/ADDED count on each side of a context line, so pairing
+    leaves one blank filler row on the right (opposite a REMOVED-only line)
+    and one on the left (opposite an ADDED-only line) -- see
+    diff_pairing.pair_hunk_lines. Paired-row index equals block number in
+    both panes 1:1 here since nothing in this hunk folds."""
+    abs_path = tmp_path / "sample.txt"
+    abs_path.write_text("content")
+    hunk = DiffHunk(
+        old_start=10,
+        old_count=4,
+        new_start=20,
+        new_count=4,
+        lines=[
+            DiffLine(DiffLineKind.CONTEXT, 10, 20, "context-0"),
+            DiffLine(DiffLineKind.REMOVED, 11, None, "removed-11"),
+            DiffLine(DiffLineKind.REMOVED, 12, None, "removed-12"),
+            DiffLine(DiffLineKind.ADDED, None, 21, "added-21"),
+            DiffLine(DiffLineKind.CONTEXT, 13, 22, "context-mid"),
+            DiffLine(DiffLineKind.ADDED, None, 23, "added-23"),
+        ],
+    )
+    diff = DiffResult(old_ref="HEAD", new_ref="working tree", hunks=[hunk])
+    view = _ready_view(tmp_path, "content", diff)
+    return view, abs_path
+
+
+def test_side_by_side_left_pane_copy_location_reports_old_lineno_and_disables_for_blank_row(
+    qapp, tmp_path: Path
+) -> None:
+    view, abs_path = _side_by_side_view_with_offset_hunk(tmp_path)
+    try:
+        # block1 pairs REMOVED(old=11) with ADDED(new=21) on the same row --
+        # the left pane reports its own old_lineno, 11.
+        action = _copy_location_action(view._left, _pos_for_block(view._left, 1))
+        assert action.isEnabled()
+        action.trigger()
+        assert QGuiApplication.clipboard().text() == f"{abs_path}:11"
+
+        # block4 is the pure-addition row (new=23) -- the left pane has no
+        # line there at all, so "Copy Location" must be disabled rather
+        # than reporting an empty or unrelated location.
+        QGuiApplication.clipboard().setText("untouched")
+        blank_action = _copy_location_action(view._left, _pos_for_block(view._left, 4))
+        assert not blank_action.isEnabled()
+        assert QGuiApplication.clipboard().text() == "untouched"
+    finally:
+        view.close()
+
+
+def test_side_by_side_right_pane_copy_location_reports_new_lineno_and_disables_for_blank_row(
+    qapp, tmp_path: Path
+) -> None:
+    view, abs_path = _side_by_side_view_with_offset_hunk(tmp_path)
+    try:
+        # block1 pairs REMOVED(old=11) with ADDED(new=21) on the same row --
+        # the right pane reports its own new_lineno, 21.
+        action = _copy_location_action(view._right, _pos_for_block(view._right, 1))
+        assert action.isEnabled()
+        action.trigger()
+        assert QGuiApplication.clipboard().text() == f"{abs_path}:21"
+
+        # block2 is the second, unpaired REMOVED row (old=12, no matching
+        # ADDED) -- the right pane has no line there at all, so "Copy
+        # Location" must be disabled rather than reporting an empty or
+        # unrelated location.
+        QGuiApplication.clipboard().setText("untouched")
+        blank_action = _copy_location_action(view._right, _pos_for_block(view._right, 2))
+        assert not blank_action.isEnabled()
+        assert QGuiApplication.clipboard().text() == "untouched"
+    finally:
+        view.close()

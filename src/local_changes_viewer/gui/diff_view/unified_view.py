@@ -1,8 +1,9 @@
 from dataclasses import dataclass
+from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QTextCursor
-from PySide6.QtWidgets import QPlainTextEdit, QTextEdit, QWidget
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QPainter, QTextCursor
+from PySide6.QtWidgets import QMenu, QPlainTextEdit, QTextEdit, QWidget
 
 from local_changes_viewer.core.domain.diff import DiffLineKind, DiffResult
 from local_changes_viewer.core.services.context_folding import FoldedRun, fold_context
@@ -52,6 +53,7 @@ class UnifiedView(QPlainTextEdit):
         self._change_run_rows: list[int] = []
         self._diff: DiffResult | None = None
         self._file_path: str | None = None
+        self._abs_file_path: Path | None = None
         self._expanded_folds: set[tuple[int, int]] = set()
         self._line_numbers_visible = True
         self._gutter = _GutterWidget(self)
@@ -65,6 +67,15 @@ class UnifiedView(QPlainTextEdit):
         self._file_path = file_path
         self._expanded_folds = set()
         self._rebuild()
+
+    def set_file_target(self, abs_file_path: Path | None) -> None:
+        """The absolute on-disk path "Copy Location" reports, mirroring
+        side_by_side_view.py's set_file_target -- same value (or None where
+        main_window's _edit_target found no safe edit target: a deleted
+        file, a folder, or an already-committed-but-unpushed diff), just
+        threaded to this view too so unified mode gets the same feature.
+        """
+        self._abs_file_path = abs_file_path
 
     def set_font_point_size(self, size: int) -> None:
         font = self.font()
@@ -81,6 +92,7 @@ class UnifiedView(QPlainTextEdit):
     def clear_diff(self) -> None:
         self._diff = None
         self._file_path = None
+        self._abs_file_path = None
         self._expanded_folds = set()
         self._line_meta = []
         self._change_run_rows = []
@@ -178,6 +190,56 @@ class UnifiedView(QPlainTextEdit):
                 self._rebuild()
                 return
         super().mousePressEvent(event)
+
+    def _location_at(self, pos: QPoint) -> tuple[Path, int] | None:
+        """Maps a right-click position to the `(abs_path, line)` pair
+        "Copy Location" should put on the clipboard, or None where the row
+        under the click has no real file line to report at all. The line
+        always comes from the clicked DiffLine's own old_lineno/new_lineno
+        -- never the visual row index -- because a hunk header or a
+        collapsed fold marker sits at a row with no corresponding line in
+        either file, and a REMOVED line has no new_lineno (it never made
+        it into the new file), so falling back to new_lineno there would
+        silently report an unrelated line instead of disabling the action.
+        A CONTEXT line is unambiguous (same line either side), so it and
+        ADDED both read new_lineno.
+        """
+        if self._abs_file_path is None:
+            return None
+        block_number = self.cursorForPosition(pos).blockNumber()
+        if block_number >= len(self._line_meta):
+            return None
+        meta = self._line_meta[block_number]
+        if meta.kind is None:
+            return None
+        lineno = meta.old_lineno if meta.kind is DiffLineKind.REMOVED else meta.new_lineno
+        if lineno is None:
+            return None
+        return self._abs_file_path, lineno
+
+    def _build_context_menu(self, pos: QPoint) -> QMenu:
+        """Split out from contextMenuEvent so tests can build the menu and
+        trigger its "Copy Location" action without calling QMenu.exec() --
+        under the offscreen platform used in tests, exec() opens a real
+        native modal loop that never gets a click to close it and hangs
+        forever (see test_main_window.py's _capture_menu for the same
+        constraint on a different menu).
+        """
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+        location = self._location_at(pos)
+        copy_location_action = menu.addAction("Copy Location")
+        copy_location_action.setEnabled(location is not None)
+        if location is not None:
+            abs_path, lineno = location
+            copy_location_action.triggered.connect(
+                lambda: QGuiApplication.clipboard().setText(f"{abs_path}:{lineno}")
+            )
+        return menu
+
+    def contextMenuEvent(self, event) -> None:
+        menu = self._build_context_menu(event.pos())
+        menu.exec(event.globalPos())
 
     def _update_intraline_selections(self) -> None:
         selections = []

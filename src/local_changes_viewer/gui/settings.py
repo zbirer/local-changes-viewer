@@ -74,6 +74,15 @@ class AppSettings:
     def set_hide_repos_without_changes(self, enabled: bool) -> None:
         self._settings.setValue("hide_repos_without_changes", enabled)
 
+    def hide_changeless_worktrees(self) -> bool:
+        value = self._settings.value("hide_changeless_worktrees", False)
+        if isinstance(value, str):
+            return value.lower() == "true"
+        return bool(value)
+
+    def set_hide_changeless_worktrees(self, enabled: bool) -> None:
+        self._settings.setValue("hide_changeless_worktrees", enabled)
+
     def folder_filter_rules(self) -> list[FolderFilterRule]:
         raw = self._settings.value("folder_filter_rules", [])
         if not raw:

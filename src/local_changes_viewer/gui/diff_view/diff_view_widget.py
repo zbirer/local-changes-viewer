@@ -189,6 +189,7 @@ class DiffViewWidget(QWidget):
     ) -> None:
         self._current_hunk_index = -1
         self._unified.set_diff(diff, file_path)
+        self._unified.set_file_target(abs_file_path)
         self._side_by_side.set_diff(diff, file_path)
         self._side_by_side.set_file_target(abs_file_path)
         self._edit_button.setChecked(False)
