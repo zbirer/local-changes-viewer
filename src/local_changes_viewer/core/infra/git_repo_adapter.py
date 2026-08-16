@@ -449,6 +449,14 @@ class GitRepoAdapter:
         self._validate_stash_ref(ref)
         self._repo.git.stash("pop", ref)
 
+    def drop_stash(self, ref: str) -> None:
+        self._validate_stash_ref(ref)
+        self._repo.git.stash("drop", ref)
+
+    def restore_file_from_stash(self, ref: str, path: Path) -> None:
+        self._validate_stash_ref(ref)
+        self._repo.git.checkout(ref, "--", path.as_posix())
+
     @staticmethod
     def _validate_stash_ref(ref: str) -> None:
         # Every ref this adapter is asked to act on comes from parsing this

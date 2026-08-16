@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -101,10 +102,14 @@ class StashesDialog(QDialog):
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.itemSelectionChanged.connect(self._on_stash_selection_changed)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_context_menu)
 
         self._file_list = QListWidget()
         self._file_list.setAlternatingRowColors(True)
         self._file_list.currentItemChanged.connect(self._on_file_selection_changed)
+        self._file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._file_list.customContextMenuRequested.connect(self._on_file_list_context_menu)
 
         self._side_by_side = SideBySideView()
         # A stash diff describes the stashed state, not the file currently on
@@ -304,3 +309,82 @@ class StashesDialog(QDialog):
         self.restored = True
         QMessageBox.information(self, "Pop Stash", f"Popped {stash.ref}.")
         self._reload()
+
+    def _on_table_context_menu(self, pos) -> None:
+        # Mirrors main_window.py's _on_tree_context_menu: right-click on a row
+        # first makes that row current/selected, so the menu's actions (and
+        # _selected_stash(), which they rely on) act on the row under the
+        # cursor rather than whatever was selected before -- and empty space
+        # (invalid index) shows no menu at all.
+        index = self._table.indexAt(pos)
+        if not index.isValid():
+            return
+        self._table.selectRow(index.row())
+        stash = self._stash_at_row(index.row())
+        if stash is None:
+            return
+        menu = QMenu(self._table)
+        # "Restore stash" reuses _on_apply verbatim -- same handler, same
+        # confirmation-free apply + refresh path as the Apply button, so
+        # there's exactly one place that logic lives.
+        menu.addAction("Restore stash", self._on_apply)
+        menu.addAction("Delete stash", lambda: self._on_delete_stash(stash))
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _on_delete_stash(self, stash: StashEntry) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Delete Stash",
+            f"Delete {stash.ref} ({stash.message})?\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        adapter = self._adapter_factory(self._repo_path)
+        try:
+            adapter.drop_stash(stash.ref)
+        except git.GitCommandError as error:
+            QMessageBox.critical(self, "Delete Stash", f"Failed to delete stash: {error}")
+            return
+        QMessageBox.information(self, "Delete Stash", f"Deleted {stash.ref}.")
+        # `git stash drop` renumbers every remaining stash -- dropping
+        # stash@{1} turns stash@{2} into stash@{1} -- so the table must be
+        # fully reloaded from git, not just have this one row removed;
+        # _reload -> _populate_table also clears _current_stash and the
+        # file list/diff pane, which is correct even when the dropped entry
+        # wasn't the selected one.
+        self._reload()
+
+    def _on_file_list_context_menu(self, pos) -> None:
+        item = self._file_list.itemAt(pos)
+        if item is None:
+            return
+        self._file_list.setCurrentItem(item)
+        path = item.data(_FILE_PATH_ROLE)
+        menu = QMenu(self._file_list)
+        menu.addAction("Restore file", lambda: self._on_restore_file(path))
+        menu.exec(self._file_list.viewport().mapToGlobal(pos))
+
+    def _on_restore_file(self, path: Path) -> None:
+        stash = self._current_stash
+        if stash is None:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Restore File",
+            f"Restore {path.as_posix()} from {stash.ref}?\n\n"
+            "This will overwrite the working-tree copy of this file.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        adapter = self._adapter_factory(self._repo_path)
+        try:
+            adapter.restore_file_from_stash(stash.ref, path)
+        except git.GitCommandError as error:
+            QMessageBox.critical(self, "Restore File", f"Failed to restore file: {error}")
+            return
+        self.restored = True
+        QMessageBox.information(self, "Restore File", f"Restored {path.as_posix()}.")

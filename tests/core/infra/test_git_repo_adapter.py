@@ -1270,6 +1270,61 @@ def test_pop_stash_restores_file_content_and_removes_the_stash_entry(
     assert GitRepoAdapter(tmp_path).list_stashes() == []
 
 
+def test_drop_stash_removes_the_entry_without_touching_the_working_tree(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "committed.txt").write_text("dropped change\n")
+    repo.git.stash("push", "-m", "drop test")
+    ref = GitRepoAdapter(tmp_path).list_stashes()[0].ref
+
+    GitRepoAdapter(tmp_path).drop_stash(ref)
+
+    assert GitRepoAdapter(tmp_path).list_stashes() == []
+    # Unlike pop, drop never touches the working tree -- it stays at the
+    # pre-stash (committed) content.
+    assert (tmp_path / "committed.txt").read_text() == "original content\n"
+
+
+def test_drop_stash_renumbers_remaining_stashes(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "committed.txt").write_text("first change\n")
+    repo.git.stash("push", "-m", "first stash")
+    (tmp_path / "committed.txt").write_text("second change\n")
+    repo.git.stash("push", "-m", "second stash")
+    (tmp_path / "committed.txt").write_text("third change\n")
+    repo.git.stash("push", "-m", "third stash")
+    adapter = GitRepoAdapter(tmp_path)
+    # Drop the oldest (stash@{2}) -- the remaining two must renumber down.
+    assert adapter.list_stashes()[2].message == "On main: first stash"
+
+    adapter.drop_stash("stash@{2}")
+
+    remaining = adapter.list_stashes()
+    assert [e.message for e in remaining] == [
+        "On main: third stash",
+        "On main: second stash",
+    ]
+    assert [e.ref for e in remaining] == ["stash@{0}", "stash@{1}"]
+
+
+def test_restore_file_from_stash_overwrites_only_that_file(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "other.txt").write_text("other content\n")
+    repo.index.add(["other.txt"])
+    repo.index.commit("add other.txt")
+    (tmp_path / "committed.txt").write_text("stashed committed change\n")
+    (tmp_path / "other.txt").write_text("stashed other change\n")
+    repo.git.stash("push", "-m", "restore file test")
+    ref = GitRepoAdapter(tmp_path).list_stashes()[0].ref
+    # Simulate the working tree having moved on for the file we don't touch.
+    (tmp_path / "other.txt").write_text("unrelated later edit\n")
+
+    GitRepoAdapter(tmp_path).restore_file_from_stash(ref, Path("committed.txt"))
+
+    assert (tmp_path / "committed.txt").read_text() == "stashed committed change\n"
+    assert (tmp_path / "other.txt").read_text() == "unrelated later edit\n"
+    # The stash entry itself is untouched by a file-level restore.
+    assert len(GitRepoAdapter(tmp_path).list_stashes()) == 1
+
+
 @pytest.mark.parametrize("bad_ref", ["; rm -rf /", "stash@{x}", "stash@0", "", "stash@{0}; ls"])
 def test_stash_operations_reject_a_malformed_ref_without_invoking_git(
     tmp_path: Path, repo: git.Repo, bad_ref: str
@@ -1281,3 +1336,7 @@ def test_stash_operations_reject_a_malformed_ref_without_invoking_git(
         adapter.apply_stash(bad_ref)
     with pytest.raises(ValueError):
         adapter.pop_stash(bad_ref)
+    with pytest.raises(ValueError):
+        adapter.drop_stash(bad_ref)
+    with pytest.raises(ValueError):
+        adapter.restore_file_from_stash(bad_ref, Path("committed.txt"))
