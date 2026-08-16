@@ -1,5 +1,6 @@
 import shutil
 import socket
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -230,6 +231,49 @@ def test_compute_diff_for_untracked_file(tmp_path: Path, repo: git.Repo):
     assert [line.text for line in lines] == ["line one", "line two"]
     assert all(line.kind == DiffLineKind.ADDED for line in lines)
     assert [line.new_lineno for line in lines] == [1, 2]
+
+
+def test_compute_diff_for_untracked_directory_does_not_crash(tmp_path: Path, repo: git.Repo):
+    # Real trigger (user report): `git status` collapses an untracked
+    # directory (e.g. node_modules) into one porcelain entry with a trailing
+    # slash rather than one line per file inside it, so the FileChange this
+    # produces names the directory itself. Reading that path as if it were a
+    # file text-content raised IsADirectoryError: [Errno 21].
+    (tmp_path / "new_dir").mkdir()
+    (tmp_path / "new_dir" / "a.txt").write_text("a\n")
+    (tmp_path / "new_dir" / "b.txt").write_text("b\n")
+    change = FileChange(path=Path("new_dir"), change_type=ChangeType.UNTRACKED, is_directory=True)
+
+    result = GitRepoAdapter(tmp_path).compute_diff(change)
+
+    lines = [line.text for line in result.hunks[0].lines]
+    assert any("2 file" in line for line in lines)
+    assert any(line.strip() == "a.txt" for line in lines)
+    assert any(line.strip() == "b.txt" for line in lines)
+
+
+def test_compute_diff_for_untracked_binary_file_shows_placeholder(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "image.bin").write_bytes(b"\x00\x01\x02not-utf8\xff\xfe")
+    change = FileChange(path=Path("image.bin"), change_type=ChangeType.UNTRACKED)
+
+    result = GitRepoAdapter(tmp_path).compute_diff(change)
+
+    lines = [line.text for line in result.hunks[0].lines]
+    assert any("Binary file" in line for line in lines)
+
+
+def test_compute_diff_for_untracked_file_deleted_after_scan(tmp_path: Path, repo: git.Repo):
+    # The scan that produced this FileChange can race a concurrent delete
+    # (or an app-triggered worktree cleanup) -- the file must be gone by the
+    # time compute_diff actually reads it, without a crash.
+    change = FileChange(path=Path("vanished.txt"), change_type=ChangeType.UNTRACKED)
+
+    result = GitRepoAdapter(tmp_path).compute_diff(change)
+
+    lines = [line.text for line in result.hunks[0].lines]
+    assert any("no longer exists" in line for line in lines)
 
 
 def test_compute_diff_for_renamed_file(tmp_path: Path, repo: git.Repo):
@@ -746,6 +790,57 @@ def test_find_default_branch_bounded_when_remote_never_responds(
         server_socket.close()
 
 
+def test_ls_remote_default_branch_timeout_returns_none_without_spawning_ps(
+    tmp_path: Path, repo: git.Repo
+):
+    # Regression test for the macOS `ps: illegal option -- -` noise:
+    # GitPython's `kill_after_timeout=` watchdog used to shell out to
+    # `ps --ppid <pid>` to find the child to kill, and `--ppid` is a
+    # GNU/Linux-only ps flag that BSD/macOS ps rejects. The fix runs git
+    # itself via subprocess.run(timeout=...), which never invokes `ps` at
+    # all -- proven here with a fake runner that raises TimeoutExpired
+    # immediately, so the assertion is instant rather than waiting out a
+    # real 5-second timeout.
+    recorded_commands: list[list[str]] = []
+
+    def _fake_runner(command, **kwargs):
+        recorded_commands.append(list(command))
+        raise subprocess.TimeoutExpired(cmd=command, timeout=5)
+
+    result = GitRepoAdapter(tmp_path)._ls_remote_default_branch(runner=_fake_runner)
+
+    assert result is None
+    assert len(recorded_commands) == 1
+    assert "ps" not in recorded_commands[0]
+    assert "--ppid" not in recorded_commands[0]
+
+
+def test_ls_remote_default_branch_returns_none_on_nonzero_exit(
+    tmp_path: Path, repo: git.Repo
+):
+    # Old code relied on GitPython raising GitCommandError for a non-zero
+    # exit; the hand-rolled subprocess call has to check returncode itself.
+    def _fake_runner(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command, returncode=128, stdout="", stderr="fatal: unreachable"
+        )
+
+    result = GitRepoAdapter(tmp_path)._ls_remote_default_branch(runner=_fake_runner)
+
+    assert result is None
+
+
+def test_ls_remote_default_branch_returns_none_when_git_missing(
+    tmp_path: Path, repo: git.Repo
+):
+    def _fake_runner(command, **kwargs):
+        raise FileNotFoundError("git executable not found")
+
+    result = GitRepoAdapter(tmp_path)._ls_remote_default_branch(runner=_fake_runner)
+
+    assert result is None
+
+
 def test_branch_status_finds_parent_branch_with_slash_in_name(tmp_path: Path, repo: git.Repo):
     # Branch names containing '/' are common here (e.g. "TASK/foo-bar") —
     # the parent-branch lookup must not split on '/' anywhere in its ref
@@ -825,3 +920,158 @@ def test_find_local_parent_branch_matches_git_merge_base_across_merge_commit(
     # recent of the two, so "topic" must win.
     assert parent == "topic"
     assert real_merge_base == adapter._repo.heads["main"].commit.parents[0].hexsha
+
+
+# ---------------------------------------------------------------------------
+# build_patch (the "Create patch" feature): the whole point is a patch that
+# `git apply` actually accepts, so most of these assert against real `git
+# apply --check` output against a clean clone of the same repo, not just
+# against the text this module happens to produce.
+# ---------------------------------------------------------------------------
+
+
+def _assert_patch_applies_cleanly(source_repo_path: Path, patch: str, clone_dir: Path) -> None:
+    subprocess.run(
+        ["git", "clone", str(source_repo_path), str(clone_dir)],
+        check=True,
+        capture_output=True,
+    )
+    patch_file = clone_dir / "check.patch"
+    patch_file.write_text(patch, encoding="utf-8")
+    result = subprocess.run(
+        ["git", "apply", "--check", str(patch_file)],
+        cwd=clone_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"git apply --check rejected the generated patch: {result.stderr}"
+    )
+
+
+def test_build_patch_covers_modified_tracked_file(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "committed.txt").write_text("original CONTENT\n")
+
+    patch = GitRepoAdapter(tmp_path).build_patch(Path("committed.txt"), [])
+
+    assert "diff --git a/committed.txt b/committed.txt" in patch
+    assert "-original content" in patch
+    assert "+original CONTENT" in patch
+
+
+def test_build_patch_covers_staged_change(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "committed.txt").write_text("staged content\n")
+    repo.index.add(["committed.txt"])
+
+    patch = GitRepoAdapter(tmp_path).build_patch(Path("committed.txt"), [])
+
+    assert "diff --git a/committed.txt b/committed.txt" in patch
+    assert "+staged content" in patch
+
+
+def test_build_patch_covers_untracked_new_file(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "new_file.txt").write_text("brand new\n")
+
+    patch = GitRepoAdapter(tmp_path).build_patch(
+        Path("new_file.txt"), [Path("new_file.txt")]
+    )
+
+    assert "diff --git a/new_file.txt b/new_file.txt" in patch
+    assert "new file mode" in patch
+    assert "--- /dev/null" in patch
+    assert "+++ b/new_file.txt" in patch
+    assert "+brand new" in patch
+
+
+def test_build_patch_for_folder_covers_every_changed_file_under_it(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "tracked.txt").write_text("tracked one\n")
+    repo.index.add(["sub/tracked.txt"])
+    repo.index.commit("add sub/tracked.txt")
+
+    (tmp_path / "sub" / "tracked.txt").write_text("tracked TWO\n")
+    (tmp_path / "sub" / "untracked.txt").write_text("sub untracked\n")
+    # Outside "sub" -- must not appear in a "sub"-scoped patch.
+    (tmp_path / "committed.txt").write_text("outside change\n")
+
+    patch = GitRepoAdapter(tmp_path).build_patch(
+        Path("sub"), [Path("sub/untracked.txt")]
+    )
+
+    assert "diff --git a/sub/tracked.txt b/sub/tracked.txt" in patch
+    assert "diff --git a/sub/untracked.txt b/sub/untracked.txt" in patch
+    assert "committed.txt" not in patch
+
+
+def test_build_patch_expands_a_collapsed_untracked_directory_entry(
+    tmp_path: Path, repo: git.Repo
+):
+    # An untracked directory is one collapsed FileChange (see
+    # list_changes/tree_model), but git can only diff individual files
+    # against /dev/null -- build_patch must walk it back out to real files.
+    (tmp_path / "new_dir").mkdir()
+    (tmp_path / "new_dir" / "a.txt").write_text("a content\n")
+    (tmp_path / "new_dir" / "b.txt").write_text("b content\n")
+
+    patch = GitRepoAdapter(tmp_path).build_patch(Path("new_dir"), [Path("new_dir")])
+
+    assert "diff --git a/new_dir/a.txt b/new_dir/a.txt" in patch
+    assert "diff --git a/new_dir/b.txt b/new_dir/b.txt" in patch
+
+
+def test_build_patch_returns_empty_string_when_nothing_to_patch(
+    tmp_path: Path, repo: git.Repo
+):
+    patch = GitRepoAdapter(tmp_path).build_patch(Path("."), [])
+
+    assert patch == ""
+
+
+def test_build_patch_skips_binary_untracked_file_without_raising(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "image.bin").write_bytes(bytes([0, 1, 2, 3, 0, 255]))
+
+    patch = GitRepoAdapter(tmp_path).build_patch(Path("image.bin"), [Path("image.bin")])
+
+    assert patch == ""
+
+
+def test_build_patch_output_applies_cleanly_with_git_apply_check(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "nested.txt").write_text("alpha\nbeta\n")
+    repo.index.add(["sub/nested.txt"])
+    repo.index.commit("add sub/nested.txt")
+
+    (tmp_path / "committed.txt").write_text("original CONTENT\n")
+    (tmp_path / "sub" / "nested.txt").write_text("alpha\nBETA\n")
+    repo.index.add(["sub/nested.txt"])
+    (tmp_path / "sub" / "new_file.txt").write_text("brand new\n")
+
+    patch = GitRepoAdapter(tmp_path).build_patch(
+        Path("."), [Path("sub/new_file.txt")]
+    )
+
+    _assert_patch_applies_cleanly(tmp_path, patch, tmp_path.parent / "clean_checkout_whole_repo")
+
+
+def test_build_patch_for_a_single_folder_applies_cleanly_with_git_apply_check(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "nested.txt").write_text("alpha\nbeta\n")
+    repo.index.add(["sub/nested.txt"])
+    repo.index.commit("add sub/nested.txt")
+
+    (tmp_path / "sub" / "nested.txt").write_text("alpha\nBETA\n")
+    (tmp_path / "sub" / "new_file.txt").write_text("brand new\n")
+
+    patch = GitRepoAdapter(tmp_path).build_patch(
+        Path("sub"), [Path("sub/new_file.txt")]
+    )
+
+    _assert_patch_applies_cleanly(tmp_path, patch, tmp_path.parent / "clean_checkout_folder")

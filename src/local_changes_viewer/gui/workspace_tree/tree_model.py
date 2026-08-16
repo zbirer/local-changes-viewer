@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -382,7 +383,34 @@ class RepoTreeModel(QStandardItemModel):
 
         tooltip += f"\nPath: {str(repo.path)}"
 
+        for line in RepoTreeModel._folder_stat_lines(repo):
+            tooltip += f"\n{line}"
+
         return tooltip
+
+    @staticmethod
+    def _folder_stat_lines(repo) -> list[str]:
+        # A worktree's own folder is created and touched independently of
+        # the git history already summarized above -- e.g. the checkout
+        # date tells you when this worktree was set up, distinct from the
+        # branch's commit history. logical_parent_path is only ever set for
+        # a worktree (F6), so a plain repo root never grows these lines.
+        if repo.logical_parent_path is None:
+            return []
+        try:
+            stat = repo.path.stat()
+        except OSError:
+            return []
+        created_timestamp = getattr(stat, "st_birthtime", None)
+        if created_timestamp is None:
+            created_timestamp = stat.st_ctime
+        created = datetime.fromtimestamp(created_timestamp).astimezone()
+        modified = datetime.fromtimestamp(stat.st_mtime).astimezone()
+        fmt = "%Y-%m-%d %H:%M"
+        return [
+            f"Folder created: {created.strftime(fmt)}",
+            f"Folder last modified: {modified.strftime(fmt)}",
+        ]
 
     @staticmethod
     def _add_changes(repo_item: QStandardItem, repo, skip_dirs: set | None = None) -> None:

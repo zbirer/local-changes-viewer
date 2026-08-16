@@ -1,11 +1,12 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QHeaderView,
+    QLabel,
     QMenu,
     QMessageBox,
     QTableWidget,
@@ -17,18 +18,61 @@ from PySide6.QtWidgets import (
 from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
 from local_changes_viewer.gui.worktree_changes_dialog import WorktreeChangesDialog
+from local_changes_viewer.gui.workers.worktree_details_worker import WorktreeDetailsWorker
 
 _COLUMNS = ("Path", "Branch", "Last Commit / Modified", "Unpushed Changes", "Created")
 _WORKTREE_ROLE = Qt.ItemDataRole.UserRole
 
 
+class _BusyDialog(QDialog):
+    """Standalone "Reading data ..." placeholder shown while the worker runs.
+
+    Deliberately top-level (parent=None) rather than a child of WorktreesDialog:
+    `_reload()` fires from `WorktreesDialog.__init__`, before `main_window` has
+    shown/exec'd the dialog, so a child parented to a not-yet-visible window
+    risks never actually appearing. Being its own application-modal window
+    sidesteps that entirely. It has no close button and no Cancel action, and
+    ignores Escape/close-button attempts (`reject`/`closeEvent`) -- it is only
+    ever dismissed by `finish()`, called once the worker reports back.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(None)
+        self._allow_close = False
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Reading data ..."))
+
+    def finish(self) -> None:
+        self._allow_close = True
+        self.close()
+
+    def reject(self) -> None:
+        if self._allow_close:
+            super().reject()
+
+    def closeEvent(self, event) -> None:
+        if self._allow_close:
+            event.accept()
+        else:
+            event.ignore()
+
+
 class WorktreesDialog(QDialog):
     def __init__(
-        self, repo_path: Path, adapter_factory=GitRepoAdapter, parent: QWidget | None = None
+        self,
+        repo_path: Path,
+        adapter_factory=GitRepoAdapter,
+        parent: QWidget | None = None,
+        thread_pool: QThreadPool | None = None,
     ) -> None:
         super().__init__(parent)
         self._repo_path = repo_path
         self._adapter_factory = adapter_factory
+        self._thread_pool = thread_pool if thread_pool is not None else QThreadPool.globalInstance()
+        self._busy_dialog: _BusyDialog | None = None
         self.deleted_any = False
         self.setWindowTitle(f"Worktrees — {repo_path.name}")
         parent_width = parent.width() if parent is not None else 900
@@ -57,12 +101,34 @@ class WorktreesDialog(QDialog):
         self._reload()
 
     def _reload(self) -> None:
-        try:
-            details = self._adapter_factory(self._repo_path).list_worktree_details()
-        except Exception as exc:
-            QMessageBox.warning(self, "List Worktrees failed", f"Failed to list worktrees: {exc}")
-            details = []
+        # list_worktree_details() runs several git commands per worktree; kept
+        # off the GUI thread (see WorktreeDetailsWorker) so the app doesn't
+        # freeze for the few seconds that takes with more than a couple of
+        # worktrees. Also re-entered after a successful delete (_on_delete),
+        # so it must stay safe to call more than once per dialog lifetime.
+        self._busy_dialog = _BusyDialog()
+        self._busy_dialog.show()
 
+        worker = WorktreeDetailsWorker(self._repo_path, self._adapter_factory)
+        worker.signals.finished.connect(self._on_worktree_details_ready)
+        worker.signals.error.connect(self._on_worktree_details_error)
+        self._thread_pool.start(worker)
+
+    def _on_worktree_details_ready(self, details: list[WorktreeInfo]) -> None:
+        self._dismiss_busy_dialog()
+        self._populate_table(details)
+
+    def _on_worktree_details_error(self, message: str) -> None:
+        self._dismiss_busy_dialog()
+        QMessageBox.warning(self, "List Worktrees failed", f"Failed to list worktrees: {message}")
+        self._populate_table([])
+
+    def _dismiss_busy_dialog(self) -> None:
+        if self._busy_dialog is not None:
+            self._busy_dialog.finish()
+            self._busy_dialog = None
+
+    def _populate_table(self, details: list[WorktreeInfo]) -> None:
         self._row_worktrees = list(details)
         self._table.setSortingEnabled(False)
         self._table.setRowCount(len(details))

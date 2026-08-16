@@ -1,6 +1,9 @@
+import os
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import git
 
@@ -40,6 +43,27 @@ _NOT_COMPUTED = object()  # sentinel: distinguishes "never computed" from a real
 # long a rename can go unnoticed to "worst case, one day," which is fine for
 # a UI annotation rather than something correctness-critical downstream.
 _DEFAULT_BRANCH_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+# How long _ls_remote_default_branch waits for the remote before giving up
+# (see the comment on that method for why this is a hand-rolled subprocess
+# timeout rather than GitPython's kill_after_timeout).
+_LS_REMOTE_TIMEOUT_SECONDS = 5
+
+# Matches the `runner: Runner = subprocess.run` injection seam used by
+# worktree_terminal_service.py, so tests can substitute a fake without
+# actually shelling out or waiting out a real timeout.
+LsRemoteRunner = Callable[..., subprocess.CompletedProcess]
+
+# How many file names an untracked-directory diff placeholder lists before
+# falling back to "... and N more" — keeps a `node_modules`-sized directory's
+# summary short enough to actually read.
+_UNTRACKED_DIR_SUMMARY_MAX_NAMES = 20
+
+# Hard cap on how many files _summarize_untracked_directory will even walk
+# before giving up and reporting "N+" — without this, a directory with tens
+# of thousands of entries would make every double-click on it walk the whole
+# tree just to print a count nobody needs exactly.
+_UNTRACKED_DIR_SUMMARY_SCAN_LIMIT = 5000
 
 
 class GitRepoAdapter:
@@ -442,16 +466,46 @@ class GitRepoAdapter:
         except git.GitCommandError:
             return None
 
-    def _ls_remote_default_branch(self) -> str | None:
+    def _ls_remote_default_branch(self, runner: LsRemoteRunner = subprocess.run) -> str | None:
         # Bounded so an unreachable/auth-prompting remote can never block a
         # scan indefinitely (this used to run with no timeout at all).
+        #
+        # Deliberately NOT GitPython's `kill_after_timeout=`: its watchdog
+        # thread finds the child to kill by shelling out to
+        # `ps --ppid <pid>` (git/cmd.py), and `--ppid` is a GNU/Linux-only ps
+        # flag. On macOS's BSD ps that fails and prints a usage block to
+        # stderr on *every* timeout -- exactly the noise this app must not
+        # produce. Running git ourselves via subprocess.run(timeout=...) gets
+        # the same bound with no `ps` invocation at all.
         try:
-            output = self._repo.git.ls_remote(
-                "--symref", "origin", "HEAD", kill_after_timeout=5
+            result = runner(
+                [
+                    git.Git.GIT_PYTHON_GIT_EXECUTABLE,
+                    "ls-remote",
+                    "--symref",
+                    "origin",
+                    "HEAD",
+                ],
+                # self._repo_path over self._repo.working_dir/git_dir: this
+                # adapter is only ever constructed against a working tree
+                # (never a bare repo), and repo_path is already the exact
+                # directory the caller pointed us at.
+                cwd=self._repo_path,
+                capture_output=True,
+                text=True,
+                timeout=_LS_REMOTE_TIMEOUT_SECONDS,
+                # An auth-prompting remote must never sit there waiting on
+                # input -- stdin is unreachable in a background scan, so
+                # closing it (and telling git the same via the env var) turns
+                # what would otherwise be a hang into an immediate failure.
+                stdin=subprocess.DEVNULL,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
             )
-        except git.GitCommandError:
+        except (subprocess.TimeoutExpired, FileNotFoundError):
             return None
-        for line in output.splitlines():
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
             if line.startswith("ref:"):
                 ref = line.split()[1]
                 return ref.removeprefix("refs/heads/")
@@ -562,7 +616,7 @@ class GitRepoAdapter:
 
     def compute_diff(self, change: FileChange, ignore_whitespace: bool = False) -> DiffResult:
         if change.change_type == ChangeType.UNTRACKED:
-            return self._diff_untracked(change.path)
+            return self._diff_untracked(change)
 
         args = ["--no-color", "-M", "--unified=100000"]
         if ignore_whitespace:
@@ -584,12 +638,91 @@ class GitRepoAdapter:
         raw = self._repo.git.diff(*args)
         return self._parse_unified_diff(raw, old_ref=old_ref, new_ref=new_ref)
 
-    def _diff_untracked(self, path: Path) -> DiffResult:
-        content = (self._repo_path / path).read_text(errors="replace")
+    def _diff_untracked(self, change: FileChange) -> DiffResult:
+        """Renders an untracked path's content as an all-ADDED "diff".
+
+        `git status` collapses an untracked *directory* into one porcelain
+        entry (e.g. `node_modules/`) instead of one line per file inside it,
+        so `change.path` can name a directory rather than a file — reading
+        that as text raised IsADirectoryError (the bug this guards against).
+        Two more disk-reality mismatches get the same "never crash, show a
+        readable line instead" treatment here rather than at the GUI layer,
+        since both are specific to *this* path (reading arbitrary bytes off
+        disk) and not to diffing in general: an untracked binary file, whose
+        raw bytes would otherwise render as decode-replacement garbage
+        instead of a message; and a path that vanished from disk between the
+        workspace scan and the click that requested its diff.
+        """
+        abs_path = self._repo_path / change.path
+        # `change.is_directory` is the normal signal (list_changes already
+        # stat'd it once); is_dir() here is a defensive fallback for a stale
+        # FileChange (change.is_directory computed before something on disk
+        # was swapped for a directory) rather than a second stat on the
+        # common path.
+        if change.is_directory or abs_path.is_dir():
+            return self._summarize_untracked_directory(abs_path)
+
+        try:
+            raw_bytes = abs_path.read_bytes()
+        except FileNotFoundError:
+            return self._text_summary_result([f"File no longer exists on disk: {change.path}"])
+        except IsADirectoryError:
+            # Race: became a directory after the is_dir() check above.
+            return self._summarize_untracked_directory(abs_path)
+
+        # Git's own binary-detection heuristic (a NUL byte anywhere in the
+        # sample) — good enough here since the alternative is only "readable
+        # message" vs. "decode-replacement mojibake", not an apply-able diff.
+        if b"\x00" in raw_bytes:
+            return self._text_summary_result(
+                [f"Binary file ({len(raw_bytes)} bytes) — content not shown."]
+            )
+
+        content = raw_bytes.decode("utf-8", errors="replace")
         lines = content.splitlines()
+        return self._text_summary_result(lines, start_lineno=1)
+
+    def _summarize_untracked_directory(self, abs_path: Path) -> DiffResult:
+        """An untracked directory can hold tens of thousands of files (a
+        `node_modules` is exactly the case that broke this) — reading each one
+        into the diff pane would be slow and useless, so this reports a
+        bounded summary instead: how many files, and the first few names.
+        `_UNTRACKED_DIR_SUMMARY_SCAN_LIMIT` caps the walk itself, not just the
+        displayed list, so a pathological tree can't stall the UI either.
+        """
+        names: list[str] = []
+        total = 0
+        capped = False
+        for root, _dirs, files in os.walk(abs_path):
+            for name in sorted(files):
+                total += 1
+                if total > _UNTRACKED_DIR_SUMMARY_SCAN_LIMIT:
+                    capped = True
+                    break
+                if len(names) < _UNTRACKED_DIR_SUMMARY_MAX_NAMES:
+                    names.append(str((Path(root) / name).relative_to(abs_path)))
+            if capped:
+                break
+
+        count_label = f"{_UNTRACKED_DIR_SUMMARY_SCAN_LIMIT}+" if capped else str(total)
+        lines = [f"Untracked directory with {count_label} file(s) — showing a summary, not a diff:"]
+        lines.extend(f"  {name}" for name in names)
+        if capped:
+            lines.append(f"  ... and more (stopped counting after {_UNTRACKED_DIR_SUMMARY_SCAN_LIMIT})")
+        elif total > len(names):
+            lines.append(f"  ... and {total - len(names)} more")
+        return self._text_summary_result(lines)
+
+    @staticmethod
+    def _text_summary_result(lines: list[str], start_lineno: int = 1) -> DiffResult:
+        """Wraps plain text lines as a one-hunk, all-ADDED DiffResult — the
+        shape every diff view already knows how to render, reused here for
+        the untracked-path summary/placeholder messages (directory, binary,
+        vanished-file) so they need no rendering path of their own.
+        """
         hunk_lines = [
             DiffLine(kind=DiffLineKind.ADDED, old_lineno=None, new_lineno=i, text=text)
-            for i, text in enumerate(lines, start=1)
+            for i, text in enumerate(lines, start=start_lineno)
         ]
         hunks = []
         if hunk_lines:
@@ -667,3 +800,61 @@ class GitRepoAdapter:
         if "D" in xy:
             return ChangeType.DELETED
         return ChangeType.MODIFIED
+
+    def build_patch(self, relpath: Path, untracked_paths: list[Path]) -> str:
+        """Builds a raw, `git apply`-able unified diff for `relpath` (a file or a
+        directory in this repo), covering both tracked changes and the untracked
+        files named in `untracked_paths`.
+
+        Built straight from git rather than from `DiffResult`/`diff_formatting.py`:
+        those exist to *render* a diff (parsed hunks, `--unified=100000` full-file
+        context for the side-by-side view, staged/whitespace variants) and throw the
+        raw text away, and `diff_formatting.py`'s reconstruction has no `diff --git`
+        envelope and is deliberately not apply-able. A patch that has to round-trip
+        through `git apply` needs git's own patch text, not a re-render of data that
+        was shaped for the viewer.
+
+        Tracked changes come from a single `git diff HEAD -- <relpath>`, so both
+        staged and unstaged edits land in one patch. Untracked files aren't in git's
+        index at all, so they can't go through that same diff — each is generated
+        separately via `git diff --no-index -- /dev/null <file>`, which is also how
+        `git apply` learns to create a brand-new file rather than patch one that
+        doesn't exist yet.
+        """
+        tracked = self._repo.git.diff("--no-color", "HEAD", "--", str(relpath))
+        if tracked and not tracked.endswith("\n"):
+            tracked += "\n"
+
+        untracked_chunks: list[str] = []
+        for path in untracked_paths:
+            abs_path = self._repo_path / path
+            # An untracked *directory* is one collapsed FileChange (see
+            # list_changes/tree_model), but `git diff --no-index` only knows how to
+            # diff a file against /dev/null — so expand it to its actual files here.
+            files = sorted(p for p in abs_path.rglob("*") if p.is_file()) if abs_path.is_dir() else [abs_path]
+            for file_path in files:
+                chunk = self._diff_new_file(file_path.relative_to(self._repo_path))
+                if chunk:
+                    untracked_chunks.append(chunk)
+
+        return tracked + "".join(untracked_chunks)
+
+    def _diff_new_file(self, relpath: Path) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--no-color", "--no-index", "--", "/dev/null", str(relpath)],
+                cwd=self._repo_path,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            # Unreadable path (permissions, dangling symlink, etc) — skip it rather
+            # than fail the whole folder patch over one file the user can't see anyway.
+            return ""
+        # --no-index exits 1 whenever it finds a difference (i.e. always, for a
+        # real new file), so 1 is success here, not failure. >1 means diff itself
+        # couldn't run (bad path). A binary diff has no textual patch content git
+        # apply could use, so skip it rather than emit a header with nothing to apply.
+        if result.returncode > 1 or "Binary files" in result.stdout:
+            return ""
+        return result.stdout

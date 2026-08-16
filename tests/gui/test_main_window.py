@@ -5,11 +5,12 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import git
 import pytest
-from PySide6.QtCore import QSettings
-from PySide6.QtGui import QTextCursor
+from PySide6.QtCore import QModelIndex, QSettings
+from PySide6.QtGui import QGuiApplication, QTextCursor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
 import local_changes_viewer.gui.main_window as main_window_module
 import local_changes_viewer.gui.settings as settings_module
@@ -17,9 +18,11 @@ from local_changes_viewer.core.domain.diff import DiffResult
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.repository import BranchStatus, Repository
 from local_changes_viewer.core.domain.workspace import Workspace
+from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
 from local_changes_viewer.gui.diff_view import diff_view_widget as diff_view_widget_module
 from local_changes_viewer.gui.main_window import MainWindow
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
+from local_changes_viewer.gui.workspace_tree.tree_model import FOLDER_PATH_ROLE
 
 _BRANCH = BranchStatus(branch_name="main", ahead=0, behind=0)
 
@@ -51,6 +54,36 @@ def _type_marker_into_edit_buffer(diff_view) -> None:
 
 def _repo(name: str, changes: list[FileChange]) -> Repository:
     return Repository(path=Path(f"/repos/{name}"), name=name, branch_status=_BRANCH, changes=changes)
+
+
+def _find_folder_index(
+    model, folder_path: Path, parent: QModelIndex = QModelIndex()
+) -> QModelIndex:
+    """Mirrors MainWindow._find_tree_index's walk, but for a folder row
+    (matched on FOLDER_PATH_ROLE rather than FILE_CHANGE_ROLE/REPO_PATH_ROLE),
+    since there's no production helper for that -- only file rows need one
+    outside tests (see MainWindow._restore_previous_selection)."""
+    for row in range(model.rowCount(parent)):
+        index = model.index(row, 0, parent)
+        if index.data(FOLDER_PATH_ROLE) == str(folder_path):
+            return index
+        found = _find_folder_index(model, folder_path, index)
+        if found.isValid():
+            return found
+    return QModelIndex()
+
+
+def _init_real_repo(repo_path: Path) -> git.Repo:
+    """Builds a real git repo on disk -- Create Patch's whole point is a
+    patch real git commands accept, so its reachability tests need a real
+    repo behind the tree, not the fake `/repos/name` paths `_repo()` uses for
+    tests that never touch git itself."""
+    repo_path.mkdir()
+    repo = git.Repo.init(repo_path, initial_branch="main")
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "Test User")
+        cw.set_value("user", "email", "test@example.com")
+    return repo
 
 
 @pytest.fixture(scope="session")
@@ -600,4 +633,363 @@ def test_switching_files_mid_edit_prompts_and_declining_restores_tree_selection(
         )
     finally:
         window._diff_view.discard_edits_if_any()
+        window.close()
+
+
+# ---------------------------------------------------------------------------
+# "Create patch" context-menu action. This repo has shipped dead menu items
+# before (see other regression tests in this file), so reachability is
+# proven by actually triggering the QAction found in a real captured QMenu --
+# not by grepping _on_tree_context_menu's source for the string.
+# ---------------------------------------------------------------------------
+
+
+def _capture_menu(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Intercepts the QMenu(s) _on_tree_context_menu builds without ever
+    popping one up -- a real exec() blocks in a native modal event loop
+    forever under the offscreen platform, with no click ever coming to close
+    it. Monkeypatching QMenu.exec directly (rather than subclassing) does NOT
+    stop the real popup: PySide6 dispatches exec() through the C++ vtable, so
+    only a genuine QMenu subclass overriding exec() is honored -- reassigning
+    the base class's attribute in pure Python is silently ignored here.
+    """
+    captured: list = []
+
+    class _NonBlockingMenu(QMenu):
+        def exec(self, *args, **kwargs) -> None:
+            captured.append(self)
+
+    monkeypatch.setattr(main_window_module, "QMenu", _NonBlockingMenu)
+    return captured
+
+
+def _trigger_create_patch(menu: QMenu) -> None:
+    action = next(a for a in menu.actions() if a.text() == "Create patch")
+    action.trigger()
+
+
+def test_create_patch_action_reachable_and_wired_for_a_file_row(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: None)
+    window = MainWindow()
+    try:
+        repo_path = tmp_path / "repo"
+        repo = _init_real_repo(repo_path)
+        (repo_path / "tracked.txt").write_text("original\n")
+        repo.index.add(["tracked.txt"])
+        repo.index.commit("initial commit")
+        (repo_path / "tracked.txt").write_text("changed\n")
+
+        changes = GitRepoAdapter(repo_path).list_changes()
+        repository = Repository(
+            path=repo_path, name="repo", branch_status=_BRANCH, changes=changes
+        )
+        window._on_workspace_ready(Workspace(root_path=tmp_path, repositories=[repository]))
+
+        change = next(c for c in changes if c.path == Path("tracked.txt"))
+        index = MainWindow._find_tree_index(window._tree_view.model(), repo_path, change)
+        assert index.isValid()
+
+        window.show()
+        QTest.qWaitForWindowExposed(window)
+        captured_menus = _capture_menu(monkeypatch)
+        window._on_tree_context_menu(window._tree_view.visualRect(index).center())
+        assert len(captured_menus) == 1
+
+        captured_patches: list = []
+        monkeypatch.setattr(
+            window,
+            "_present_patch",
+            lambda patch, name: captured_patches.append((patch, name)),
+        )
+        _trigger_create_patch(captured_menus[0])
+
+        assert len(captured_patches) == 1
+        patch, suggested_name = captured_patches[0]
+        assert "diff --git a/tracked.txt b/tracked.txt" in patch
+        assert suggested_name == "tracked.txt.patch"
+    finally:
+        window.close()
+
+
+def test_create_patch_action_reachable_and_wired_for_a_plain_folder_row(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: None)
+    window = MainWindow()
+    try:
+        repo_path = tmp_path / "repo"
+        repo = _init_real_repo(repo_path)
+        (repo_path / "sub").mkdir()
+        # A tracked file must already exist under "sub" before the untracked
+        # one is added -- otherwise git status (and thus list_changes) never
+        # descends into "sub" at all and reports it as one collapsed
+        # untracked-directory entry (see GitRepoAdapter.list_changes), which
+        # renders as a FILE_CHANGE_ROLE row, not a real FOLDER_PATH_ROLE node.
+        (repo_path / "sub" / "tracked.txt").write_text("tracked\n")
+        repo.index.add(["sub/tracked.txt"])
+        repo.index.commit("add sub/tracked.txt")
+        (repo_path / "sub" / "new_file.txt").write_text("brand new\n")
+
+        changes = GitRepoAdapter(repo_path).list_changes()
+        repository = Repository(
+            path=repo_path, name="repo", branch_status=_BRANCH, changes=changes
+        )
+        window._on_workspace_ready(Workspace(root_path=tmp_path, repositories=[repository]))
+
+        folder_index = _find_folder_index(window._tree_view.model(), repo_path / "sub")
+        assert folder_index.isValid()
+
+        window.show()
+        QTest.qWaitForWindowExposed(window)
+        captured_menus = _capture_menu(monkeypatch)
+        window._on_tree_context_menu(window._tree_view.visualRect(folder_index).center())
+        assert len(captured_menus) == 1
+
+        captured_patches: list = []
+        monkeypatch.setattr(
+            window,
+            "_present_patch",
+            lambda patch, name: captured_patches.append((patch, name)),
+        )
+        _trigger_create_patch(captured_menus[0])
+
+        assert len(captured_patches) == 1
+        patch, suggested_name = captured_patches[0]
+        assert "sub/new_file.txt" in patch
+        assert suggested_name == "sub.patch"
+    finally:
+        window.close()
+
+
+def test_create_patch_action_reachable_and_wired_for_a_repo_root_row(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: None)
+    window = MainWindow()
+    try:
+        repo_path = tmp_path / "repo"
+        repo = _init_real_repo(repo_path)
+        (repo_path / "tracked.txt").write_text("original\n")
+        repo.index.add(["tracked.txt"])
+        repo.index.commit("initial commit")
+        (repo_path / "tracked.txt").write_text("changed\n")
+
+        changes = GitRepoAdapter(repo_path).list_changes()
+        repository = Repository(
+            path=repo_path, name="repo", branch_status=_BRANCH, changes=changes
+        )
+        window._on_workspace_ready(Workspace(root_path=tmp_path, repositories=[repository]))
+
+        repo_index = window._tree_view.find_repo_index(repo_path)
+        assert repo_index.isValid()
+
+        window.show()
+        QTest.qWaitForWindowExposed(window)
+        captured_menus = _capture_menu(monkeypatch)
+        window._on_tree_context_menu(window._tree_view.visualRect(repo_index).center())
+        assert len(captured_menus) == 1
+
+        captured_patches: list = []
+        monkeypatch.setattr(
+            window,
+            "_present_patch",
+            lambda patch, name: captured_patches.append((patch, name)),
+        )
+        _trigger_create_patch(captured_menus[0])
+
+        assert len(captured_patches) == 1
+        patch, suggested_name = captured_patches[0]
+        assert "diff --git a/tracked.txt b/tracked.txt" in patch
+        assert suggested_name == "repo.patch"
+    finally:
+        window.close()
+
+
+def _install_fake_chooser(monkeypatch: pytest.MonkeyPatch, click_target: str | None) -> dict:
+    """Stands in for the real QMessageBox chooser _present_patch constructs --
+    a real one would block in a modal event loop forever under the offscreen
+    platform, since nothing ever clicks it. `click_target` names which button
+    clickedButton() should report as clicked ("copy"/"save"/None for Cancel).
+    Static-method calls (information/warning) are recorded so the empty-patch
+    and save-failure paths can be asserted without needing any instance."""
+    calls: dict = {"information": [], "warning": []}
+
+    class _FakeChooser:
+        ButtonRole = QMessageBox.ButtonRole
+        StandardButton = QMessageBox.StandardButton
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self._by_kind: dict = {}
+
+        def setWindowTitle(self, *_args, **_kwargs) -> None:
+            pass
+
+        def setText(self, *_args, **_kwargs) -> None:
+            pass
+
+        def addButton(self, *args):
+            if args and args[0] == "Copy to Clipboard":
+                kind = "copy"
+            elif args and args[0] == "Save to Disk…":
+                kind = "save"
+            else:
+                kind = "cancel"
+            button = object()
+            self._by_kind[kind] = button
+            return button
+
+        def setDefaultButton(self, *_args, **_kwargs) -> None:
+            pass
+
+        def setEscapeButton(self, *_args, **_kwargs) -> None:
+            pass
+
+        def exec(self) -> None:
+            pass
+
+        def clickedButton(self):
+            return self._by_kind.get(click_target)
+
+        @staticmethod
+        def information(*args, **kwargs) -> None:
+            calls["information"].append((args, kwargs))
+
+        @staticmethod
+        def warning(*args, **kwargs) -> None:
+            calls["warning"].append((args, kwargs))
+
+    monkeypatch.setattr(main_window_module, "QMessageBox", _FakeChooser)
+    return calls
+
+
+def test_present_patch_copy_to_clipboard_sets_clipboard_and_status(
+    qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        _install_fake_chooser(monkeypatch, click_target="copy")
+
+        window._present_patch("diff --git a/x b/x\n", "x.patch")
+
+        assert QGuiApplication.clipboard().text() == "diff --git a/x b/x\n"
+        assert "clipboard" in window.statusBar().currentMessage().lower()
+    finally:
+        window.close()
+
+
+def test_present_patch_save_to_disk_writes_file_at_chosen_path(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        _install_fake_chooser(monkeypatch, click_target="save")
+        destination = tmp_path / "chosen.patch"
+        monkeypatch.setattr(
+            main_window_module,
+            "QFileDialog",
+            SimpleNamespace(getSaveFileName=lambda *a, **k: (str(destination), "")),
+        )
+
+        window._present_patch("diff --git a/x b/x\n", "x.patch")
+
+        assert destination.read_text(encoding="utf-8") == "diff --git a/x b/x\n"
+        assert str(destination) in window.statusBar().currentMessage()
+    finally:
+        window.close()
+
+
+def test_present_patch_save_dialog_cancelled_writes_nothing(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        _install_fake_chooser(monkeypatch, click_target="save")
+        monkeypatch.setattr(
+            main_window_module,
+            "QFileDialog",
+            SimpleNamespace(getSaveFileName=lambda *a, **k: ("", "")),
+        )
+
+        window._present_patch("diff --git a/x b/x\n", "x.patch")
+
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        window.close()
+
+
+def test_present_patch_cancel_writes_nothing_and_leaves_clipboard_untouched(
+    qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        QGuiApplication.clipboard().setText("untouched")
+        _install_fake_chooser(monkeypatch, click_target=None)
+
+        window._present_patch("diff --git a/x b/x\n", "x.patch")
+
+        assert QGuiApplication.clipboard().text() == "untouched"
+    finally:
+        window.close()
+
+
+def test_present_patch_empty_patch_shows_info_and_never_opens_chooser(
+    qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        calls = _install_fake_chooser(monkeypatch, click_target="copy")
+
+        def _fail_if_constructed(*_args, **_kwargs):
+            raise AssertionError("chooser must never open for an empty patch")
+
+        monkeypatch.setattr(main_window_module.QMessageBox, "__init__", _fail_if_constructed)
+
+        window._present_patch("", "x.patch")
+
+        assert len(calls["information"]) == 1
+    finally:
+        window.close()
+
+
+def test_collapse_and_expand_all_folders_buttons_toggle_real_tree_rows(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two icon buttons next to the filter box (collapse/expand all
+    folders) must actually walk the tree, not just exist and be connected to
+    *some* slot -- this repo has shipped dead menu items before. Checks a
+    NESTED folder's isExpanded(), not just a top-level repo row, since a
+    naive implementation could stop after one level."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        changes = [FileChange(path=Path("src/pkg/nested/deep.py"), change_type=ChangeType.MODIFIED)]
+        workspace = Workspace(root_path=tmp_path, repositories=[_repo("repo1", changes)])
+        window._tree_view.set_workspace(workspace)
+
+        model = window._tree_view._model
+        nested_folder_index = _find_folder_index(model, Path("/repos/repo1/src/pkg/nested"))
+        assert nested_folder_index.isValid()
+        proxy_index = window._tree_view._proxy.mapFromSource(nested_folder_index)
+
+        # set_workspace() already expandAll()'d the fresh tree -- confirm the
+        # nested row starts expanded so the collapse click below is a real
+        # state change, not a no-op that would pass trivially.
+        assert window._tree_view.isExpanded(proxy_index) is True
+
+        window._collapse_all_folders_button.click()
+        assert window._tree_view.isExpanded(proxy_index) is False
+
+        window._expand_all_folders_button.click()
+        assert window._tree_view.isExpanded(proxy_index) is True
+    finally:
         window.close()

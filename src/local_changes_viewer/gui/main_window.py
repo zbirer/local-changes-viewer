@@ -14,6 +14,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -21,7 +22,9 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QSplitter,
+    QStyle,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -40,10 +43,16 @@ from local_changes_viewer.core.infra.github_client import (
 )
 from local_changes_viewer.core.services.diff_formatting import format_unified_diff
 from local_changes_viewer.core.services.file_info import detect_encoding, detect_line_ending
+from local_changes_viewer.core.services.patch_service import PatchService
 from local_changes_viewer.core.services.workspace_cache import load_workspace, save_workspace
 from local_changes_viewer.core.services.workspace_filter import filter_workspace
 from local_changes_viewer.core.services.workspace_scanner_service import (
     WorkspaceScannerService,
+)
+from local_changes_viewer.core.services.worktree_terminal_service import (
+    WorktreeTerminalError,
+    start_worktree_process,
+    stop_worktree_process,
 )
 from local_changes_viewer.gui import applog, github_auth
 from local_changes_viewer.gui.commit_log_dialog import CommitLogDialog
@@ -107,6 +116,7 @@ class MainWindow(QMainWindow):
         self._active_profile_name: str | None = self._settings.active_profile_name()
         self._selected_change: FileChange | None = None
         self._selected_repo_path: Path | None = None
+        self._patch_service = PatchService()
         # Guards _restore_previous_selection() (Bug 4) against re-entering
         # _on_file_selected: programmatically restoring the tree/list's
         # current index re-fires file_selected via Qt's own
@@ -119,6 +129,9 @@ class MainWindow(QMainWindow):
         # RepoRefreshWorker runs for the same repo -- the worker itself has
         # no such guard.
         self._refreshing_repo_paths: set[Path] = set()
+        # Maps a running worktree's path to the AppleScript id of the Terminal.app
+        # window "Start" opened for it, so "Stop" can signal that exact run later.
+        self._worktree_terminal_windows: dict[Path, int] = {}
         self._shutdown_requested = threading.Event()
         self._scan_refresh_timer = QTimer(self)
         self._scan_refresh_timer.setInterval(150)
@@ -168,6 +181,41 @@ class MainWindow(QMainWindow):
         self._filter_box = QLineEdit()
         self._filter_box.setPlaceholderText("Filter by path…")
         self._filter_box.textChanged.connect(self._tree_view.set_filter_text)
+
+        # Route through RepoTreeView.collapse_all()/expand_all() (same calls
+        # the View menu's Collapse All/Expand All actions use) rather than
+        # QTreeView.collapseAll()/expandAll() directly -- those two methods
+        # also persist the resulting collapsed-node-key set via AppSettings,
+        # so a click here doesn't get silently undone the next time the tree
+        # rebuilds and _restore_collapsed_state() replays stale settings.
+        # "All Changes" is a flat QListWidget with no folder concept, so
+        # these only ever act on the Folder Tree tab's tree, regardless of
+        # which tab is currently active.
+        #
+        # Plain up/down arrows (SP_ArrowUp/SP_ArrowDown), not folder glyphs:
+        # a closed-vs-open folder icon pair reads as "folder" at 16px, not
+        # "collapse" vs "expand" -- direction is what actually carries the
+        # meaning here, and title-bar shade/unshade icons are not guaranteed
+        # to stay arrow-shaped across every native style the way plain arrows
+        # are.
+        button_side = self._filter_box.sizeHint().height()
+        self._collapse_all_folders_button = QToolButton()
+        self._collapse_all_folders_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
+        )
+        self._collapse_all_folders_button.setToolTip("Collapse all folders")
+        self._collapse_all_folders_button.setAutoRaise(True)
+        self._collapse_all_folders_button.setFixedSize(button_side, button_side)
+        self._collapse_all_folders_button.clicked.connect(self._tree_view.collapse_all)
+
+        self._expand_all_folders_button = QToolButton()
+        self._expand_all_folders_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
+        )
+        self._expand_all_folders_button.setToolTip("Expand all folders")
+        self._expand_all_folders_button.setAutoRaise(True)
+        self._expand_all_folders_button.setFixedSize(button_side, button_side)
+        self._expand_all_folders_button.clicked.connect(self._tree_view.expand_all)
         self._time_filter_minutes = 0
         self._diff_view = DiffViewWidget()
         self._diff_view.refresh_requested.connect(self._on_refresh)
@@ -186,7 +234,15 @@ class MainWindow(QMainWindow):
         tree_panel = QWidget()
         tree_layout = QVBoxLayout(tree_panel)
         tree_layout.setContentsMargins(6, 6, 6, 0)
-        tree_layout.addWidget(self._filter_box)
+
+        filter_row = QWidget()
+        filter_row_layout = QHBoxLayout(filter_row)
+        filter_row_layout.setContentsMargins(0, 0, 0, 0)
+        filter_row_layout.setSpacing(2)
+        filter_row_layout.addWidget(self._filter_box)
+        filter_row_layout.addWidget(self._collapse_all_folders_button)
+        filter_row_layout.addWidget(self._expand_all_folders_button)
+        tree_layout.addWidget(filter_row)
 
         self._left_vertical_splitter = QSplitter(Qt.Orientation.Vertical)
         self._left_vertical_splitter.addWidget(left_tabs)
@@ -1369,6 +1425,7 @@ class MainWindow(QMainWindow):
             menu.addAction("Copy Path", self._on_copy_file_path)
             menu.addAction("Copy Name", self._on_copy_file_name)
             menu.addAction("Refresh Diff", self._on_refresh_diff)
+            menu.addAction("Create patch", self._on_create_patch_for_file)
             menu.addSeparator()
             menu.addAction("Filter Out This File", self._on_filter_out_file)
             menu.exec(self._tree_view.viewport().mapToGlobal(pos))
@@ -1382,6 +1439,9 @@ class MainWindow(QMainWindow):
             menu.addAction("Copy Path", lambda: self._on_copy_folder_path(folder_path))
             menu.addAction(
                 "Filter Out This Folder", lambda: self._on_filter_out_folder(folder_path)
+            )
+            menu.addAction(
+                "Create patch", lambda: self._on_create_patch_for_folder(folder_path)
             )
             menu.addSeparator()
             menu.addAction(
@@ -1401,6 +1461,16 @@ class MainWindow(QMainWindow):
                 menu.addAction(
                     "List Worktrees", lambda: self._on_list_worktrees(Path(folder_path))
                 )
+                repo = self._find_repository(Path(folder_path))
+                if repo is not None and repo.logical_parent_path is not None:
+                    menu.addSeparator()
+                    running = Path(folder_path) in self._worktree_terminal_windows
+                    menu.addAction(
+                        "Start", lambda: self._on_start_worktree(Path(folder_path))
+                    ).setEnabled(not running)
+                    menu.addAction(
+                        "Stop", lambda: self._on_stop_worktree(Path(folder_path))
+                    ).setEnabled(running)
             if not index.parent().isValid():
                 repo_name = Path(folder_path).name
                 menu.addSeparator()
@@ -1467,6 +1537,116 @@ class MainWindow(QMainWindow):
         dialog.exec()
         if dialog.deleted_any:
             self._on_refresh()
+
+    def _find_repository(self, repo_path: Path) -> Repository | None:
+        if self._workspace is None:
+            return None
+        return next(
+            (r for r in self._workspace.repositories if r.path == repo_path), None
+        )
+
+    def _find_owning_repository(self, folder_path: Path) -> Repository | None:
+        # A folder can sit inside more than one repo's path when a nested repo
+        # (e.g. a worktree) lives under its parent -- the deepest (longest
+        # path) match is the one that actually owns the folder's files, so a
+        # nested repo's own changes never get attributed to its parent's patch.
+        if self._workspace is None:
+            return None
+        candidates = [
+            r for r in self._workspace.repositories if folder_path.is_relative_to(r.path)
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda r: len(r.path.parts))
+
+    def _on_create_patch_for_file(self) -> None:
+        if self._selected_change is None or self._selected_repo_path is None:
+            self.statusBar().showMessage("No file selected", 3000)
+            return
+        # RepoTreeView._on_current_changed emits file_selected's repo_path
+        # straight from REPO_PATH_ROLE (a str), not wrapped in Path -- so
+        # _selected_repo_path is a str at runtime despite its `Path | None`
+        # annotation. `str / Path` happens to work (PurePath.__rtruediv__),
+        # which is why _on_copy_file_path never noticed, but Path.__eq__
+        # against a str is unconditionally False, so _find_repository would
+        # never match here without normalizing first.
+        repo_path = Path(self._selected_repo_path)
+        repo = self._find_repository(repo_path)
+        if repo is None:
+            self.statusBar().showMessage("Could not find repository for patch", 3000)
+            return
+        applog.log(
+            f"Create Patch: {repo_path / self._selected_change.path}",
+            level=applog.LogLevel.INFO,
+        )
+        patch = self._patch_service.build_patch(repo, self._selected_change.path)
+        self._present_patch(patch, f"{self._selected_change.path.name}.patch")
+
+    def _on_create_patch_for_folder(self, folder_path: str) -> None:
+        repo = self._find_owning_repository(Path(folder_path))
+        if repo is None:
+            self.statusBar().showMessage("Could not find repository for patch", 3000)
+            return
+        applog.log(f"Create Patch: {folder_path}", level=applog.LogLevel.INFO)
+        relpath = Path(folder_path).relative_to(repo.path)
+        patch = self._patch_service.build_patch(repo, relpath)
+        self._present_patch(patch, f"{Path(folder_path).name}.patch")
+
+    def _present_patch(self, patch: str, suggested_file_name: str) -> None:
+        if not patch:
+            QMessageBox.information(self, "Create Patch", "No changes to patch.")
+            return
+
+        chooser = QMessageBox(self)
+        chooser.setWindowTitle("Create Patch")
+        chooser.setText("Patch generated. Where would you like to send it?")
+        copy_button = chooser.addButton(
+            "Copy to Clipboard", QMessageBox.ButtonRole.AcceptRole
+        )
+        save_button = chooser.addButton("Save to Disk…", QMessageBox.ButtonRole.ActionRole)
+        cancel_button = chooser.addButton(QMessageBox.StandardButton.Cancel)
+        chooser.setDefaultButton(cancel_button)
+        chooser.setEscapeButton(cancel_button)
+        chooser.exec()
+        clicked = chooser.clickedButton()
+
+        if clicked is copy_button:
+            QGuiApplication.clipboard().setText(patch)
+            self.statusBar().showMessage("Patch copied to clipboard", 3000)
+            return
+
+        if clicked is save_button:
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Patch", suggested_file_name, "Patch Files (*.patch)"
+            )
+            if not file_path:
+                return
+            try:
+                Path(file_path).write_text(patch, encoding="utf-8")
+            except OSError as error:
+                QMessageBox.warning(self, "Create Patch", f"Failed to save patch: {error}")
+                return
+            self.statusBar().showMessage(f"Patch saved to {file_path}", 3000)
+
+    def _on_start_worktree(self, repo_path: Path) -> None:
+        applog.log(f"Start Worktree: {repo_path}", level=applog.LogLevel.INFO)
+        try:
+            window_id = start_worktree_process(repo_path)
+        except WorktreeTerminalError as error:
+            self.statusBar().showMessage(
+                f"Failed to start {repo_path.name}: {error}", 5000
+            )
+            return
+        self._worktree_terminal_windows[repo_path] = window_id
+        self.statusBar().showMessage(f"Started {repo_path.name}", 3000)
+
+    def _on_stop_worktree(self, repo_path: Path) -> None:
+        window_id = self._worktree_terminal_windows.pop(repo_path, None)
+        if window_id is None:
+            return
+        applog.log(f"Stop Worktree: {repo_path}", level=applog.LogLevel.INFO)
+        stop_worktree_process(window_id)
+        self.statusBar().showMessage(f"Stopped {repo_path.name}", 3000)
 
     def _on_refresh_repo(self, repo_path: Path) -> None:
         if repo_path in self._refreshing_repo_paths:
