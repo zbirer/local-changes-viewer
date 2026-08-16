@@ -374,7 +374,11 @@ class GitRepoAdapter:
         return details
 
     def has_unpushed_changes(self) -> bool:
-        if self.list_changes():
+        # Ignored paths (a worktree's own node_modules, build output) are
+        # excluded deliberately: they can never be pushed, so counting them
+        # would flag every worktree "Yes" while every view that lists the
+        # files -- all of which drop ignored entries -- shows nothing.
+        if any(change.change_type != ChangeType.IGNORED for change in self.list_changes()):
             return True
 
         base = self._get_unpushed_diff_base()

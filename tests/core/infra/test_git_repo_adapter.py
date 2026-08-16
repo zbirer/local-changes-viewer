@@ -451,6 +451,24 @@ def test_has_unpushed_changes_false_for_clean_pushed_branch(tmp_path: Path):
     assert GitRepoAdapter(local_path).has_unpushed_changes() is False
 
 
+def test_has_unpushed_changes_false_when_only_ignored_paths_are_present(tmp_path: Path):
+    local_path, _ = _init_repo_with_pushed_commit(tmp_path)
+    (local_path / ".gitignore").write_text("node_modules/\n")
+    local_repo = git.Repo(local_path)
+    local_repo.index.add([".gitignore"])
+    local_repo.index.commit("ignore node_modules")
+    local_repo.git.push("origin", "HEAD")
+    (local_path / "node_modules").mkdir()
+    (local_path / "node_modules" / "pkg.js").write_text("x\n")
+
+    adapter = GitRepoAdapter(local_path)
+
+    # The file views drop ignored entries, so counting them here is what
+    # produced "Unpushed Changes: Yes" over an empty Files Changed list.
+    assert adapter.list_changes(include_unpushed_commits=True) != []
+    assert adapter.has_unpushed_changes() is False
+
+
 def test_has_unpushed_changes_true_with_no_upstream_configured(tmp_path: Path, repo: git.Repo):
     assert GitRepoAdapter(tmp_path).has_unpushed_changes() is True
 
