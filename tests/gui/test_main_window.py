@@ -19,7 +19,9 @@ from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
 from local_changes_viewer.core.domain.repository import BranchStatus, Repository
 from local_changes_viewer.core.domain.workspace import Workspace
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
+from local_changes_viewer.gui import applog
 from local_changes_viewer.gui.diff_view import diff_view_widget as diff_view_widget_module
+from local_changes_viewer.gui.error_log_dialog import ErrorLogDialog
 from local_changes_viewer.gui.main_window import MainWindow
 from local_changes_viewer.gui.workers.diff_worker import DiffWorker
 from local_changes_viewer.gui.workspace_tree.tree_model import FOLDER_PATH_ROLE, NODE_KEY_ROLE
@@ -120,6 +122,18 @@ def isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return ini_path
 
 
+@pytest.fixture(autouse=True)
+def _reset_applog_errors():
+    """applog's ERROR store (_ERROR_ENTRIES) is a module-level global shared
+    by the whole test process -- without this, an error logged by one test
+    in this file (e.g. via _report_error) would still be sitting in
+    applog.recent_errors() when the next test builds a "fresh" window and
+    asserts the indicator starts hidden."""
+    applog.clear_errors()
+    yield
+    applog.clear_errors()
+
+
 def _seed_settings(ini_path: Path, **values) -> None:
     settings = QSettings(str(ini_path), QSettings.Format.IniFormat)
     for key, value in values.items():
@@ -214,6 +228,170 @@ def test_auto_refresh_proceeds_once_minimum_interval_has_elapsed(
     try:
         window._start_scan(str(tmp_path), auto_refresh=True)
         assert len(scan_worker_calls) == 1
+    finally:
+        window.close()
+
+
+def test_stale_scan_result_dropped_when_superseded_by_newer_scan(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: opening folder A (slow scan), then switching to
+    folder B before A's ScanWorker reports back, must not let A's stale
+    workspace_ready result replace B's tree or overwrite the on-disk cache
+    -- _scan_generation (bumped on every _start_scan call) must make the
+    handlers drop a result from a scan a newer one already superseded."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    monkeypatch.undo()  # restore the real _start_scan for the rest of the test
+
+    started_workers: list[object] = []
+    window._thread_pool.start = started_workers.append
+    save_calls: list[Workspace] = []
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: save_calls.append(workspace))
+    monkeypatch.setattr(window, "_refresh_watch_paths", lambda repo_paths: None)
+
+    folder_a = tmp_path / "a"
+    folder_a.mkdir()
+    folder_b = tmp_path / "b"
+    folder_b.mkdir()
+
+    try:
+        window._start_scan(str(folder_a))
+        assert len(started_workers) == 1
+        worker_a = started_workers[0]
+
+        # Switch root folders before A's worker reports back -- this is
+        # what _set_root_folder does on "Open Folder".
+        window._start_scan(str(folder_b))
+        assert len(started_workers) == 2
+        worker_b = started_workers[1]
+
+        workspace_a = Workspace(root_path=folder_a, repositories=[_repo("stale", [])])
+        workspace_b = Workspace(root_path=folder_b, repositories=[_repo("fresh", [])])
+
+        # A's superseded result arrives first -- it must be dropped, not
+        # clobber B's in-progress scan or hit the on-disk cache.
+        worker_a.signals.workspace_ready.emit(workspace_a)
+        assert window._workspace is not workspace_a
+        assert window._scan_in_progress is True
+        assert save_calls == []
+
+        # B's result, from the current generation, must apply normally.
+        worker_b.signals.workspace_ready.emit(workspace_b)
+        assert window._workspace is workspace_b
+        assert window._scan_in_progress is False
+        assert save_calls == [workspace_b]
+    finally:
+        window.close()
+
+
+def test_user_initiated_refresh_supersedes_in_progress_scan(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_on_refresh (and the include-ignored/include-unpushed-commits toggle
+    handlers) deliberately have no _scan_in_progress guard -- unlike the
+    auto-refresh/file-watcher handlers, silently swallowing a user's click
+    would be bad UX. Clicking Refresh again while a scan is still running
+    must start a second scan that supersedes the first (via
+    _scan_generation) rather than leaving _scan_in_progress in an
+    inconsistent state or letting the first scan's stale result win."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    monkeypatch.undo()
+
+    started_workers: list[object] = []
+    window._thread_pool.start = started_workers.append
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: None)
+    monkeypatch.setattr(window, "_refresh_watch_paths", lambda repo_paths: None)
+    window._root_folder = str(tmp_path)
+
+    try:
+        window._on_refresh()
+        assert len(started_workers) == 1
+        assert window._scan_in_progress is True
+        first_worker = started_workers[0]
+
+        # User clicks Refresh again before the first scan finishes.
+        window._on_refresh()
+        assert len(started_workers) == 2
+        assert window._scan_in_progress is True
+        second_worker = started_workers[1]
+
+        stale_workspace = Workspace(root_path=Path(tmp_path), repositories=[_repo("stale", [])])
+        first_worker.signals.workspace_ready.emit(stale_workspace)
+        # Dropped: must not flip _scan_in_progress off while the second
+        # (current) scan is still running.
+        assert window._scan_in_progress is True
+        assert window._workspace is not stale_workspace
+
+        fresh_workspace = Workspace(root_path=Path(tmp_path), repositories=[_repo("fresh", [])])
+        second_worker.signals.workspace_ready.emit(fresh_workspace)
+        assert window._scan_in_progress is False
+        assert window._workspace is fresh_workspace
+    finally:
+        window.close()
+
+
+def test_worker_signal_after_shutdown_requested_is_dropped(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the closeEvent teardown race: closeEvent sets
+    _shutdown_requested before waiting (with a bounded timeout) for the
+    thread pool, so a worker that outlives that wait can still emit later.
+    _guard_worker_result must drop that late signal instead of calling back
+    into a window that may already be torn down."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    monkeypatch.undo()
+
+    started_workers: list[object] = []
+    window._thread_pool.start = started_workers.append
+    save_calls: list[Workspace] = []
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: save_calls.append(workspace))
+    monkeypatch.setattr(window, "_refresh_watch_paths", lambda repo_paths: None)
+
+    try:
+        window._start_scan(str(tmp_path))
+        worker = started_workers[0]
+
+        # Simulate closeEvent having already set the shutdown flag (it does
+        # this before the bounded waitForDone) while this worker is still
+        # mid-flight.
+        window._shutdown_requested.set()
+
+        workspace = Workspace(root_path=Path(tmp_path), repositories=[_repo("late", [])])
+        worker.signals.workspace_ready.emit(workspace)
+
+        # The guarded slot must have short-circuited before touching
+        # _on_workspace_ready at all.
+        assert window._workspace is not workspace
+        assert save_calls == []
+    finally:
+        window._shutdown_requested.clear()
+        window.close()
+
+
+def test_update_file_info_label_caps_read_to_sniff_size(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: _update_file_info_label used to read_bytes() the
+    whole file on the GUI thread on every file selection. A file whose first
+    _FILE_INFO_SNIFF_BYTES are plain ASCII but which contains a NUL byte
+    further in must still be reported as text (not "Binary"), proving the
+    read never reaches that NUL -- i.e. it's bounded, not just fast."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    monkeypatch.undo()
+    monkeypatch.setattr(main_window_module, "_FILE_INFO_SNIFF_BYTES", 16)
+
+    repo_path = tmp_path
+    file_path = repo_path / "big.bin"
+    file_path.write_bytes(b"a" * 16 + b"\x00" + b"b" * 10_000)
+    change = FileChange(path=Path("big.bin"), change_type=ChangeType.MODIFIED)
+
+    try:
+        window._update_file_info_label(repo_path, change)
+        assert window._file_info_label.text() == "UTF-8 · N/A"
     finally:
         window.close()
 
@@ -1739,5 +1917,80 @@ def test_show_stashes_does_not_refresh_when_dialog_reports_no_restore(
         window._on_show_stashes_for_repo(str(repo_path))
 
         assert refreshed == []
+    finally:
+        window.close()
+
+
+def test_error_indicator_hidden_on_a_fresh_window(
+    qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        window.show()
+        assert window._error_indicator_button.isVisible() is False
+    finally:
+        window.close()
+
+
+def test_report_error_shows_indicator_toast_and_tooltip(
+    qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        window.show()
+        window._report_error("boom")
+
+        assert window._error_indicator_button.isVisible() is True
+        assert "1" in window._error_indicator_button.text()
+        assert "error" in window._error_indicator_button.text().lower()
+        assert "boom" in window._error_indicator_button.toolTip()
+        assert "boom" in window.statusBar().currentMessage()
+
+        window._report_error("second boom")
+
+        assert "2" in window._error_indicator_button.text()
+        assert "errors" in window._error_indicator_button.text().lower()
+        assert "second boom" in window._error_indicator_button.toolTip()
+    finally:
+        window.close()
+
+
+def test_report_error_logs_exactly_once_per_call(
+    qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        window._report_error("only once")
+
+        assert applog.error_count() == 1
+    finally:
+        window.close()
+
+
+def test_show_error_log_dialog_lists_errors_and_clear_hides_indicator(
+    qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        window.show()
+        window._report_error("dialog boom")
+        assert window._error_indicator_button.isVisible() is True
+
+        dialog = ErrorLogDialog(window, on_cleared=window._refresh_error_indicator)
+        try:
+            assert dialog._list.count() == 1
+            assert "dialog boom" in dialog._list.item(0).text()
+
+            dialog._on_clear()
+
+            assert dialog._list.count() == 0
+            assert applog.error_count() == 0
+            assert window._error_indicator_button.isVisible() is False
+        finally:
+            dialog.close()
     finally:
         window.close()

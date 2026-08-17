@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication, QKeySequence, QTextCursor
+from PySide6.QtGui import QGuiApplication, QKeySequence, QTextCursor, QTextDocument
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -14,6 +14,7 @@ from local_changes_viewer.core.domain.diff import DiffHunk, DiffLine, DiffLineKi
 from local_changes_viewer.gui.diff_view import diff_view_widget, side_by_side_view
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.diff_view.side_by_side_view import SideBySideView
+from local_changes_viewer.gui.diff_view.syntax_highlighter import PygmentsHighlighter
 from local_changes_viewer.gui.diff_view.unified_view import UnifiedView
 
 
@@ -706,6 +707,98 @@ def test_side_by_side_left_pane_copy_location_reports_old_lineno_and_disables_fo
         view.close()
 
 
+def _force_scrollable_panes(view: SideBySideView) -> None:
+    """Shrinks both panes' viewports well below their document heights so
+    the vertical scrollbars actually have range to test against --
+    resizing the outer view alone is unreliable under the offscreen
+    platform's layout timing, so the panes are pinned directly."""
+    view._left.setFixedHeight(80)
+    view._right.setFixedHeight(80)
+    QApplication.processEvents()
+
+
+def _diff_with_many_visible_lines(blocks: int) -> DiffResult:
+    """Interleaves a small removed/added pair between short context runs so
+    `fold_context` (FOLD_THRESHOLD=3, CONTEXT_MARGIN=3) never collapses any
+    of it into a "click to expand" row -- a long unbroken CONTEXT run would
+    fold down to a single line, leaving nothing to scroll through."""
+    lines: list[DiffLine] = []
+    old_no = 0
+    new_no = 0
+    for i in range(blocks):
+        old_no += 1
+        lines.append(DiffLine(DiffLineKind.REMOVED, old_no, None, f"removed-{i}"))
+        new_no += 1
+        lines.append(DiffLine(DiffLineKind.ADDED, None, new_no, f"added-{i}"))
+        for _ in range(8):
+            old_no += 1
+            new_no += 1
+            lines.append(DiffLine(DiffLineKind.CONTEXT, old_no, new_no, f"context-{old_no}"))
+    hunk = DiffHunk(old_start=1, old_count=old_no, new_start=1, new_count=new_no, lines=lines)
+    return DiffResult(old_ref="HEAD", new_ref="working tree", hunks=[hunk])
+
+
+def test_vertical_scroll_sync_mirrors_left_to_right_when_pane_lengths_match_in_diff_mode(
+    qapp, tmp_path: Path
+) -> None:
+    """Pins the non-edit-mode case: both panes render the identical
+    `paired`-line list in diff mode (see `_rebuild`), so their vertical
+    scrollbar ranges are always equal and syncing must still land the
+    right pane on exactly the value the left pane scrolled to -- there was
+    no test coverage of scroll sync at all before this one."""
+    view = _ready_view(tmp_path, "content", diff=_diff_with_many_visible_lines(50))
+    _force_scrollable_panes(view)
+
+    left_bar = view._left.verticalScrollBar()
+    right_bar = view._right.verticalScrollBar()
+    assert left_bar.maximum() > 0
+    assert left_bar.maximum() == right_bar.maximum()
+
+    left_bar.setValue(left_bar.maximum() // 2)
+
+    assert right_bar.value() == left_bar.value()
+
+
+def test_vertical_scroll_stays_proportional_in_edit_mode_with_mismatched_pane_lengths(
+    qapp, tmp_path: Path
+) -> None:
+    """In edit mode the left pane holds the reconstructed OLD file and the
+    right pane holds the live text read straight off disk
+    (`enter_edit_mode`) -- two different document lengths whenever the
+    file grew or shrank. Copying the raw scrollbar integer (the pre-fix
+    behavior) maps the same value to unrelated lines in each pane and the
+    panes visibly drift; this pins the ratio-based replacement instead."""
+    old_lines = [f"old-{i}" for i in range(1, 901)]
+    hunk = DiffHunk(
+        old_start=1,
+        old_count=900,
+        new_start=1,
+        new_count=900,
+        lines=[
+            DiffLine(DiffLineKind.CONTEXT, i, i, text)
+            for i, text in enumerate(old_lines, start=1)
+        ],
+    )
+    diff = DiffResult(old_ref="HEAD", new_ref="working tree", hunks=[hunk])
+    new_text = "\n".join(f"new-{i}" for i in range(1, 21))  # far shorter file on disk
+    view = _ready_view(tmp_path, new_text, diff=diff)
+
+    assert view.enter_edit_mode()
+    _force_scrollable_panes(view)
+
+    left_bar = view._left.verticalScrollBar()
+    right_bar = view._right.verticalScrollBar()
+    assert left_bar.maximum() > right_bar.maximum() > 0, (
+        "left (900 lines) must have far more room to scroll than right (20 lines)"
+    )
+
+    target_value = left_bar.maximum() // 4
+    left_bar.setValue(target_value)
+
+    expected = round(target_value / left_bar.maximum() * right_bar.maximum())
+    assert right_bar.value() == expected
+
+
 def test_side_by_side_right_pane_copy_location_reports_new_lineno_and_disables_for_blank_row(
     qapp, tmp_path: Path
 ) -> None:
@@ -728,3 +821,31 @@ def test_side_by_side_right_pane_copy_location_reports_new_lineno_and_disables_f
         assert QGuiApplication.clipboard().text() == "untouched"
     finally:
         view.close()
+
+
+# ---------------------------------------------------------------------------
+# PygmentsHighlighter.set_filename must be a no-op for a repeat filename --
+# _rebuild() calls it on every fold-marker expand, not just on a genuine
+# file switch, and a full-document rehighlight() on each one is wasted work
+# the lexer can't have changed if the filename hasn't.
+# ---------------------------------------------------------------------------
+
+
+def test_pygments_highlighter_set_filename_skips_rehighlight_when_unchanged(
+    qapp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # QSyntaxHighlighter(document) makes the document the highlighter's
+    # owner (per Qt docs) -- a bare `PygmentsHighlighter(QTextDocument())`
+    # with no name binding the document lets Python garbage-collect that
+    # temporary immediately, deleting the highlighter along with it.
+    document = QTextDocument()
+    highlighter = PygmentsHighlighter(document)
+    highlighter.set_filename("sample.py")
+    rehighlight_calls: list[int] = []
+    monkeypatch.setattr(highlighter, "rehighlight", lambda: rehighlight_calls.append(1))
+
+    highlighter.set_filename("sample.py")
+    assert rehighlight_calls == [], "same filename repeated must not re-lex the document"
+
+    highlighter.set_filename("sample.js")
+    assert rehighlight_calls == [1], "a genuine filename change must still rehighlight"

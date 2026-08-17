@@ -141,6 +141,22 @@ def change_runs(diff: DiffResult) -> list[ChangeRun]:
     simply didn't include in either hunk -- merging them would silently
     drop a navigation stop.
 
+    The "closest preceding CONTEXT line" trackers are reset at every hunk
+    boundary too, re-seeded from that hunk's own declared `old_start`/
+    `new_start` rather than left holding the previous hunk's last CONTEXT
+    line. Without this, a run that is the very first thing in a hunk (no
+    CONTEXT line of its own yet to update the tracker) would fall back to
+    a position borrowed from wherever the PREVIOUS hunk happened to end --
+    an unrelated part of the file. Per the unified-diff header convention
+    (see `git_repo_adapter.py`'s hunk-header parsing), `old_start` already
+    equals the real line number of the hunk's first old-side line when
+    `old_count > 0`, so seeding one below it (`old_start - 1`) reproduces
+    the "one past preceding context" fallback exactly; when `old_count`
+    is 0 (the whole hunk has no old-side line at all, e.g. a pure
+    insertion), `old_start` itself already denotes the last real old line
+    *before* the hunk per that same convention, so it is used unshifted.
+    `new_start`/`new_count` are seeded symmetrically.
+
     Returns `[]` when the diff has no REMOVED/ADDED lines at all.
     """
     runs: list[ChangeRun] = []
@@ -166,6 +182,8 @@ def change_runs(diff: DiffResult) -> list[ChangeRun]:
 
     for hunk in diff.hunks:
         flush()
+        last_context_old = hunk.old_start - 1 if hunk.old_count > 0 else hunk.old_start
+        last_context_new = hunk.new_start - 1 if hunk.new_count > 0 else hunk.new_start
         for line in hunk.lines:
             if line.kind is DiffLineKind.CONTEXT:
                 flush()

@@ -13,6 +13,9 @@ class RepoRefreshWorkerSignals(QObject):
     repo_ready = Signal(object)  # Repository | None
     error = Signal(str)
     log_message = Signal(str)
+    # Always emitted last (see run()) -- this is what WorkerKeeper waits for
+    # before releasing its reference, never a payload-carrying signal.
+    finished = Signal()
 
 
 class RepoRefreshWorker(QRunnable):
@@ -37,16 +40,22 @@ class RepoRefreshWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            repo = self._service.scan_repo(
-                self._repo_path,
-                include_ignored=self._include_ignored,
-                github_client=self._github_client,
-                on_log=self.signals.log_message.emit,
-                previous_pull_request=self._previous_pull_request,
-                logical_parent_path=self._logical_parent_path,
-                include_unpushed_commits=self._include_unpushed_commits,
-            )
-        except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
-            self.signals.error.emit(str(exc))
-        else:
-            self.signals.repo_ready.emit(repo)
+            try:
+                repo = self._service.scan_repo(
+                    self._repo_path,
+                    include_ignored=self._include_ignored,
+                    github_client=self._github_client,
+                    on_log=self.signals.log_message.emit,
+                    previous_pull_request=self._previous_pull_request,
+                    logical_parent_path=self._logical_parent_path,
+                    include_unpushed_commits=self._include_unpushed_commits,
+                )
+            except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
+                self.signals.error.emit(str(exc))
+            else:
+                self.signals.repo_ready.emit(repo)
+        finally:
+            # Last, always: WorkerKeeper frees this worker only once this
+            # fires, and queued signals are FIFO, so every emit above is
+            # delivered first -- see worker_keeper.py for the full reason.
+            self.signals.finished.emit()

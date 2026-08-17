@@ -10,6 +10,7 @@ import pytest
 
 from local_changes_viewer.core.domain.diff import DiffLineKind
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
+from local_changes_viewer.core.infra import git_repo_adapter
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
 from local_changes_viewer.core.services import workspace_cache
 
@@ -133,6 +134,102 @@ def test_list_changes_detects_renamed_staged_file(tmp_path: Path, repo: git.Repo
     match = next(c for c in changes if c.path == Path("renamed.txt"))
     assert match.change_type == ChangeType.RENAMED
     assert match.old_path == Path("committed.txt")
+
+
+def test_list_changes_and_diff_round_trip_a_non_ascii_filename(tmp_path: Path, repo: git.Repo):
+    # Regression test: git's default core.quotePath=true C-quotes a
+    # non-ASCII filename into an escaped literal like "\327\251..." in the
+    # old newline-splitting parser's input, so the FileChange this produced
+    # never matched the real file on disk -- a later `git diff -- <path>`
+    # against that escaped string matched nothing, and the user saw the
+    # file listed with an empty diff. `-z` + `-c core.quotePath=false` must
+    # round-trip the real UTF-8 name end to end.
+    (tmp_path / "שלום.txt").write_text("hello\n", encoding="utf-8")
+
+    changes = GitRepoAdapter(tmp_path).list_changes()
+
+    match = next(c for c in changes if c.path == Path("שלום.txt"))
+    assert match.change_type == ChangeType.UNTRACKED
+
+    diff = GitRepoAdapter(tmp_path).compute_diff(match)
+    lines = [line.text for hunk in diff.hunks for line in hunk.lines]
+    assert "hello" in lines
+
+
+def test_compute_diff_for_modified_non_ascii_filename_matches_real_content(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "תודה.txt").write_text("original\n", encoding="utf-8")
+    repo.index.add(["תודה.txt"])
+    repo.index.commit("add hebrew file")
+    (tmp_path / "תודה.txt").write_text("changed\n", encoding="utf-8")
+
+    changes = GitRepoAdapter(tmp_path).list_changes()
+    match = next(c for c in changes if c.path == Path("תודה.txt"))
+    assert match.change_type == ChangeType.MODIFIED
+
+    diff = GitRepoAdapter(tmp_path).compute_diff(match)
+    # Before the fix, `git diff -- <mis-parsed escaped path>` matched
+    # nothing, so this came back with zero hunks instead of the real edit.
+    assert len(diff.hunks) == 1
+    added = [line.text for line in diff.hunks[0].lines if line.kind == DiffLineKind.ADDED]
+    assert added == ["changed"]
+
+
+def test_list_changes_detects_renamed_file_with_non_ascii_names(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "מסמך.txt").write_text("a\nb\nc\n", encoding="utf-8")
+    repo.index.add(["מסמך.txt"])
+    repo.index.commit("add hebrew file")
+    (tmp_path / "מסמך.txt").rename(tmp_path / "קובץ_חדש.txt")
+    repo.index.remove(["מסמך.txt"])
+    repo.index.add(["קובץ_חדש.txt"])
+
+    changes = GitRepoAdapter(tmp_path).list_changes()
+
+    match = next(c for c in changes if c.path == Path("קובץ_חדש.txt"))
+    assert match.change_type == ChangeType.RENAMED
+    assert match.old_path == Path("מסמך.txt")
+
+
+def test_list_changes_detects_renamed_file_whose_name_contains_arrow_literal(
+    tmp_path: Path, repo: git.Repo
+):
+    # The old parser split each status line on the literal substring
+    # " -> " to separate a rename's old/new paths -- a filename that itself
+    # contains that exact substring would corrupt the split. `-z` sidesteps
+    # this entirely: old and new paths are separate NUL-terminated records,
+    # never joined with " -> " text at all.
+    (tmp_path / "committed.txt").rename(tmp_path / "a -> b.txt")
+    repo.index.remove(["committed.txt"])
+    repo.index.add(["a -> b.txt"])
+
+    changes = GitRepoAdapter(tmp_path).list_changes()
+
+    match = next(c for c in changes if c.path == Path("a -> b.txt"))
+    assert match.change_type == ChangeType.RENAMED
+    assert match.old_path == Path("committed.txt")
+
+
+def test_get_commit_files_reports_real_non_ascii_path(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "לקוח.txt").write_text("x\n", encoding="utf-8")
+    repo.index.add(["לקוח.txt"])
+    commit = repo.index.commit("add hebrew file")
+
+    changes = GitRepoAdapter(tmp_path).get_commit_files(commit.hexsha)
+
+    assert any(c.path == Path("לקוח.txt") for c in changes)
+
+
+def test_list_changes_includes_unpushed_commit_with_non_ascii_path(tmp_path: Path):
+    local_path, repo = _init_repo_with_pushed_commit(tmp_path)
+    (local_path / "עדכון.txt").write_text("x\n", encoding="utf-8")
+    repo.index.add(["עדכון.txt"])
+    repo.index.commit("local only hebrew file")
+
+    changes = GitRepoAdapter(local_path).list_changes(include_unpushed_commits=True)
+
+    match = next(c for c in changes if c.path == Path("עדכון.txt"))
+    assert match.is_unpushed_commit is True
 
 
 def test_list_changes_detects_ignored_file(tmp_path: Path, repo: git.Repo):
@@ -291,6 +388,23 @@ def test_compute_diff_for_untracked_binary_file_shows_placeholder(
 
     lines = [line.text for line in result.hunks[0].lines]
     assert any("Binary file" in line for line in lines)
+
+
+def test_compute_diff_for_untracked_file_over_size_cap_shows_placeholder(
+    tmp_path: Path, repo: git.Repo, monkeypatch: pytest.MonkeyPatch
+):
+    # Lowering the cap (rather than writing a real multi-megabyte file to
+    # disk) exercises the same code path -- "stop before read_bytes()" --
+    # without a slow, disk-heavy test.
+    monkeypatch.setattr(git_repo_adapter, "_UNTRACKED_FILE_DIFF_MAX_BYTES", 10)
+    (tmp_path / "big.txt").write_text("0123456789ABCDEF\n")
+    change = FileChange(path=Path("big.txt"), change_type=ChangeType.UNTRACKED)
+
+    result = GitRepoAdapter(tmp_path).compute_diff(change)
+
+    lines = [line.text for line in result.hunks[0].lines]
+    assert any("too large" in line.lower() for line in lines)
+    assert not any("0123456789" in line for line in lines)
 
 
 def test_compute_diff_for_untracked_file_deleted_after_scan(tmp_path: Path, repo: git.Repo):
@@ -638,6 +752,58 @@ def test_get_recent_commits_returns_newest_first_with_limit(tmp_path: Path, repo
 
     assert [c.message for c in commits] == ["commit 2", "commit 1"]
     assert all(len(c.short_hexsha) == 8 for c in commits)
+
+
+def test_get_recent_commits_reports_current_branch_over_alphabetically_first(
+    tmp_path: Path, repo: git.Repo
+):
+    # `git branch --contains <sha> --format=%(refname:short)` prints matches
+    # in plain alphabetical order. "main" sorts before "zzz-current", so the
+    # old code always reported "main" here regardless of which branch is
+    # actually checked out -- even though the commit is being viewed from
+    # "zzz-current" right now.
+    repo.git.checkout("-b", "zzz-current")
+
+    commits = GitRepoAdapter(tmp_path).get_recent_commits(limit=1)
+
+    assert commits[0].branch_name == "zzz-current"
+
+
+def test_get_recent_commits_reports_default_branch_when_current_branch_unknown(tmp_path: Path):
+    # Detached HEAD (no "current branch" to prefer) -- the next
+    # least-surprising answer is the repo's default branch, not whichever
+    # name happens to sort first alphabetically ("aaa-first" here).
+    remote_bare = tmp_path / "remote.git"
+    git.Repo.init(remote_bare, bare=True)
+    local_path = tmp_path / "local_repo"
+    repo = _init_repo_with_commit(local_path)
+    repo.create_remote("origin", str(remote_bare))
+    repo.git.push("--set-upstream", "origin", "main")
+    repo.git.remote("set-head", "origin", "main")
+    repo.git.branch("aaa-first")
+    repo.git.checkout(repo.head.commit.hexsha)
+
+    commits = GitRepoAdapter(local_path).get_recent_commits(limit=1)
+
+    assert commits[0].branch_name == "main"
+
+
+def test_get_branch_for_commit_falls_back_to_alphabetically_first_when_no_preference_matches(
+    tmp_path: Path, repo: git.Repo, monkeypatch: pytest.MonkeyPatch
+):
+    # Neither a current branch (detached HEAD) nor a default branch (no
+    # remote configured, and the system-level gitconfig isolated out) is
+    # available to prefer -- this is the last-resort fallback, unchanged
+    # from before the fix.
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    repo.git.branch("aaa-branch")
+    repo.git.branch("zzz-branch")
+    commit = repo.head.commit.hexsha
+    repo.git.checkout(commit)
+
+    branch_name = GitRepoAdapter(tmp_path)._get_branch_for_commit(commit)
+
+    assert branch_name == "aaa-branch"
 
 
 def test_get_commit_files_lists_changed_paths(tmp_path: Path, repo: git.Repo):

@@ -22,6 +22,8 @@ from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
 from local_changes_viewer.gui.bulk_delete_worktrees_dialog import BulkDeleteWorktreesDialog
 from local_changes_viewer.gui.worktree_changes_dialog import WorktreeChangesDialog
+from local_changes_viewer.gui.workers.worker_keeper import start_worker
+from local_changes_viewer.gui.workers.worktree_delete_worker import WorktreeDeleteWorker
 from local_changes_viewer.gui.workers.worktree_details_worker import WorktreeDetailsWorker
 
 _COLUMNS = ("Path", "Branch", "Last Commit / Modified", "Unpushed Changes", "Created")
@@ -130,9 +132,9 @@ class WorktreesDialog(QDialog):
         self._update_action_buttons_enabled()
 
         worker = WorktreeDetailsWorker(self._repo_path, self._adapter_factory)
-        worker.signals.finished.connect(self._on_worktree_details_ready)
+        worker.signals.succeeded.connect(self._on_worktree_details_ready)
         worker.signals.error.connect(self._on_worktree_details_error)
-        self._thread_pool.start(worker)
+        start_worker(self._thread_pool, worker)
 
     def _on_worktree_details_ready(self, details: list[WorktreeInfo]) -> None:
         self._finish_loading()
@@ -293,31 +295,56 @@ class WorktreesDialog(QDialog):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
+        self._start_worktree_delete(worktree.path, force=False)
 
-        adapter = self._adapter_factory(self._repo_path)
-        try:
-            adapter.remove_worktree(worktree.path)
-        except Exception as exc:
-            force_confirm = QMessageBox.question(
-                self,
-                "Delete Worktree",
-                f"Failed to delete cleanly (it may have uncommitted or unpushed "
-                f"changes):\n{exc}\n\nForce delete anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if force_confirm != QMessageBox.StandardButton.Yes:
-                return
-            try:
-                adapter.remove_worktree(worktree.path, force=True)
-            except Exception as force_exc:
-                QMessageBox.warning(
-                    self, "Delete Worktree failed", f"Failed to delete worktree: {force_exc}"
-                )
-                return
+    def _start_worktree_delete(self, worktree_path: Path, force: bool) -> None:
+        # `git worktree remove` is a subprocess that can hang for a while on
+        # a slow disk or network share -- running it straight on the GUI
+        # thread used to freeze the whole app with no busy indicator and no
+        # way to cancel. Same table-disable/status-label pattern as _reload,
+        # so a second delete (or any right-click) can't fire against a
+        # worktree that's already mid-removal.
+        self._loading = True
+        self._status_label.setText(f"Deleting worktree {worktree_path.name} …")
+        self._status_label.show()
+        self._table.setEnabled(False)
+        self._update_action_buttons_enabled()
 
+        worker = WorktreeDeleteWorker(self._repo_path, self._adapter_factory, worktree_path, force=force)
+        worker.signals.succeeded.connect(lambda: self._on_worktree_delete_finished(worktree_path))
+        worker.signals.error.connect(
+            lambda message: self._on_worktree_delete_error(worktree_path, message, force)
+        )
+        start_worker(self._thread_pool, worker)
+
+    def _on_worktree_delete_finished(self, worktree_path: Path) -> None:
         self.deleted_any = True
+        # Restore the label _reload() itself never sets, so the upcoming
+        # reload shows "Reading worktree data …" rather than this delete's
+        # own "Deleting worktree …" text staying stuck on screen.
+        self._status_label.setText("Reading worktree data …")
         self._reload()
+
+    def _on_worktree_delete_error(
+        self, worktree_path: Path, message: str, attempted_force: bool
+    ) -> None:
+        self._finish_loading()
+        if attempted_force:
+            QMessageBox.warning(
+                self, "Delete Worktree failed", f"Failed to delete worktree: {message}"
+            )
+            return
+        force_confirm = QMessageBox.question(
+            self,
+            "Delete Worktree",
+            f"Failed to delete cleanly (it may have uncommitted or unpushed "
+            f"changes):\n{message}\n\nForce delete anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if force_confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._start_worktree_delete(worktree_path, force=True)
 
     def _on_cell_double_clicked(self, row: int, _column: int) -> None:
         worktree = self._worktree_at_row(row)

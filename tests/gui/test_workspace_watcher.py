@@ -158,6 +158,47 @@ def test_set_watched_files_truncates_beyond_cap(tmp_path: Path, monkeypatch) -> 
     assert len(watcher._watcher.files()) == 2
 
 
+def test_set_watch_paths_truncates_beyond_directory_cap(tmp_path: Path, monkeypatch) -> None:
+    from local_changes_viewer.gui import workspace_watcher as ww
+
+    monkeypatch.setattr(ww, "_MAX_WATCHED_DIRECTORIES", 2)
+    dirs = []
+    for i in range(4):
+        d = tmp_path / f"d{i}"
+        d.mkdir()
+        dirs.append(d)
+
+    watcher = WorkspaceFileWatcher()
+    watcher.set_watch_paths(dirs)
+
+    assert len(watcher._watcher.directories()) == 2
+
+
+def test_set_watch_paths_logs_directories_addpaths_could_not_register(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """addPaths() returns the subset of paths it could NOT register (e.g.
+    past the OS watch-descriptor limit) instead of raising -- that failure
+    used to be silently discarded. This pins that it now reaches applog."""
+    from local_changes_viewer.gui import applog, workspace_watcher as ww
+
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    missing_dir = tmp_path / "does-not-exist"  # addPaths() can't watch this
+
+    watcher = WorkspaceFileWatcher()
+    logged: list[str] = []
+    monkeypatch.setattr(
+        ww.applog,
+        "log",
+        lambda message, level=applog.LogLevel.VERBOSE: logged.append(message),
+    )
+
+    watcher.set_watch_paths([real_dir, missing_dir])
+
+    assert any(str(missing_dir) in message for message in logged)
+
+
 def test_stop_clears_watched_files_too() -> None:
     watcher = WorkspaceFileWatcher()
     real_file = Path(__file__)

@@ -243,3 +243,73 @@ def test_change_runs_returns_empty_list_for_diff_with_no_hunks() -> None:
 
     assert change_runs(diff) == []
 
+
+def test_change_runs_pure_addition_opening_a_later_hunk_uses_that_hunks_own_start() -> None:
+    """Reproduces defect: `last_context_old` must not survive a hunk
+    boundary. hunk1 ends with its last CONTEXT line at old_lineno=3;
+    hunk2 opens with an ADDED line before any CONTEXT line of its own, so
+    without a per-hunk reseed the stale old_lineno=3 leaks in and produces
+    a wrong fallback of 4 -- a position back in hunk1's territory instead
+    of hunk2's own old_start=50."""
+    hunk1 = DiffHunk(
+        old_start=1,
+        old_count=3,
+        new_start=1,
+        new_count=3,
+        lines=[
+            DiffLine(DiffLineKind.CONTEXT, 1, 1, "one"),
+            DiffLine(DiffLineKind.CONTEXT, 2, 2, "two"),
+            DiffLine(DiffLineKind.CONTEXT, 3, 3, "three"),
+        ],
+    )
+    hunk2 = DiffHunk(
+        old_start=50,
+        old_count=1,
+        new_start=48,
+        new_count=2,
+        lines=[
+            DiffLine(DiffLineKind.ADDED, None, 48, "inserted"),
+            DiffLine(DiffLineKind.CONTEXT, 50, 49, "fifty"),
+        ],
+    )
+    diff = DiffResult(old_ref="HEAD", new_ref="working tree", hunks=[hunk1, hunk2])
+
+    runs = change_runs(diff)
+
+    assert len(runs) == 1
+    assert runs[0].old_lineno == 50, "must use hunk2's own old_start, not hunk1's leftover context"
+    assert runs[0].new_lineno == 48
+
+
+def test_change_runs_pure_deletion_opening_a_later_hunk_uses_that_hunks_own_start() -> None:
+    """Symmetric case for the new-side tracker: hunk2 opens with a REMOVED
+    line before any CONTEXT line of its own."""
+    hunk1 = DiffHunk(
+        old_start=1,
+        old_count=3,
+        new_start=1,
+        new_count=3,
+        lines=[
+            DiffLine(DiffLineKind.CONTEXT, 1, 1, "one"),
+            DiffLine(DiffLineKind.CONTEXT, 2, 2, "two"),
+            DiffLine(DiffLineKind.CONTEXT, 3, 3, "three"),
+        ],
+    )
+    hunk2 = DiffHunk(
+        old_start=48,
+        old_count=2,
+        new_start=50,
+        new_count=1,
+        lines=[
+            DiffLine(DiffLineKind.REMOVED, 48, None, "deleted"),
+            DiffLine(DiffLineKind.CONTEXT, 49, 50, "fifty"),
+        ],
+    )
+    diff = DiffResult(old_ref="HEAD", new_ref="working tree", hunks=[hunk1, hunk2])
+
+    runs = change_runs(diff)
+
+    assert len(runs) == 1
+    assert runs[0].old_lineno == 48
+    assert runs[0].new_lineno == 50, "must use hunk2's own new_start, not hunk1's leftover context"
+

@@ -40,6 +40,15 @@ _DEBOUNCE_MS = 2000
 # in WorkspaceScannerService, just not immediately).
 _MAX_WATCHED_FILES = 2000
 
+# Same descriptor-exhaustion risk as _MAX_WATCHED_FILES above, but for the
+# directory list collect_watch_paths() builds -- a workspace with many repos,
+# each with many subdirectories, is exactly the unbounded input that can walk
+# past the OS's inotify/kqueue watch-descriptor limit. Past that limit,
+# addPaths() silently fails for the paths it couldn't register (see its
+# return value in set_watch_paths below), so those directories stop getting
+# live create/delete/rename notifications until the next full rescan.
+_MAX_WATCHED_DIRECTORIES = 2000
+
 
 def collect_watch_paths(repo_paths: list[Path]) -> list[Path]:
     watch_paths: list[Path] = []
@@ -73,11 +82,30 @@ class WorkspaceFileWatcher(QObject):
 
     def set_watch_paths(self, watch_paths: list[Path]) -> None:
         """Applies a precomputed path list; callers walk directories off-thread first."""
+        truncated = len(watch_paths) > _MAX_WATCHED_DIRECTORIES
+        if truncated:
+            watch_paths = watch_paths[:_MAX_WATCHED_DIRECTORIES]
         existing = self._watcher.directories()
         if existing:
             self._watcher.removePaths(existing)
         if watch_paths:
-            self._watcher.addPaths([str(p) for p in watch_paths])
+            # addPaths() returns the subset of paths it could NOT register
+            # (e.g. past the OS watch-descriptor limit) rather than raising,
+            # so that failure is otherwise invisible -- surface it instead of
+            # discarding it, same as the truncation log below.
+            failed = self._watcher.addPaths([str(p) for p in watch_paths])
+            if failed:
+                applog.log(
+                    f"File watcher: {len(failed)} directory watch(es) failed to "
+                    f"register (past the OS watch-descriptor limit?): {failed}",
+                    level=applog.LogLevel.WARNING,
+                )
+        if truncated:
+            applog.log(
+                f"File watcher: capped watched directories at {_MAX_WATCHED_DIRECTORIES} "
+                "(more directories than that were present)",
+                level=applog.LogLevel.DEBUG,
+            )
 
     def set_watched_files(self, file_paths: list[Path]) -> None:
         """Watches individual (already-changed) file paths so an in-place edit

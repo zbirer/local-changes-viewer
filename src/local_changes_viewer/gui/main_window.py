@@ -1,5 +1,6 @@
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import git
@@ -61,6 +62,7 @@ from local_changes_viewer.core.services.worktree_terminal_service import (
 from local_changes_viewer.gui import applog, github_auth
 from local_changes_viewer.gui.commit_log_dialog import CommitLogDialog
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
+from local_changes_viewer.gui.error_log_dialog import ErrorLogDialog
 from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
 from local_changes_viewer.gui.github_connect_dialog import GitHubConnectDialog
 from local_changes_viewer.gui.help_dialog import (
@@ -88,6 +90,7 @@ from local_changes_viewer.gui.workers.pull_request_threads_worker import PullReq
 from local_changes_viewer.gui.workers.repo_refresh_worker import RepoRefreshWorker
 from local_changes_viewer.gui.workers.scan_worker import ScanWorker
 from local_changes_viewer.gui.workers.watch_paths_worker import WatchPathsWorker
+from local_changes_viewer.gui.workers.worker_keeper import start_worker
 from local_changes_viewer.gui.worktrees_dialog import WorktreesDialog
 from local_changes_viewer.gui.workspace_watcher import WorkspaceFileWatcher
 from local_changes_viewer.gui.workspace_tree.aggregate_list import AggregateChangeList
@@ -103,6 +106,12 @@ from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
 # scan every couple of seconds; if the previous scan just finished, skip this
 # one rather than piling another full 27-repo git+GitHub scan on top of it.
 _MIN_AUTO_REFRESH_INTERVAL_SECONDS = 5.0
+
+# _update_file_info_label runs on the GUI thread on every file selection, and
+# only needs enough bytes to sniff an encoding/line-ending -- reading a whole
+# multi-GB file into memory there would freeze the UI and could exhaust
+# memory, so the read is capped regardless of the file's actual size.
+_FILE_INFO_SNIFF_BYTES = 1 * 1024 * 1024
 
 
 class MainWindow(QMainWindow):
@@ -149,6 +158,14 @@ class MainWindow(QMainWindow):
         self._scan_refresh_timer.timeout.connect(self._on_scan_refresh_tick)
         self._incremental_scan = False
         self._scan_in_progress = False
+        # Bumped every time _start_scan actually launches a worker. Each
+        # worker's result handlers are bound to the generation that was
+        # current when it started (see _start_scan), so a scan superseded by
+        # a later one (folder switched, or a user-initiated toggle/refresh
+        # fired while a scan was still in flight) has its results silently
+        # dropped instead of clobbering the newer scan's workspace or the
+        # on-disk cache with stale data.
+        self._scan_generation = 0
         # True only while __init__ is replaying persisted settings via
         # setChecked(); handlers that would kick off a scan or a tree rebuild
         # check this and bail out, so restoring N toggle settings can never
@@ -163,6 +180,21 @@ class MainWindow(QMainWindow):
         self._auto_refresh_minutes = 0
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timeout)
+        # applog.log (and therefore an ERROR entry) can be called from worker
+        # threads (QRunnable.run), but the status-bar indicator is a QWidget
+        # and must only ever be touched from the GUI thread -- so rather than
+        # wiring a callback from applog straight into MainWindow (which would
+        # fire on whichever thread logged the error), a dedicated GUI-thread
+        # timer polls applog.error_count() instead. Neither existing timer
+        # fits: _scan_refresh_timer only runs while a scan is in flight, and
+        # _auto_refresh_timer can be off or many minutes long depending on
+        # settings -- either would leave an off-thread error unreported
+        # indefinitely. A short interval keeps "how stale can the indicator
+        # be" bounded without being a measurable GUI-thread cost.
+        self._error_indicator_timer = QTimer(self)
+        self._error_indicator_timer.setInterval(2000)
+        self._error_indicator_timer.timeout.connect(self._refresh_error_indicator)
+        self._error_indicator_timer.start()
         self._file_watcher = WorkspaceFileWatcher(self)
         self._file_watcher.changed.connect(self._on_file_watcher_changed)
         # Kept alive across scans so WorkspaceScannerService's internal repo/PR
@@ -468,6 +500,10 @@ class MainWindow(QMainWindow):
         app_log_action.triggered.connect(self._on_copy_app_log)
         actions_menu.addAction(app_log_action)
 
+        error_log_action = QAction("Error Log", self)
+        error_log_action.triggered.connect(self._on_show_error_log)
+        actions_menu.addAction(error_log_action)
+
         copy_diff_action = QAction("Copy Diff", self)
         copy_diff_action.triggered.connect(self._on_copy_diff)
         actions_menu.addAction(copy_diff_action)
@@ -511,6 +547,19 @@ class MainWindow(QMainWindow):
 
         self._status_extra_label = QLabel("")
         self.statusBar().addPermanentWidget(self._status_extra_label)
+
+        # A persistent, always-visible companion to the transient 5000ms
+        # status-bar toasts above -- those vanish whether or not anyone saw
+        # them, so this stays up (and clickable) until the error store is
+        # cleared. A QLabel can't be clicked, hence QToolButton styled flat
+        # to still read as a status-bar label at rest.
+        self._error_indicator_button = QToolButton()
+        self._error_indicator_button.setAutoRaise(True)
+        self._error_indicator_button.setStyleSheet("color: #DC2626; font-weight: 600;")
+        self._error_indicator_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._error_indicator_button.setVisible(False)
+        self._error_indicator_button.clicked.connect(self._on_show_error_log)
+        self.statusBar().addPermanentWidget(self._error_indicator_button)
 
         self._restore_last_folder()
         self._restoring_settings = True
@@ -563,6 +612,7 @@ class MainWindow(QMainWindow):
                 return
         self._scan_refresh_timer.stop()
         self._auto_refresh_timer.stop()
+        self._error_indicator_timer.stop()
         self._file_watcher.stop()
         self._shutdown_requested.set()
         self._thread_pool.clear()
@@ -586,6 +636,30 @@ class MainWindow(QMainWindow):
         self._settings.set_always_reload_diff(self._always_reload_diff_action.isChecked())
         super().closeEvent(event)
 
+    def _guard_worker_result(self, slot: Callable[..., None]) -> Callable[..., None]:
+        """Wrap a background-worker signal's slot so a result that arrives
+        after closeEvent has already set _shutdown_requested is dropped
+        instead of calling back into this window.
+
+        closeEvent's waitForDone(3000) is a bounded wait, not a guarantee --
+        a worker doing a blocking git/GitHub call can still be running (and
+        can still emit) well after that timeout, potentially after `self`'s
+        underlying C++ object has been torn down by app shutdown. Reading
+        `self._shutdown_requested` here, at connect time, rather than inside
+        `guarded`, means the check itself never has to touch `self` once the
+        worker later fires -- only `slot` (already a bound method holding
+        its own reference) does, and only when we know shutdown hasn't
+        started.
+        """
+        shutdown_requested = self._shutdown_requested
+
+        def guarded(*args: object) -> None:
+            if shutdown_requested.is_set():
+                return
+            slot(*args)
+
+        return guarded
+
     def _on_open_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Open Folder")
         if folder:
@@ -597,6 +671,13 @@ class MainWindow(QMainWindow):
         if self._restoring_settings:
             return
         if self._root_folder:
+            # Deliberately no _scan_in_progress guard here (unlike the
+            # auto-refresh/file-watcher handlers below): this is a direct
+            # user action, and silently swallowing the click would be worse
+            # than starting a second scan. _start_scan bumps _scan_generation
+            # on every call, so if a scan was already running, its eventual
+            # result is superseded and dropped rather than raced against
+            # this one (see _scan_generation).
             self._start_scan(self._root_folder)
 
     def _on_include_unpushed_commits_toggled(self, checked: bool) -> None:
@@ -604,6 +685,8 @@ class MainWindow(QMainWindow):
         if self._restoring_settings:
             return
         if self._root_folder:
+            # See _on_include_ignored_toggled: no in-progress guard by
+            # design, superseding relies on _scan_generation instead.
             self._start_scan(self._root_folder)
 
     def _on_refresh(self) -> None:
@@ -615,6 +698,9 @@ class MainWindow(QMainWindow):
             # directoryChanged signal, so relying on dirty_paths here would
             # leave a repo showing zero changes forever, even across repeated
             # explicit refreshes.
+            # No _scan_in_progress guard either -- see
+            # _on_include_ignored_toggled: superseding an in-flight scan is
+            # _scan_generation's job, not this handler's.
             self._start_scan(
                 self._root_folder, rebuild=self._workspace is None, force_full_rescan=True
             )
@@ -856,7 +942,8 @@ class MainWindow(QMainWindow):
             self._file_info_label.setText("Deleted")
             return
         try:
-            content = (repo_path / change.path).read_bytes()
+            with (repo_path / change.path).open("rb") as file:
+                content = file.read(_FILE_INFO_SNIFF_BYTES)
         except OSError:
             self._file_info_label.setText("")
             return
@@ -879,9 +966,11 @@ class MainWindow(QMainWindow):
         worker = DiffWorker(
             repo_path, change, ignore_whitespace=self._ignore_whitespace_action.isChecked()
         )
-        worker.signals.diff_ready.connect(self._on_diff_ready)
-        worker.signals.error.connect(lambda message: self._on_diff_error(message, change.path))
-        self._thread_pool.start(worker)
+        worker.signals.diff_ready.connect(self._guard_worker_result(self._on_diff_ready))
+        worker.signals.error.connect(
+            self._guard_worker_result(lambda message: self._on_diff_error(message, change.path))
+        )
+        start_worker(self._thread_pool, worker)
 
     def _on_diff_ready(self, change: FileChange, diff) -> None:
         change.diff = diff
@@ -890,8 +979,7 @@ class MainWindow(QMainWindow):
             self._diff_view.set_diff(diff, str(change.path), abs_path, not_editable_reason)
 
     def _on_diff_error(self, message: str, file_path: Path) -> None:
-        applog.log(f"Diff failed for {file_path}: {message}", level=applog.LogLevel.ERROR)
-        self.statusBar().showMessage(f"Diff failed: {message}", 5000)
+        self._report_error(f"Diff failed for {file_path}: {message}")
 
     def _on_file_saved(self, file_path: str) -> None:
         applog.log(f"Saved edits to {file_path}", level=applog.LogLevel.INFO)
@@ -989,8 +1077,10 @@ class MainWindow(QMainWindow):
     def _refresh_watch_paths(self, repositories: list[Repository]) -> None:
         repo_paths = [r.path for r in repositories]
         worker = WatchPathsWorker(repo_paths)
-        worker.signals.finished.connect(self._file_watcher.set_watch_paths)
-        self._thread_pool.start(worker)
+        worker.signals.succeeded.connect(
+            self._guard_worker_result(self._file_watcher.set_watch_paths)
+        )
+        start_worker(self._thread_pool, worker)
         # Directory watching alone (above) can't see an in-place edit to a
         # file that's already tracked as changed — only a create/delete/
         # rename in the directory fires directoryChanged. Watching each
@@ -1197,10 +1287,12 @@ class MainWindow(QMainWindow):
         applog.log("My Open Pull Requests", level=applog.LogLevel.INFO)
         self.statusBar().showMessage("Fetching your open pull requests…")
         worker = MyPullRequestsWorker(github_client, username, owner_repo_pairs)
-        worker.signals.finished.connect(self._on_my_pull_requests_ready)
-        worker.signals.error.connect(self._on_my_pull_requests_error)
-        worker.signals.progress.connect(self._on_scan_progress)
-        self._thread_pool.start(worker)
+        worker.signals.succeeded.connect(
+            self._guard_worker_result(self._on_my_pull_requests_ready)
+        )
+        worker.signals.error.connect(self._guard_worker_result(self._on_my_pull_requests_error))
+        worker.signals.progress.connect(self._guard_worker_result(self._on_scan_progress))
+        start_worker(self._thread_pool, worker)
         return True
 
     def _on_my_pull_requests_ready(self, pull_requests: list) -> None:
@@ -1245,9 +1337,11 @@ class MainWindow(QMainWindow):
         applog.log(f"Refreshing {repository}#{number}", level=applog.LogLevel.INFO)
         self.statusBar().showMessage(f"Refreshing {repository}#{number}…")
         worker = PullRequestRefreshWorker(github_client, repository, number)
-        worker.signals.finished.connect(self._on_pull_request_refresh_ready)
-        worker.signals.error.connect(self._on_pull_request_action_error)
-        self._thread_pool.start(worker)
+        worker.signals.succeeded.connect(
+            self._guard_worker_result(self._on_pull_request_refresh_ready)
+        )
+        worker.signals.error.connect(self._guard_worker_result(self._on_pull_request_action_error))
+        start_worker(self._thread_pool, worker)
 
     def _on_pull_request_refresh_ready(self, repository: str, number: int, result: tuple) -> None:
         approved, unresolved_count, last_reviewer, last_reviewed_at, changed_files, checks_state = result
@@ -1282,9 +1376,11 @@ class MainWindow(QMainWindow):
         applog.log(f"Fetching info for {repository}#{number}", level=applog.LogLevel.INFO)
         self.statusBar().showMessage(f"Fetching info for {repository}#{number}…")
         worker = PullRequestDetailsWorker(github_client, repository, number)
-        worker.signals.finished.connect(self._on_pull_request_details_ready)
-        worker.signals.error.connect(self._on_pull_request_action_error)
-        self._thread_pool.start(worker)
+        worker.signals.succeeded.connect(
+            self._guard_worker_result(self._on_pull_request_details_ready)
+        )
+        worker.signals.error.connect(self._guard_worker_result(self._on_pull_request_action_error))
+        start_worker(self._thread_pool, worker)
 
     def _on_pull_request_details_ready(self, details) -> None:
         self.statusBar().clearMessage()
@@ -1297,9 +1393,11 @@ class MainWindow(QMainWindow):
         applog.log(f"Fetching open issues for {repository}#{number}", level=applog.LogLevel.INFO)
         self.statusBar().showMessage(f"Fetching open issues for {repository}#{number}…")
         worker = PullRequestThreadsWorker(github_client, repository, number)
-        worker.signals.finished.connect(self._on_pull_request_threads_ready)
-        worker.signals.error.connect(self._on_pull_request_action_error)
-        self._thread_pool.start(worker)
+        worker.signals.succeeded.connect(
+            self._guard_worker_result(self._on_pull_request_threads_ready)
+        )
+        worker.signals.error.connect(self._guard_worker_result(self._on_pull_request_action_error))
+        start_worker(self._thread_pool, worker)
 
     def _on_pull_request_threads_ready(self, number: int, threads: list) -> None:
         self.statusBar().clearMessage()
@@ -1427,6 +1525,39 @@ class MainWindow(QMainWindow):
         text = "\n".join(applog.all_entries())
         QGuiApplication.clipboard().setText(text)
         self.statusBar().showMessage("App log copied to clipboard", 3000)
+
+    def _report_error(self, message: str) -> None:
+        """Single funnel for every user-facing error: logs it (feeding the
+        persistent indicator below via applog's ERROR-only store), shows the
+        same transient 5000ms toast callers used to show directly, and
+        refreshes the indicator immediately rather than waiting for
+        _error_indicator_timer's next tick. Call sites that used to call
+        applog.log(..., level=ERROR) and showMessage(...) separately now do
+        neither -- doing both here is what prevents the same error being
+        logged twice.
+        """
+        applog.log(message, level=applog.LogLevel.ERROR)
+        self.statusBar().showMessage(message, 5000)
+        self._refresh_error_indicator()
+
+    def _refresh_error_indicator(self) -> None:
+        count = applog.error_count()
+        if count == 0:
+            self._error_indicator_button.setVisible(False)
+            return
+        noun = "error" if count == 1 else "errors"
+        self._error_indicator_button.setText(f"⚠ {count} {noun}")
+        recent = applog.recent_errors()
+        if recent:
+            self._error_indicator_button.setToolTip(recent[0])
+        self._error_indicator_button.setVisible(True)
+
+    def _on_show_error_log(self) -> None:
+        dialog = ErrorLogDialog(self, on_cleared=self._refresh_error_indicator)
+        dialog.exec()
+        # Covers the Close/window-X path too, not just Clear -- harmless
+        # no-op refresh when nothing changed.
+        self._refresh_error_indicator()
 
     def _on_copy_diff(self) -> None:
         if self._selected_change is None or self._selected_change.diff is None:
@@ -1792,9 +1923,7 @@ class MainWindow(QMainWindow):
         try:
             window_id = start_worktree_process(repo_path)
         except WorktreeTerminalError as error:
-            self.statusBar().showMessage(
-                f"Failed to start {repo_path.name}: {error}", 5000
-            )
+            self._report_error(f"Failed to start {repo_path.name}: {error}")
             return
         self._worktree_terminal_windows[repo_path] = window_id
         self.statusBar().showMessage(f"Started {repo_path.name}", 3000)
@@ -1838,13 +1967,15 @@ class MainWindow(QMainWindow):
             include_unpushed_commits=self._include_unpushed_commits_action.isChecked(),
         )
         worker.signals.repo_ready.connect(
-            lambda repo: self._on_repo_refreshed(repo_path, repo)
+            self._guard_worker_result(lambda repo: self._on_repo_refreshed(repo_path, repo))
         )
         worker.signals.error.connect(
-            lambda message: self._on_refresh_repo_error(repo_path, message)
+            self._guard_worker_result(
+                lambda message: self._on_refresh_repo_error(repo_path, message)
+            )
         )
-        worker.signals.log_message.connect(self._on_scan_log_message)
-        self._thread_pool.start(worker)
+        worker.signals.log_message.connect(self._guard_worker_result(self._on_scan_log_message))
+        start_worker(self._thread_pool, worker)
 
     def _on_refresh_repo_error(self, repo_path: Path, message: str) -> None:
         self._refreshing_repo_paths.discard(repo_path)
@@ -1855,7 +1986,7 @@ class MainWindow(QMainWindow):
         if self._workspace is None:
             return
         if repo is None:
-            self.statusBar().showMessage(f"Failed to refresh {repo_path.name}", 5000)
+            self._report_error(f"Failed to refresh {repo_path.name}")
             return
         self._workspace.repositories = [
             repo if r.path == repo_path else r for r in self._workspace.repositories
@@ -1928,6 +2059,12 @@ class MainWindow(QMainWindow):
             f"Starting scan of {folder}" + (" (auto-refresh)" if auto_refresh else ""),
             level=applog.LogLevel.INFO,
         )
+        # Every actual scan launch gets its own generation; the worker's
+        # signal connections below close over this value so its result
+        # handlers can tell a superseded scan's output from the current
+        # scan's (see _scan_generation).
+        self._scan_generation += 1
+        scan_generation = self._scan_generation
         self._scan_started_at = time.monotonic()
         if auto_refresh:
             self._current_scan_label = "auto-refresh"
@@ -1981,16 +2118,40 @@ class MainWindow(QMainWindow):
             force_full_rescan=force_full_rescan,
             service=self._scanner_service,
         )
-        worker.signals.progress.connect(self._on_scan_progress)
-        worker.signals.repo_ready.connect(self._on_repo_ready)
-        worker.signals.dead_repo.connect(self._on_dead_repo)
-        worker.signals.workspace_ready.connect(self._on_workspace_ready)
-        worker.signals.error.connect(self._on_scan_error)
-        worker.signals.log_message.connect(self._on_scan_log_message)
-        worker.signals.debug_message.connect(self._on_scan_debug_message)
-        self._thread_pool.start(worker)
+        worker.signals.progress.connect(
+            self._guard_worker_result(
+                lambda message, gen=scan_generation: self._on_scan_progress(message, gen)
+            )
+        )
+        worker.signals.repo_ready.connect(
+            self._guard_worker_result(
+                lambda repo, gen=scan_generation: self._on_repo_ready(repo, gen)
+            )
+        )
+        worker.signals.dead_repo.connect(
+            self._guard_worker_result(
+                lambda repo_path, gen=scan_generation: self._on_dead_repo(repo_path, gen)
+            )
+        )
+        worker.signals.workspace_ready.connect(
+            self._guard_worker_result(
+                lambda workspace, gen=scan_generation: self._on_workspace_ready(workspace, gen)
+            )
+        )
+        worker.signals.error.connect(
+            self._guard_worker_result(
+                lambda message, gen=scan_generation: self._on_scan_error(message, gen)
+            )
+        )
+        worker.signals.log_message.connect(self._guard_worker_result(self._on_scan_log_message))
+        worker.signals.debug_message.connect(
+            self._guard_worker_result(self._on_scan_debug_message)
+        )
+        start_worker(self._thread_pool, worker)
 
-    def _on_scan_progress(self, message: str) -> None:
+    def _on_scan_progress(self, message: str, generation: int | None = None) -> None:
+        if generation is not None and generation != self._scan_generation:
+            return
         applog.log(message, level=applog.LogLevel.DEBUG)
         self.statusBar().showMessage(f"Scanning: {message}")
 
@@ -2000,7 +2161,11 @@ class MainWindow(QMainWindow):
     def _on_scan_debug_message(self, message: str) -> None:
         applog.log(message, level=applog.LogLevel.DEBUG)
 
-    def _on_repo_ready(self, repo: Repository) -> None:
+    def _on_repo_ready(self, repo: Repository, generation: int | None = None) -> None:
+        # A superseded scan (see _scan_generation) must not merge its repos
+        # into the workspace a newer scan is building -- silently drop it.
+        if generation is not None and generation != self._scan_generation:
+            return
         # Rebuilding the tree (expandAll + restore-collapsed-state) is O(current
         # repo count), so accumulating it here without refreshing keeps repo
         # arrival cheap; the periodic timer coalesces the actual tree rebuilds
@@ -2027,7 +2192,11 @@ class MainWindow(QMainWindow):
                 return
         self._workspace.repositories.append(repo)
 
-    def _on_dead_repo(self, repo_path: Path) -> None:
+    def _on_dead_repo(self, repo_path: Path, generation: int | None = None) -> None:
+        # A superseded scan's "dead repo" signal must not remove a repo the
+        # current scan is still tracking (see _scan_generation).
+        if generation is not None and generation != self._scan_generation:
+            return
         # Companion to _on_repo_ready's merge-by-path logic (e3aac9b): the
         # merge exists so a scan that legitimately reports only a subset
         # (dirty-gated repos, a partial/in-progress scan, cache hits) doesn't
@@ -2044,7 +2213,17 @@ class MainWindow(QMainWindow):
             repo for repo in self._workspace.repositories if repo.path != repo_path
         ]
 
-    def _on_workspace_ready(self, workspace: Workspace) -> None:
+    def _on_workspace_ready(self, workspace: Workspace, generation: int | None = None) -> None:
+        # A scan superseded by a newer one (folder switched, or a
+        # user-initiated refresh/toggle fired mid-scan) must not overwrite
+        # the newer scan's workspace, on-disk cache, or _scan_in_progress
+        # state with its now-stale result (see _scan_generation).
+        if generation is not None and generation != self._scan_generation:
+            applog.log(
+                f"Discarding workspace from superseded scan (generation {generation})",
+                level=applog.LogLevel.DEBUG,
+            )
+            return
         self._scan_refresh_timer.stop()
         self._scan_in_progress = False
         self._last_scan_finished_at = time.monotonic()
@@ -2128,9 +2307,13 @@ class MainWindow(QMainWindow):
             level=applog.LogLevel.DEBUG,
         )
 
-    def _on_scan_error(self, message: str) -> None:
+    def _on_scan_error(self, message: str, generation: int | None = None) -> None:
+        # See _scan_generation: an error from a scan a newer one already
+        # superseded must not stop the newer scan's refresh timer or flip
+        # _scan_in_progress off out from under it.
+        if generation is not None and generation != self._scan_generation:
+            return
         self._scan_refresh_timer.stop()
         self._scan_in_progress = False
         self._last_scan_finished_at = time.monotonic()
-        applog.log(f"Scan failed: {message}", level=applog.LogLevel.ERROR)
-        self.statusBar().showMessage(f"Scan failed: {message}", 5000)
+        self._report_error(f"Scan failed: {message}")

@@ -163,6 +163,24 @@ class RepoTreeView(QTreeView):
     def _on_row_actions_scroll(self, _value: int) -> None:
         self._update_row_actions_widget(self._hovered_index)
 
+    def _reset_row_tracking(self) -> None:
+        """set_workspace/update_workspace rebuild the underlying
+        RepoTreeModel -- clear() for the former, in-place removeRows/
+        appendRow churn for the latter (see tree_model.py's _sync_level) --
+        either of which can delete the QStandardItem a stale hovered_index
+        or row_actions_index still points at. Every caller that later
+        dereferences those trackers (.data()/visualRect() in
+        _update_row_actions_widget, the button handlers above) does so with
+        no liveness check of its own, so this is what stands between a
+        rebuild landing under a hovered row and the "libshiboken ... already
+        deleted" crash (see tree_model.py:70-74). Clearing both here, before
+        the rebuild runs, means the overlay simply stays hidden until the
+        next real mouse move re-establishes hover over whatever is there now.
+        """
+        self._hovered_index = QModelIndex()
+        self._row_actions_index = QModelIndex()
+        self._row_actions_widget.hide()
+
     def _update_row_actions_widget(self, index: QModelIndex) -> None:
         is_repo_root = (
             index.isValid()
@@ -246,6 +264,7 @@ class RepoTreeView(QTreeView):
             self.scope_changed.emit(Path(key), None)
 
     def set_workspace(self, workspace) -> None:
+        self._reset_row_tracking()
         self._programmatic_change = True
         self._model.set_workspace(workspace)
         self.expandAll()
@@ -253,6 +272,7 @@ class RepoTreeView(QTreeView):
         self._programmatic_change = False
 
     def update_workspace(self, workspace) -> None:
+        self._reset_row_tracking()
         self._programmatic_change = True
         self._model.update_workspace(workspace)
         self._programmatic_change = False

@@ -23,7 +23,7 @@ GATE_MODULE = "tests/test_features_gate.py"
 # feature gains a test) -- never raised to make room for a new untested
 # feature or to un-block a coverage regression. It was set to the actual
 # count of `TESTS: NONE` blocks when this gate was introduced.
-MAX_UNTESTED_FEATURES = 35
+MAX_UNTESTED_FEATURES = 30
 
 
 @dataclass(frozen=True)

@@ -4,8 +4,12 @@ from local_changes_viewer.core.infra.github_client import GitHubClient
 
 
 class PullRequestThreadsWorkerSignals(QObject):
-    finished = Signal(int, list)  # number, list[PullRequestThread]
+    # Renamed from `finished` -- that name is now reserved for the bare,
+    # no-payload signal below that WorkerKeeper waits on to release its
+    # reference; this one still only fires on success, carrying the result.
+    succeeded = Signal(int, list)  # number, list[PullRequestThread]
     error = Signal(str)
+    finished = Signal()
 
 
 class PullRequestThreadsWorker(QRunnable):
@@ -17,10 +21,24 @@ class PullRequestThreadsWorker(QRunnable):
         self.signals = PullRequestThreadsWorkerSignals()
 
     def run(self) -> None:
-        owner, repo = self._repository.split("/", 1)
         try:
-            threads = self._github_client.get_pull_request_open_threads(owner, repo, self._number)
-        except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
-            self.signals.error.emit(str(exc))
-        else:
-            self.signals.finished.emit(self._number, threads)
+            try:
+                # split() must stay inside the try: PullRequestInfo.repository
+                # defaults to "" (core/domain/pull_request.py), and a value
+                # with no "/" raises ValueError -- outside the try that would
+                # escape run() straight out of the thread pool, so neither
+                # `succeeded` nor `error` would ever fire and the caller
+                # waits forever (though `finished` below still would).
+                owner, repo = self._repository.split("/", 1)
+                threads = self._github_client.get_pull_request_open_threads(
+                    owner, repo, self._number
+                )
+            except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
+                self.signals.error.emit(str(exc))
+            else:
+                self.signals.succeeded.emit(self._number, threads)
+        finally:
+            # Last, always: WorkerKeeper frees this worker only once this
+            # fires, and queued signals are FIFO, so every emit above is
+            # delivered first -- see worker_keeper.py for the full reason.
+            self.signals.finished.emit()

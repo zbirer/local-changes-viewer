@@ -18,8 +18,12 @@ from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
 
 
 class WorktreeDetailsWorkerSignals(QObject):
-    finished = Signal(list)  # list[WorktreeInfo]
+    # Renamed from `finished` -- that name is now reserved for the bare,
+    # no-payload signal below that WorkerKeeper waits on to release its
+    # reference; this one still only fires on success, carrying the result.
+    succeeded = Signal(list)  # list[WorktreeInfo]
     error = Signal(str)
+    finished = Signal()
 
 
 class WorktreeDetailsWorker(QRunnable):
@@ -31,10 +35,16 @@ class WorktreeDetailsWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            details: list[WorktreeInfo] = list(
-                self._adapter_factory(self._repo_path).list_worktree_details()
-            )
-        except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
-            self.signals.error.emit(str(exc))
-        else:
-            self.signals.finished.emit(details)
+            try:
+                details: list[WorktreeInfo] = list(
+                    self._adapter_factory(self._repo_path).list_worktree_details()
+                )
+            except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
+                self.signals.error.emit(str(exc))
+            else:
+                self.signals.succeeded.emit(details)
+        finally:
+            # Last, always: WorkerKeeper frees this worker only once this
+            # fires, and queued signals are FIFO, so every emit above is
+            # delivered first -- see worker_keeper.py for the full reason.
+            self.signals.finished.emit()

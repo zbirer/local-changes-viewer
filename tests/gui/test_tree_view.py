@@ -4,7 +4,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QSettings
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QPointF, Qt, QSettings
 from PySide6.QtGui import QCursor, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
@@ -232,6 +232,76 @@ def test_row_actions_overlay_has_green_chip_stylesheet(qapp, isolated_settings: 
         view._row_actions_widget.sizeHint().height()
         == view._refresh_button.height()
     )
+
+
+def test_hover_and_row_actions_indices_reset_on_workspace_rebuild(
+    qapp, isolated_settings: Path
+) -> None:
+    """Reproduces the crash class this guards against: hover a repo row,
+    then let a background refresh rebuild the model (set_workspace calls
+    RepoTreeModel.clear(), update_workspace churns rows via removeRows/
+    appendRow -- see tree_model.py's _sync_level) with the mouse never
+    having moved. Both trackers must be invalidated as part of that
+    rebuild, or a later dereference (visualRect()/.data() in
+    _update_row_actions_widget, or a button handler) hits a QModelIndex
+    whose QStandardItem the rebuild already deleted -- the "libshiboken
+    ... already deleted" crash tree_model.py:70-74 warns about."""
+    repo_path = Path("/repos/example-repo")
+    view = _tree_view(isolated_settings)
+    view.set_workspace(_workspace_with_one_repo(repo_path))
+
+    repo_index = view.find_repo_index(repo_path)
+    assert repo_index.isValid()
+    view._update_row_actions_widget(repo_index)
+    view._hovered_index = repo_index
+    assert view._row_actions_index.isValid()
+    assert not view._row_actions_widget.isHidden()
+
+    view.set_workspace(_workspace_with_one_repo(repo_path))
+
+    assert view._hovered_index == QModelIndex()
+    assert view._row_actions_index == QModelIndex()
+    assert view._row_actions_widget.isHidden()
+
+    # A click landing right after the rebuild (before any new mouse-move
+    # re-establishes hover) must be inert, not a dereference of a stale
+    # index.
+    received: list[Path] = []
+    view.refresh_repo_requested.connect(received.append)
+    view._on_row_refresh_clicked()
+    assert received == []
+
+
+def test_hover_and_row_actions_indices_reset_on_update_workspace(
+    qapp, isolated_settings: Path
+) -> None:
+    """Same guard as above, for update_workspace's in-place row churn
+    (RepoTreeModel._sync_level's removeRows/appendRow) rather than
+    set_workspace's full clear()."""
+    repo_path = Path("/repos/example-repo")
+    view = _tree_view(isolated_settings)
+    view.set_workspace(_workspace_with_one_repo(repo_path))
+
+    repo_index = view.find_repo_index(repo_path)
+    assert repo_index.isValid()
+    view._update_row_actions_widget(repo_index)
+    view._hovered_index = repo_index
+    assert view._row_actions_index.isValid()
+
+    # A different change set for the same repo forces _sync_level to drop
+    # and rebuild that repo's child rows (the _CHANGE_SIGNATURE_ROLE
+    # mismatch path at tree_model.py:107-110).
+    other_repo = Repository(
+        path=repo_path,
+        name=repo_path.name,
+        branch_status=_BRANCH,
+        changes=[FileChange(path=Path("b.txt"), change_type=ChangeType.MODIFIED)],
+    )
+    view.update_workspace(Workspace(root_path=repo_path.parent, repositories=[other_repo]))
+
+    assert view._hovered_index == QModelIndex()
+    assert view._row_actions_index == QModelIndex()
+    assert view._row_actions_widget.isHidden()
 
 
 def test_overlay_stays_visible_when_cursor_over_overlay_widget(

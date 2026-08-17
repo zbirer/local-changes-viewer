@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 from local_changes_viewer.core.domain.stash_entry import StashEntry
 from local_changes_viewer.gui import stashes_dialog as stashes_dialog_module
 from local_changes_viewer.gui.stashes_dialog import StashesDialog
+from tests.gui.test_worktrees_dialog import DeferredPool, ImmediatePool
 
 
 @pytest.fixture(scope="session")
@@ -135,7 +136,9 @@ def _select_row(dialog: StashesDialog, row: int) -> None:
 
 def test_rows_render_with_ref_message_and_date(qapp) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
 
     assert dialog._table.rowCount() == 2
     assert dialog._table.item(0, 0).text() == "stash@{0}"
@@ -145,7 +148,9 @@ def test_rows_render_with_ref_message_and_date(qapp) -> None:
 
 def test_buttons_disabled_with_no_selection(qapp) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
 
     assert not dialog._apply_button.isEnabled()
     assert not dialog._pop_button.isEnabled()
@@ -153,7 +158,9 @@ def test_buttons_disabled_with_no_selection(qapp) -> None:
 
 def test_selecting_a_row_loads_its_diff_and_enables_buttons(qapp) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
 
     _select_row(dialog, 0)
 
@@ -171,7 +178,9 @@ def test_selecting_a_row_loads_its_diff_and_enables_buttons(qapp) -> None:
 def test_selecting_a_stash_with_multiple_files_lists_every_file_exactly_once(qapp) -> None:
     adapter = _FakeAdapter(Path("/repo"))
     adapter.diffs["stash@{1}"] = _multi_file_patch("one.txt", "two.txt", "three.txt")
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
 
     _select_row(dialog, 1)
 
@@ -183,7 +192,9 @@ def test_selecting_a_stash_with_multiple_files_lists_every_file_exactly_once(qap
 def test_selecting_a_second_file_swaps_the_side_by_side_content(qapp) -> None:
     adapter = _FakeAdapter(Path("/repo"))
     adapter.diffs["stash@{0}"] = _multi_file_patch("alpha.txt", "beta.txt")
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
 
     _select_row(dialog, 0)
 
@@ -201,7 +212,9 @@ def test_selecting_a_second_file_swaps_the_side_by_side_content(qapp) -> None:
 def test_stash_with_no_changed_files_shows_a_message_not_a_blank_pane(qapp) -> None:
     adapter = _FakeAdapter(Path("/repo"))
     adapter.diffs["stash@{0}"] = ""
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
 
     _select_row(dialog, 0)
 
@@ -221,7 +234,9 @@ def test_stash_diff_failure_shows_error_instead_of_raising(qapp) -> None:
         raise git.GitCommandError(["git", "stash", "show"], 1, "boom")
 
     adapter.stash_diff = _raise
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
 
     _select_row(dialog, 0)
 
@@ -231,20 +246,34 @@ def test_stash_diff_failure_shows_error_instead_of_raising(qapp) -> None:
     assert dialog._diff_splitter.isHidden()
 
 
-def test_apply_calls_the_injected_adapter_with_the_selected_ref(qapp) -> None:
+def test_apply_confirms_before_restoring(qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test: Apply (reachable from both this button and the
+    context menu's "Restore stash") used to mutate the working tree with no
+    confirmation at all, unlike Pop right below it -- same risk class --
+    which already asks Yes/No defaulting to No.
+    """
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     _select_row(dialog, 1)
 
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
     dialog._apply_button.click()
+    assert adapter.applied == []
+    assert dialog.restored is False
 
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    dialog._apply_button.click()
     assert adapter.applied == ["stash@{1}"]
     assert dialog.restored is True
 
 
 def test_pop_confirms_before_deleting_the_stash_entry(qapp, monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     _select_row(dialog, 0)
 
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
@@ -264,9 +293,12 @@ def test_apply_failure_shows_critical_and_does_not_mark_restored(
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
     adapter.raise_on_apply = git.GitCommandError(["git", "stash", "apply"], 1, "conflict!")
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     _select_row(dialog, 0)
 
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     critical_calls: list = []
     monkeypatch.setattr(
         QMessageBox, "critical", lambda *a, **k: critical_calls.append(a) or QMessageBox.StandardButton.Ok
@@ -280,7 +312,9 @@ def test_apply_failure_shows_critical_and_does_not_mark_restored(
 
 def test_empty_state_shows_message_and_disables_buttons(qapp) -> None:
     adapter = _FakeAdapter(Path("/repo"), entries=[])
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
 
     # The dialog itself is never shown in this test (no .show()/.exec()), so
     # isVisible() (which also requires every ancestor to be shown) would be
@@ -330,7 +364,9 @@ def test_table_context_menu_offers_restore_and_delete_and_selects_the_row(
     qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     captured = _capture_menu(monkeypatch)
 
     dialog._on_table_context_menu(_row_pos(dialog, 1))
@@ -345,7 +381,9 @@ def test_table_context_menu_on_empty_space_shows_no_menu(
     qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     captured = _capture_menu(monkeypatch)
 
     dialog._on_table_context_menu(QPoint(10_000, 10_000))
@@ -357,8 +395,11 @@ def test_restore_stash_context_action_reuses_the_apply_handler(
     qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     captured = _capture_menu(monkeypatch)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
 
     dialog._on_table_context_menu(_row_pos(dialog, 1))
     _trigger(captured[0], "Restore stash")
@@ -371,7 +412,9 @@ def test_delete_stash_declined_does_not_call_git(
     qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     captured = _capture_menu(monkeypatch)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
 
@@ -386,7 +429,9 @@ def test_delete_stash_accepted_drops_and_fully_reloads_the_table(
     qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     captured = _capture_menu(monkeypatch)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
 
@@ -406,7 +451,9 @@ def test_delete_stash_failure_shows_critical_instead_of_raising(
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
     adapter.raise_on_drop = git.GitCommandError(["git", "stash", "drop"], 1, "boom")
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     captured = _capture_menu(monkeypatch)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     critical_calls: list = []
@@ -425,7 +472,9 @@ def test_file_list_context_menu_offers_restore_file(
     qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     _select_row(dialog, 0)
     captured = _capture_menu(monkeypatch)
 
@@ -439,7 +488,9 @@ def test_file_list_context_menu_on_empty_space_shows_no_menu(
     qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     _select_row(dialog, 0)
     captured = _capture_menu(monkeypatch)
 
@@ -452,7 +503,9 @@ def test_restore_file_declined_does_not_call_git(
     qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     _select_row(dialog, 0)
     captured = _capture_menu(monkeypatch)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
@@ -468,7 +521,9 @@ def test_restore_file_accepted_calls_adapter_with_ref_and_path(
     qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     _select_row(dialog, 0)
     captured = _capture_menu(monkeypatch)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
@@ -485,7 +540,9 @@ def test_restore_file_failure_shows_critical_instead_of_raising(
 ) -> None:
     adapter = _FakeAdapter(Path("/repo"))
     adapter.raise_on_restore_file = git.GitCommandError(["git", "checkout"], 1, "boom")
-    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog = StashesDialog(
+        Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
+    )
     _select_row(dialog, 0)
     captured = _capture_menu(monkeypatch)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
@@ -499,3 +556,104 @@ def test_restore_file_failure_shows_critical_instead_of_raising(
 
     assert len(critical_calls) == 1
     assert dialog.restored is False
+
+
+# ---------------------------------------------------------------------------
+# Apply/Pop/"Delete stash"/"Restore file" run on a background StashActionWorker
+# rather than blocking the GUI thread -- regression tests using DeferredPool
+# to prove the adapter call doesn't happen until the worker actually runs,
+# and that the table/file list/buttons are disabled meanwhile. Before the
+# fix, each of these methods called its adapter method synchronously inside
+# the handler, so `adapter.<attr>` would already be populated -- and the
+# widgets never disabled -- by the time `pool.run_pending()` is reached.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_runs_off_the_gui_thread(qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _FakeAdapter(Path("/repo"))
+    pool = DeferredPool()
+    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=pool)
+    _select_row(dialog, 0)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    dialog._apply_button.click()
+
+    assert adapter.applied == []
+    assert dialog._busy is True
+    assert dialog._table.isEnabled() is False
+    assert dialog._apply_button.isEnabled() is False
+    assert dialog._pop_button.isEnabled() is False
+    assert len(pool.pending) == 1
+
+    pool.run_pending()
+
+    assert adapter.applied == ["stash@{0}"]
+    assert dialog.restored is True
+    assert dialog._busy is False
+    assert dialog._table.isEnabled() is True
+
+
+def test_pop_runs_off_the_gui_thread(qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _FakeAdapter(Path("/repo"))
+    pool = DeferredPool()
+    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=pool)
+    _select_row(dialog, 0)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    dialog._pop_button.click()
+
+    assert adapter.popped == []
+    assert dialog._busy is True
+    assert dialog._pop_button.isEnabled() is False
+    assert len(pool.pending) == 1
+
+    pool.run_pending()
+
+    assert adapter.popped == ["stash@{0}"]
+    assert dialog.restored is True
+    assert dialog._busy is False
+
+
+def test_delete_stash_runs_off_the_gui_thread(qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _FakeAdapter(Path("/repo"))
+    pool = DeferredPool()
+    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=pool)
+    captured = _capture_menu(monkeypatch)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    dialog._on_table_context_menu(_row_pos(dialog, 0))
+    _trigger(captured[0], "Delete stash")
+
+    assert adapter.dropped == []
+    assert dialog._busy is True
+    assert dialog._table.isEnabled() is False
+    assert len(pool.pending) == 1
+
+    pool.run_pending()
+
+    assert adapter.dropped == ["stash@{0}"]
+    assert dialog._busy is False
+    assert dialog._table.isEnabled() is True
+
+
+def test_restore_file_runs_off_the_gui_thread(qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _FakeAdapter(Path("/repo"))
+    pool = DeferredPool()
+    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=pool)
+    _select_row(dialog, 0)
+    captured = _capture_menu(monkeypatch)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    dialog._on_file_list_context_menu(_file_item_pos(dialog, 0))
+    _trigger(captured[0], "Restore file")
+
+    assert adapter.restored_files == []
+    assert dialog._busy is True
+    assert dialog._file_list.isEnabled() is False
+    assert len(pool.pending) == 1
+
+    pool.run_pending()
+
+    assert adapter.restored_files == [("stash@{0}", Path("file0.txt"))]
+    assert dialog.restored is True
+    assert dialog._busy is False

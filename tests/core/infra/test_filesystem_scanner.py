@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+
+import pytest
 
 from local_changes_viewer.core.infra.filesystem_scanner import FileSystemScanner
 
@@ -78,3 +81,35 @@ def test_returns_empty_list_when_no_repos_found(tmp_path: Path):
     found = FileSystemScanner().find_git_repos(tmp_path)
 
     assert found == []
+
+
+def test_returns_empty_list_rather_than_raising_when_root_itself_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Deterministic stand-in for a workspace root that becomes unreadable
+    # (permission change, an unmounted network share) between being chosen
+    # and being scanned -- monkeypatched rather than relying on real
+    # filesystem permission enforcement, which root/some CI users bypass.
+    def _raise_permission_error(self: Path):
+        raise PermissionError(f"denied: {self}")
+
+    monkeypatch.setattr(Path, "iterdir", _raise_permission_error)
+
+    found = FileSystemScanner().find_git_repos(tmp_path)
+
+    assert found == []
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="requires POSIX permission enforcement")
+def test_skips_unreadable_child_directory_and_still_finds_sibling_repos(tmp_path: Path):
+    _make_git_dir(tmp_path / "repo_a")
+    unreadable = tmp_path / "no_access"
+    unreadable.mkdir()
+    os.chmod(unreadable, 0)
+    try:
+        found = FileSystemScanner().find_git_repos(tmp_path)
+    finally:
+        # Restore permissions so tmp_path's own cleanup can remove it.
+        os.chmod(unreadable, 0o700)
+
+    assert found == [tmp_path / "repo_a"]

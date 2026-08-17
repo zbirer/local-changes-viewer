@@ -6,7 +6,12 @@ from local_changes_viewer.gui.workspace_watcher import collect_watch_paths
 
 
 class WatchPathsWorkerSignals(QObject):
-    finished = Signal(object)  # list[Path]
+    # Renamed from `finished` -- that name is now reserved for the bare,
+    # no-payload signal below that WorkerKeeper waits on to release its
+    # reference; this one still only fires on success, carrying the result.
+    succeeded = Signal(object)  # list[Path]
+    error = Signal(str)
+    finished = Signal()
 
 
 class WatchPathsWorker(QRunnable):
@@ -18,5 +23,15 @@ class WatchPathsWorker(QRunnable):
         self.signals = WatchPathsWorkerSignals()
 
     def run(self) -> None:
-        watch_paths = collect_watch_paths(self._repo_paths)
-        self.signals.finished.emit(watch_paths)
+        try:
+            try:
+                watch_paths = collect_watch_paths(self._repo_paths)
+            except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
+                self.signals.error.emit(str(exc))
+            else:
+                self.signals.succeeded.emit(watch_paths)
+        finally:
+            # Last, always: WorkerKeeper frees this worker only once this
+            # fires, and queued signals are FIFO, so every emit above is
+            # delivered first -- see worker_keeper.py for the full reason.
+            self.signals.finished.emit()

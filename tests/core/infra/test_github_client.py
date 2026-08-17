@@ -31,8 +31,11 @@ def test_parse_github_owner_repo(url, expected):
 
 
 class _FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, headers: dict | None = None):
         self._body = json.dumps(payload).encode()
+        # A plain dict supports .get() the same way http.client.HTTPMessage
+        # does, which is all _get_page needs to read the Link header.
+        self.headers = headers or {}
 
     def read(self):
         return self._body
@@ -288,6 +291,61 @@ def test_get_pull_request_review_status_returns_none_reviewer_when_no_reviews():
     assert last_reviewed_at is None
     assert changed_files == 0
     assert checks_state is None
+
+
+def test_get_pull_request_review_status_paginates_review_threads_beyond_first_page():
+    """A PR with more than 100 review threads must not have unresolved_count
+    computed from only the first (oldest) page."""
+    first_page = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "changedFiles": 5,
+                    "reviewDecision": "CHANGES_REQUESTED",
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                        "nodes": [{"isResolved": False}, {"isResolved": True}],
+                    },
+                    "reviews": {
+                        "nodes": [
+                            {"author": {"login": "reviewer-two"}, "submittedAt": "2026-01-02T00:00:00Z"}
+                        ]
+                    },
+                    "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "PENDING"}}}]},
+                }
+            }
+        }
+    }
+    second_page = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [{"isResolved": False}, {"isResolved": False}],
+                    }
+                }
+            }
+        }
+    }
+
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=[_FakeResponse(first_page), _FakeResponse(second_page)],
+    ):
+        (
+            approved,
+            unresolved_count,
+            _last_reviewer,
+            _last_reviewed_at,
+            _changed_files,
+            _checks_state,
+        ) = GitHubClient("token").get_pull_request_review_status("owner", "repo", 7)
+
+    # 1 unresolved on page 1 + 2 unresolved on page 2 = 3. Without following
+    # the cursor this would stop at page 1's count of 1.
+    assert unresolved_count == 3
+    assert approved is False
 
 
 def test_get_pull_request_details_returns_open_status_and_last_comment_writer():
@@ -549,6 +607,66 @@ def test_get_pull_request_open_threads_returns_empty_list_when_nothing_open():
     assert threads == []
 
 
+def test_get_pull_request_open_threads_paginates_review_threads_beyond_first_page():
+    """A PR with more than 100 review threads must not silently drop the
+    threads past the first (oldest) page."""
+    first_page = _empty_threads_payload(
+        reviewThreads={
+            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+            "nodes": [
+                {
+                    "isResolved": False,
+                    "comments": {
+                        "nodes": [
+                            {
+                                "author": {"login": "reviewer-one"},
+                                "body": "First page comment",
+                                "createdAt": "2026-07-01T10:00:00Z",
+                                "url": "https://github.com/owner/repo/pull/42#discussion_r1",
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+    )
+    second_page = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [
+                            {
+                                "isResolved": False,
+                                "comments": {
+                                    "nodes": [
+                                        {
+                                            "author": {"login": "reviewer-two"},
+                                            "body": "Second page comment",
+                                            "createdAt": "2026-07-02T10:00:00Z",
+                                            "url": "https://github.com/owner/repo/pull/42#discussion_r2",
+                                        }
+                                    ]
+                                },
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+    }
+
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=[_FakeResponse(first_page), _FakeResponse(second_page)],
+    ):
+        threads = GitHubClient("token").get_pull_request_open_threads("owner", "repo", 42)
+
+    bodies = {thread.body for thread in threads}
+    assert bodies == {"First page comment", "Second page comment"}
+
+
 def test_list_authored_open_pull_requests_skips_repo_on_error():
     import urllib.error
 
@@ -558,4 +676,87 @@ def test_list_authored_open_pull_requests_skips_repo_on_error():
             "octocat", [("owner", "missing-repo")]
         )
 
+    assert results == []
+
+
+def test_list_authored_open_pull_requests_follows_link_header_pagination():
+    """A repo with more than 100 open PRs must not silently drop the PRs past
+    the first REST page."""
+    page_one = [
+        {
+            "number": 1,
+            "title": "PR one",
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments": 0,
+            "user": {"login": "octocat"},
+        }
+    ]
+    page_two = [
+        {
+            "number": 2,
+            "title": "PR two",
+            "html_url": "https://github.com/owner/repo/pull/2",
+            "comments": 0,
+            "user": {"login": "octocat"},
+        }
+    ]
+    review_status_payload = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "changedFiles": 0,
+                    "reviewDecision": None,
+                    "reviewThreads": {"nodes": []},
+                    "reviews": {"nodes": []},
+                    "commits": {"nodes": []},
+                }
+            }
+        }
+    }
+    next_link = '<https://api.github.com/repositories/1/pulls?per_page=100&page=2>; rel="next"'
+    responses = [
+        _FakeResponse(page_one, headers={"Link": next_link}),
+        _FakeResponse(page_two),
+        _FakeResponse(review_status_payload),
+        _FakeResponse(review_status_payload),
+    ]
+
+    with patch("urllib.request.urlopen", side_effect=responses):
+        results = GitHubClient("token").list_authored_open_pull_requests(
+            "octocat", [("owner", "repo")]
+        )
+
+    assert [result.number for result in results] == [1, 2]
+
+
+def test_list_authored_open_pull_requests_bounds_link_header_pagination(monkeypatch):
+    """A malformed or looping Link header (always pointing at "next") must not
+    hang the app forever."""
+    from local_changes_viewer.core.infra import github_client as github_client_module
+
+    monkeypatch.setattr(github_client_module, "_MAX_PAGINATION_PAGES", 3)
+    infinite_link = '<https://api.github.com/repositories/1/pulls?per_page=100&page=2>; rel="next"'
+    never_ending_page = [
+        {
+            "number": 1,
+            "title": "Never-ending PR",
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "comments": 0,
+            "user": {"login": "someone-else"},
+        }
+    ]
+    call_count = {"n": 0}
+
+    def fake_urlopen(_request, timeout=None):
+        call_count["n"] += 1
+        return _FakeResponse(never_ending_page, headers={"Link": infinite_link})
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        results = GitHubClient("token").list_authored_open_pull_requests(
+            "octocat", [("owner", "repo")]
+        )
+
+    # Author never matches "octocat", so this isolates the REST pagination
+    # bound: exactly _MAX_PAGINATION_PAGES page fetches, never more.
+    assert call_count["n"] == 3
     assert results == []

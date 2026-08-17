@@ -531,9 +531,15 @@ class WorkspaceScannerService:
 
         if previous_pull_request is not None:
             prev_pr, prev_branch = previous_pull_request
+            # Only "merged" is permanent. Unlike a merge, a "closed" PR can be
+            # reopened on GitHub, so short-circuiting on it here the same way
+            # would freeze a reopened PR as closed for the rest of the
+            # session (only a branch change or app restart would clear it).
+            # The TTL cache above still applies to a closed PR, so it isn't
+            # re-fetched on every single refresh either.
             if (
                 prev_pr is not None
-                and prev_pr.state in ("merged", "closed")
+                and prev_pr.state == "merged"
                 and branch_name == prev_branch
             ):
                 on_log(

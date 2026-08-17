@@ -368,29 +368,53 @@ class SideBySideView(QWidget):
         if self._syncing or not self._sync_scroll_enabled:
             return
         self._syncing = True
-        self._right.verticalScrollBar().setValue(value)
+        bar = self._right.verticalScrollBar()
+        bar.setValue(self._scaled_scroll_value(self._left.verticalScrollBar(), bar, value))
         self._syncing = False
 
     def _sync_vertical_from_right(self, value: int) -> None:
         if self._syncing or not self._sync_scroll_enabled:
             return
         self._syncing = True
-        self._left.verticalScrollBar().setValue(value)
+        bar = self._left.verticalScrollBar()
+        bar.setValue(self._scaled_scroll_value(self._right.verticalScrollBar(), bar, value))
         self._syncing = False
 
     def _sync_horizontal_from_left(self, value: int) -> None:
         if self._syncing or not self._sync_scroll_enabled:
             return
         self._syncing = True
-        self._right.horizontalScrollBar().setValue(value)
+        bar = self._right.horizontalScrollBar()
+        bar.setValue(self._scaled_scroll_value(self._left.horizontalScrollBar(), bar, value))
         self._syncing = False
 
     def _sync_horizontal_from_right(self, value: int) -> None:
         if self._syncing or not self._sync_scroll_enabled:
             return
         self._syncing = True
-        self._left.horizontalScrollBar().setValue(value)
+        bar = self._left.horizontalScrollBar()
+        bar.setValue(self._scaled_scroll_value(self._right.horizontalScrollBar(), bar, value))
         self._syncing = False
+
+    @staticmethod
+    def _scaled_scroll_value(source_bar, target_bar, value: int) -> int:
+        """Maps `value` from `source_bar`'s own range onto the equivalent
+        position in `target_bar`'s range, rather than copying the raw
+        integer across. In diff mode both panes render the same
+        `paired`-line list (see `_rebuild`), so their vertical ranges are
+        always identical and this reduces to exactly the old plain-copy
+        behavior. It stops being a no-op the moment the ranges diverge --
+        which is exactly what happens in edit mode: the left pane holds
+        the reconstructed old file and the right pane holds the live/
+        edited text (`enter_edit_mode`), two different document lengths.
+        A raw copy there maps the same scrollbar integer to two different
+        lines and the panes visibly drift apart; a ratio keeps them
+        proportionally aligned instead.
+        """
+        source_max = source_bar.maximum()
+        if source_max <= 0:
+            return value
+        return round(value / source_max * target_bar.maximum())
 
     def _on_marker_click(self, fold_key: tuple[int, int]) -> None:
         self._expanded_folds.add(fold_key)

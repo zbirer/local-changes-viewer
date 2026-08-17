@@ -18,6 +18,9 @@ class ScanWorkerSignals(QObject):
     progress = Signal(str)
     log_message = Signal(str)
     debug_message = Signal(str)
+    # Always emitted last (see run()) -- this is what WorkerKeeper waits for
+    # before releasing its reference, never a payload-carrying signal.
+    finished = Signal()
 
 
 class ScanWorker(QRunnable):
@@ -52,23 +55,29 @@ class ScanWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            workspace = self._service.scan(
-                self._root,
-                include_ignored=self._include_ignored,
-                on_progress=self.signals.progress.emit,
-                on_repo_ready=self.signals.repo_ready.emit,
-                on_dead_repo=self.signals.dead_repo.emit,
-                github_client=self._github_client,
-                on_log=self.signals.log_message.emit,
-                previous_pull_requests=self._previous_pull_requests,
-                is_cancelled=self._is_cancelled,
-                profile_repo_names=self._profile_repo_names,
-                include_unpushed_commits=self._include_unpushed_commits,
-                dirty_paths=self._dirty_paths,
-                force_full_rescan=self._force_full_rescan,
-                on_debug=self.signals.debug_message.emit,
-            )
-        except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
-            self.signals.error.emit(str(exc))
-        else:
-            self.signals.workspace_ready.emit(workspace)
+            try:
+                workspace = self._service.scan(
+                    self._root,
+                    include_ignored=self._include_ignored,
+                    on_progress=self.signals.progress.emit,
+                    on_repo_ready=self.signals.repo_ready.emit,
+                    on_dead_repo=self.signals.dead_repo.emit,
+                    github_client=self._github_client,
+                    on_log=self.signals.log_message.emit,
+                    previous_pull_requests=self._previous_pull_requests,
+                    is_cancelled=self._is_cancelled,
+                    profile_repo_names=self._profile_repo_names,
+                    include_unpushed_commits=self._include_unpushed_commits,
+                    dirty_paths=self._dirty_paths,
+                    force_full_rescan=self._force_full_rescan,
+                    on_debug=self.signals.debug_message.emit,
+                )
+            except Exception as exc:  # noqa: BLE001 - reported via signal, not raised on worker thread
+                self.signals.error.emit(str(exc))
+            else:
+                self.signals.workspace_ready.emit(workspace)
+        finally:
+            # Last, always: WorkerKeeper frees this worker only once this
+            # fires, and queued signals are FIFO, so every emit above is
+            # delivered first -- see worker_keeper.py for the full reason.
+            self.signals.finished.emit()

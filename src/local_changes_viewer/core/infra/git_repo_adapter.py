@@ -75,6 +75,14 @@ _UNTRACKED_DIR_SUMMARY_MAX_NAMES = 20
 # tree just to print a count nobody needs exactly.
 _UNTRACKED_DIR_SUMMARY_SCAN_LIMIT = 5000
 
+# Hard cap on how many bytes _diff_untracked will read into memory before
+# giving up and reporting "too large" instead of the real content — the
+# untracked-directory case just above already bounds its own walk for the
+# same reason (a `node_modules`-sized entry shouldn't block the UI thread);
+# without this, double-clicking one huge untracked file (a data dump, a
+# vendored binary) reads the whole thing onto that same thread synchronously.
+_UNTRACKED_FILE_DIFF_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB
+
 
 class GitRepoAdapter:
     def __init__(self, repo_path: Path) -> None:
@@ -86,19 +94,38 @@ class GitRepoAdapter:
         self._default_branch_cache: object = _NOT_COMPUTED
 
     def list_changes(self, include_unpushed_commits: bool = False) -> list[FileChange]:
-        output = self._repo.git.status("--porcelain=v1", "--ignored")
+        # `-z` NUL-terminates every field instead of using a space/newline
+        # and the literal " -> " separator the default text format relies on
+        # for renames -- so a filename containing " -> ", a newline, or a
+        # tab can never corrupt the split. `-c core.quotePath=false` backs
+        # this up: without it (and without `-z`, which git also treats as
+        # disabling quoting on its own), a non-ASCII filename comes back
+        # C-quoted into an escaped literal like "\327\251...", which the
+        # rest of the app -- most importantly the later `git diff --
+        # <path>` -- would never match against the real file on disk.
+        output = self._repo.git(c="core.quotePath=false").status(
+            "--porcelain=v1", "-z", "--ignored"
+        )
         changes: list[FileChange] = []
-        for line in output.splitlines():
-            if not line:
+        tokens = output.split("\0")
+        i = 0
+        while i < len(tokens):
+            entry = tokens[i]
+            if not entry:
+                i += 1
                 continue
-            xy = line[:2]
-            rest = line[3:]
+            xy = entry[:2]
+            rest = entry[3:]
             old_path: Path | None = None
-            if " -> " in rest:
-                old_str, new_str = rest.split(" -> ", maxsplit=1)
-                old_path = Path(old_str.strip())
-                rest = new_str
-            rest = rest.strip()
+            if "R" in xy:
+                # `-z` reverses the rename field order versus the default
+                # text format ("from -> to" becomes "to", NUL, "from") -- the
+                # old path is the *next* NUL-terminated token, never embedded
+                # in this one via " -> ".
+                old_path = Path(tokens[i + 1])
+                i += 2
+            else:
+                i += 1
             is_directory = rest.endswith("/")
             if not is_directory and xy in _STATUS_CODE_TO_CHANGE_TYPE:
                 # An untracked/ignored path with no trailing slash is normally
@@ -134,25 +161,22 @@ class GitRepoAdapter:
         if base is None:
             return []
         try:
-            output = self._repo.git.diff("--no-color", "--name-status", "-M", f"{base}...HEAD")
+            # See `_parse_name_status_z` for why `-z` (+ quotePath=false).
+            output = self._repo.git(c="core.quotePath=false").diff(
+                "--no-color", "--name-status", "-M", "-z", f"{base}...HEAD"
+            )
         except git.GitCommandError:
             return []
 
         changes: list[FileChange] = []
-        for line in output.splitlines():
-            if not line:
-                continue
-            parts = line.split("\t")
-            code = parts[0]
-            if code.startswith("R"):
-                old_path, path = Path(parts[1]), Path(parts[2])
-                change_type = ChangeType.RENAMED
-            else:
-                path = Path(parts[1])
-                old_path = None
-                change_type = {"A": ChangeType.ADDED, "D": ChangeType.DELETED}.get(
+        for code, path, old_path in self._parse_name_status_z(output):
+            change_type = (
+                ChangeType.RENAMED
+                if code.startswith("R")
+                else {"A": ChangeType.ADDED, "D": ChangeType.DELETED}.get(
                     code[0], ChangeType.MODIFIED
                 )
+            )
             changes.append(
                 FileChange(
                     path=path,
@@ -163,6 +187,39 @@ class GitRepoAdapter:
                 )
             )
         return changes
+
+    @staticmethod
+    def _parse_name_status_z(output: str) -> list[tuple[str, Path, Path | None]]:
+        """Parses `--name-status -z` output into (code, path, old_path) triples.
+
+        `-z` NUL-terminates every field instead of the default tab/newline
+        format, so a filename containing a tab or newline can't corrupt the
+        split -- and (paired with `-c core.quotePath=false` at the call
+        site) a non-ASCII filename comes back as its real UTF-8 bytes
+        instead of git's default C-quoted escape (e.g. "\\327\\251..."),
+        which would never match the real path on disk in a later `git diff
+        -- <path>`. Unlike `git status -z` (see `list_changes`), `--name-
+        status -z` does NOT reverse rename field order -- a rename/copy
+        entry is simply three consecutive tokens (code, old path, new path)
+        instead of the usual two.
+        """
+        entries: list[tuple[str, Path, Path | None]] = []
+        tokens = output.split("\0")
+        i = 0
+        while i < len(tokens):
+            code = tokens[i]
+            if not code:
+                i += 1
+                continue
+            if code.startswith("R") or code.startswith("C"):
+                old_path, path = Path(tokens[i + 1]), Path(tokens[i + 2])
+                i += 3
+            else:
+                path = Path(tokens[i + 1])
+                old_path = None
+                i += 2
+            entries.append((code, path, old_path))
+        return entries
 
     def _get_commit_messages(self, base: str, path: Path) -> str | None:
         try:
@@ -265,32 +322,52 @@ class GitRepoAdapter:
             output = self._repo.git.branch("--contains", hexsha, "--format=%(refname:short)")
         except git.GitCommandError:
             return ""
-        for line in output.splitlines():
-            name = line.strip()
-            if name:
-                return name
-        return ""
+        # `git branch --contains` also lists a synthetic pseudo-entry for
+        # the *current* detached-HEAD state itself (literally
+        # "(HEAD detached at <sha>)", verified against real git output) --
+        # not a real branch name, and its leading "(" sorts before every
+        # real branch name alphabetically, so it must never win either the
+        # alphabetical fallback or (accidentally) a preference match below.
+        names = [
+            line.strip()
+            for line in output.splitlines()
+            if line.strip() and not line.strip().startswith("(")
+        ]
+        if not names:
+            return ""
+        # `git branch --contains` prints matches in plain alphabetical
+        # order, so a commit reachable from both "feature-x" and "main"
+        # always reported "feature-x" regardless of which branch the user
+        # is actually looking at. Least-surprising fix, in priority order:
+        # (1) the repo's current branch, since the commit log is almost
+        # always being viewed *from* it; (2) the repo's default branch, the
+        # next most likely "this is what the commit really belongs to"
+        # answer; (3) only then fall back to git's own alphabetical order.
+        try:
+            current_branch = self._repo.active_branch.name
+        except TypeError:
+            current_branch = None
+        if current_branch in names:
+            return current_branch
+        default_branch = self._find_default_branch()
+        if default_branch in names:
+            return default_branch
+        return names[0]
 
     def get_commit_files(self, commit_hexsha: str) -> list[FileChange]:
-        output = self._repo.git.show(
-            "--no-color", "--name-status", "--pretty=format:", "-M", commit_hexsha
+        # See `_parse_name_status_z` for why `-z` (+ quotePath=false).
+        output = self._repo.git(c="core.quotePath=false").show(
+            "--no-color", "--name-status", "--pretty=format:", "-M", "-z", commit_hexsha
         )
         changes: list[FileChange] = []
-        for line in output.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            code = parts[0]
-            if code.startswith("R"):
-                old_path, path = Path(parts[1]), Path(parts[2])
-                change_type = ChangeType.RENAMED
-            else:
-                path = Path(parts[1])
-                old_path = None
-                change_type = {"A": ChangeType.ADDED, "D": ChangeType.DELETED}.get(
+        for code, path, old_path in self._parse_name_status_z(output):
+            change_type = (
+                ChangeType.RENAMED
+                if code.startswith("R")
+                else {"A": ChangeType.ADDED, "D": ChangeType.DELETED}.get(
                     code[0], ChangeType.MODIFIED
                 )
+            )
             changes.append(FileChange(path=path, change_type=change_type, old_path=old_path))
         return changes
 
@@ -742,6 +819,15 @@ class GitRepoAdapter:
         # common path.
         if change.is_directory or abs_path.is_dir():
             return self._summarize_untracked_directory(abs_path)
+
+        try:
+            size = abs_path.stat().st_size
+        except FileNotFoundError:
+            return self._text_summary_result([f"File no longer exists on disk: {change.path}"])
+        if size > _UNTRACKED_FILE_DIFF_MAX_BYTES:
+            return self._text_summary_result(
+                [f"File too large to preview ({size:,} bytes) — content not shown."]
+            )
 
         try:
             raw_bytes = abs_path.read_bytes()

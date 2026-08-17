@@ -45,8 +45,16 @@ class PygmentsHighlighter(QSyntaxHighlighter):
         super().__init__(document)
         self._lexer: Lexer = TextLexer(stripnl=False)
         self._prefix_len = prefix_len
+        self._filename: str | None = None
 
     def set_filename(self, filename: str) -> None:
+        # `_rebuild()` in side_by_side_view.py calls this on every fold-marker
+        # expand, not just on a genuine file switch (set_diff) -- the lexer
+        # can't have changed if the filename hasn't, so skip the ClassNotFound
+        # probe and the full-document rehighlight() they'd otherwise cost.
+        if filename == self._filename:
+            return
+        self._filename = filename
         try:
             self._lexer = get_lexer_for_filename(filename, stripnl=False)
         except ClassNotFound:

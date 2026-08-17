@@ -631,6 +631,31 @@ def test_scan_still_fetches_when_previous_pr_is_open(tmp_path: Path):
     assert workspace.repositories[0].pull_request is fresh_pr
 
 
+def test_scan_still_fetches_when_previous_pr_is_closed(tmp_path: Path):
+    """A closed PR (unlike a merged one) can be reopened on GitHub, so it must
+    not be short-circuited as terminal the way "merged" is."""
+    repo_a = tmp_path / "repo_a"
+    adapter = FakeGitRepoAdapter(
+        repo_a, [], _branch("main"), remote_url="git@github.com:getexpain/repo_a.git"
+    )
+    service = WorkspaceScannerService(
+        filesystem_scanner=FakeFileSystemScanner([repo_a]),
+        adapter_factory=lambda path: adapter,
+    )
+    fresh_pr = _pr("open")
+    github_client = RecordingGitHubClient(pull_request=fresh_pr)
+    previous_closed_pr = _pr("closed")
+
+    workspace = service.scan(
+        tmp_path,
+        github_client=github_client,
+        previous_pull_requests={repo_a: (previous_closed_pr, "main")},
+    )
+
+    assert github_client.calls == [("getexpain", "repo_a", "main")]
+    assert workspace.repositories[0].pull_request is fresh_pr
+
+
 def test_scan_still_fetches_when_branch_changed(tmp_path: Path):
     repo_a = tmp_path / "repo_a"
     adapter = FakeGitRepoAdapter(

@@ -163,9 +163,16 @@ def test_reload_error_hides_status_message_and_shows_warning(
     assert dialog._table.item(0, 0).text() == "No linked worktrees"
 
 
-def test_post_delete_reload_also_goes_through_the_worker(
+def test_delete_itself_runs_off_the_gui_thread_then_post_delete_reload_also_goes_through_the_worker(
     qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Regression test: `_on_delete` used to call `adapter.remove_worktree()`
+    -- a `git worktree remove` subprocess -- directly on the GUI thread, so a
+    slow disk or network share froze the whole app with no busy indicator
+    and no way to cancel. It now runs on the same thread_pool the dialog
+    already uses for loading, disabling the table and showing a status
+    message for the duration, exactly like `_reload()` does.
+    """
     wt_path = tmp_path / "wt" / "feature-x"
     fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
     monkeypatch.setattr(
@@ -178,15 +185,26 @@ def test_post_delete_reload_also_goes_through_the_worker(
 
     dialog._on_delete(_info(wt_path))
 
-    # The post-delete _reload() started a second worker on the pool rather
-    # than calling list_worktree_details() synchronously on the GUI thread.
+    # The delete worker is queued but hasn't run yet -- nothing removed, and
+    # the dialog is already showing its busy state.
+    assert fake.removed == []
+    assert dialog._loading is True
+    assert not dialog._status_label.isHidden()
+    assert dialog._table.isEnabled() is False
+    assert len(pool.pending) == 1
+
+    pool.run_pending()  # runs the delete worker
+
+    # Deletion is done; its `finished` handler immediately queued the
+    # post-delete _reload() worker rather than calling
+    # list_worktree_details() synchronously on the GUI thread.
     assert fake.removed == [(wt_path, False)]
     assert dialog._loading is True
     assert not dialog._status_label.isHidden()
     assert dialog._table.isEnabled() is False
     assert len(pool.pending) == 1
 
-    pool.run_pending()
+    pool.run_pending()  # runs the post-delete reload worker
 
     assert dialog._loading is False
     assert dialog._status_label.isHidden()
@@ -245,6 +263,38 @@ def test_delete_button_offers_force_delete_when_removal_fails(
 
     assert fake.removed == [(wt_path, True)]
     assert dialog.deleted_any is True
+
+
+def test_force_delete_retry_also_runs_off_the_gui_thread(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(
+        tmp_path, details=[_info(wt_path)], remove_error=RuntimeError("dirty worktree")
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    pool = DeferredPool()
+
+    dialog = _make_dialog(tmp_path, fake, thread_pool=pool)
+    pool.run_pending()  # initial load from __init__
+
+    dialog._on_delete(_info(wt_path))
+    pool.run_pending()  # runs the non-forced delete worker -> raises -> force prompt -> queues retry
+
+    assert fake.removed == []
+    assert len(pool.pending) == 1  # the force=True retry worker
+    assert dialog._loading is True
+    assert dialog._table.isEnabled() is False
+
+    pool.run_pending()  # runs the forced delete worker
+    pool.run_pending()  # runs the post-delete reload worker
+
+    assert fake.removed == [(wt_path, True)]
+    assert dialog.deleted_any is True
+    assert dialog._loading is False
+    assert dialog._table.isEnabled() is True
 
 
 def test_reload_tracks_worktree_for_each_row(qapp, tmp_path: Path) -> None:

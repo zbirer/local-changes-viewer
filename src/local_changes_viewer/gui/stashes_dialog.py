@@ -7,7 +7,12 @@ like every other diff in this app.
 Loading `list_stashes()` is a single, fast `git stash list` call -- unlike
 `WorktreesDialog`'s per-worktree detail gathering (several git commands each),
 there's no need for `worktrees_dialog.py`'s background-worker/busy-dialog
-machinery here; the list is populated synchronously in `__init__`.
+machinery for that read; the list is populated synchronously in `__init__`.
+The mutating actions below it (Apply/Pop/"Delete stash"/"Restore file"),
+though, shell out to `git stash apply|pop|drop`/`git checkout` and can block
+for a while on a slow disk or a large stash -- those run on a background
+`QRunnable` (`StashActionWorker`), same reasoning as `WorktreesDialog`'s
+per-row Delete (see `worktree_delete_worker.py`).
 
 Constructor shape (`repo_path` + `adapter_factory`) deliberately mirrors
 `WorktreesDialog`, so this dialog can be constructed in a test with a fake
@@ -22,8 +27,9 @@ exactly one place" rule `PatchService.split_patch` exists to enforce.
 """
 
 from pathlib import Path
+from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -47,6 +53,8 @@ from local_changes_viewer.core.domain.stash_entry import StashEntry
 from local_changes_viewer.core.infra.git_repo_adapter import GitRepoAdapter
 from local_changes_viewer.core.services.patch_service import PatchService
 from local_changes_viewer.gui.diff_view.side_by_side_view import SideBySideView
+from local_changes_viewer.gui.workers.stash_action_worker import StashActionWorker
+from local_changes_viewer.gui.workers.worker_keeper import start_worker
 
 _COLUMNS = ("Ref", "Message", "Date")
 _STASH_ROLE = Qt.ItemDataRole.UserRole
@@ -71,11 +79,19 @@ class StashesDialog(QDialog):
         repo_path: Path,
         adapter_factory=GitRepoAdapter,
         parent: QWidget | None = None,
+        thread_pool: QThreadPool | None = None,
     ) -> None:
         super().__init__(parent)
         self._repo_path = repo_path
         self._adapter_factory = adapter_factory
+        self._thread_pool = thread_pool if thread_pool is not None else QThreadPool.globalInstance()
         self._patch_service = PatchService()
+        # Set while an Apply/Pop/"Delete stash"/"Restore file" worker is
+        # running -- see `_set_busy` -- so a second mutating action can't
+        # fire against a stash/file that's already mid-operation, and a
+        # table/file-list reselect doesn't race the worker's write to the
+        # working tree.
+        self._busy = False
         # The selected stash's files, in the shape `_on_file_selection_changed`
         # looks a clicked row's path up in -- repopulated by
         # `_on_stash_selection_changed`, emptied by `_clear_file_list_and_diff`.
@@ -207,9 +223,42 @@ class StashesDialog(QDialog):
         return self._stash_at_row(rows[0].row())
 
     def _update_button_state(self) -> None:
-        has_selection = self._selected_stash() is not None
-        self._apply_button.setEnabled(has_selection)
-        self._pop_button.setEnabled(has_selection)
+        enabled = self._selected_stash() is not None and not self._busy
+        self._apply_button.setEnabled(enabled)
+        self._pop_button.setEnabled(enabled)
+
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self._table.setEnabled(not busy)
+        self._file_list.setEnabled(not busy)
+        self._update_button_state()
+
+    def _run_stash_action(
+        self,
+        action: Callable[[], None],
+        on_success: Callable[[], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        """Runs `action` (an adapter method call already bound to its args)
+        on a background `StashActionWorker` instead of blocking the GUI
+        thread -- see the module docstring. `on_success`/`on_error` run back
+        on the GUI thread once the worker reports in, after busy state is
+        cleared so they're free to re-enable/repopulate anything.
+        """
+        self._set_busy(True)
+        worker = StashActionWorker(action)
+
+        def _finished() -> None:
+            self._set_busy(False)
+            on_success()
+
+        def _errored(message: str) -> None:
+            self._set_busy(False)
+            on_error(message)
+
+        worker.signals.succeeded.connect(_finished)
+        worker.signals.error.connect(_errored)
+        start_worker(self._thread_pool, worker)
 
     def _clear_file_list_and_diff(self) -> None:
         self._file_diffs = []
@@ -276,15 +325,34 @@ class StashesDialog(QDialog):
         stash = self._selected_stash()
         if stash is None:
             return
-        adapter = self._adapter_factory(self._repo_path)
-        try:
-            adapter.apply_stash(stash.ref)
-        except git.GitCommandError as error:
-            QMessageBox.critical(self, "Apply Stash", f"Failed to apply stash: {error}")
+        # Mutates the working tree -- same risk class as Pop just below,
+        # which already confirms before running. Apply used to run with no
+        # confirmation at all despite being reachable from both this button
+        # and the context menu's "Restore stash", so it now asks the same
+        # Yes/No, defaulting to the safe No.
+        confirm = QMessageBox.question(
+            self,
+            "Apply Stash",
+            f"Apply {stash.ref} ({stash.message}) to the working tree?\n\n"
+            "This can conflict with uncommitted changes.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
             return
-        self.restored = True
-        QMessageBox.information(self, "Apply Stash", f"Applied {stash.ref}.")
-        self._reload()
+
+        def _apply() -> None:
+            self._adapter_factory(self._repo_path).apply_stash(stash.ref)
+
+        def _on_success() -> None:
+            self.restored = True
+            QMessageBox.information(self, "Apply Stash", f"Applied {stash.ref}.")
+            self._reload()
+
+        def _on_error(message: str) -> None:
+            QMessageBox.critical(self, "Apply Stash", f"Failed to apply stash: {message}")
+
+        self._run_stash_action(_apply, _on_success, _on_error)
 
     def _on_pop(self) -> None:
         stash = self._selected_stash()
@@ -300,15 +368,19 @@ class StashesDialog(QDialog):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        adapter = self._adapter_factory(self._repo_path)
-        try:
-            adapter.pop_stash(stash.ref)
-        except git.GitCommandError as error:
-            QMessageBox.critical(self, "Pop Stash", f"Failed to pop stash: {error}")
-            return
-        self.restored = True
-        QMessageBox.information(self, "Pop Stash", f"Popped {stash.ref}.")
-        self._reload()
+
+        def _pop() -> None:
+            self._adapter_factory(self._repo_path).pop_stash(stash.ref)
+
+        def _on_success() -> None:
+            self.restored = True
+            QMessageBox.information(self, "Pop Stash", f"Popped {stash.ref}.")
+            self._reload()
+
+        def _on_error(message: str) -> None:
+            QMessageBox.critical(self, "Pop Stash", f"Failed to pop stash: {message}")
+
+        self._run_stash_action(_pop, _on_success, _on_error)
 
     def _on_table_context_menu(self, pos) -> None:
         # Mirrors main_window.py's _on_tree_context_menu: right-click on a row
@@ -325,7 +397,7 @@ class StashesDialog(QDialog):
             return
         menu = QMenu(self._table)
         # "Restore stash" reuses _on_apply verbatim -- same handler, same
-        # confirmation-free apply + refresh path as the Apply button, so
+        # confirm-then-apply-then-refresh path as the Apply button, so
         # there's exactly one place that logic lives.
         menu.addAction("Restore stash", self._on_apply)
         menu.addAction("Delete stash", lambda: self._on_delete_stash(stash))
@@ -341,20 +413,24 @@ class StashesDialog(QDialog):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        adapter = self._adapter_factory(self._repo_path)
-        try:
-            adapter.drop_stash(stash.ref)
-        except git.GitCommandError as error:
-            QMessageBox.critical(self, "Delete Stash", f"Failed to delete stash: {error}")
-            return
-        QMessageBox.information(self, "Delete Stash", f"Deleted {stash.ref}.")
-        # `git stash drop` renumbers every remaining stash -- dropping
-        # stash@{1} turns stash@{2} into stash@{1} -- so the table must be
-        # fully reloaded from git, not just have this one row removed;
-        # _reload -> _populate_table also clears _current_stash and the
-        # file list/diff pane, which is correct even when the dropped entry
-        # wasn't the selected one.
-        self._reload()
+
+        def _drop() -> None:
+            self._adapter_factory(self._repo_path).drop_stash(stash.ref)
+
+        def _on_success() -> None:
+            QMessageBox.information(self, "Delete Stash", f"Deleted {stash.ref}.")
+            # `git stash drop` renumbers every remaining stash -- dropping
+            # stash@{1} turns stash@{2} into stash@{1} -- so the table must
+            # be fully reloaded from git, not just have this one row
+            # removed; _reload -> _populate_table also clears
+            # _current_stash and the file list/diff pane, which is correct
+            # even when the dropped entry wasn't the selected one.
+            self._reload()
+
+        def _on_error(message: str) -> None:
+            QMessageBox.critical(self, "Delete Stash", f"Failed to delete stash: {message}")
+
+        self._run_stash_action(_drop, _on_success, _on_error)
 
     def _on_file_list_context_menu(self, pos) -> None:
         item = self._file_list.itemAt(pos)
@@ -380,11 +456,15 @@ class StashesDialog(QDialog):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        adapter = self._adapter_factory(self._repo_path)
-        try:
-            adapter.restore_file_from_stash(stash.ref, path)
-        except git.GitCommandError as error:
-            QMessageBox.critical(self, "Restore File", f"Failed to restore file: {error}")
-            return
-        self.restored = True
-        QMessageBox.information(self, "Restore File", f"Restored {path.as_posix()}.")
+
+        def _restore() -> None:
+            self._adapter_factory(self._repo_path).restore_file_from_stash(stash.ref, path)
+
+        def _on_success() -> None:
+            self.restored = True
+            QMessageBox.information(self, "Restore File", f"Restored {path.as_posix()}.")
+
+        def _on_error(message: str) -> None:
+            QMessageBox.critical(self, "Restore File", f"Failed to restore file: {message}")
+
+        self._run_stash_action(_restore, _on_success, _on_error)

@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
 from local_changes_viewer.gui.workers.bulk_worktree_delete_worker import BulkWorktreeDeleteWorker
+from local_changes_viewer.gui.workers.worker_keeper import start_worker
 
 _WORKTREE_ROLE = Qt.ItemDataRole.UserRole
 # Amber, not red: an unpushed worktree is still a legitimate, deliberate
@@ -184,7 +185,7 @@ class BulkDeleteWorktreesDialog(QDialog):
         worker.signals.progress.connect(self._on_progress)
         worker.signals.one_finished.connect(self._on_one_finished)
         worker.signals.finished.connect(self._on_all_finished)
-        self._thread_pool.start(worker)
+        start_worker(self._thread_pool, worker)
 
     def _on_progress(self, index: int, total: int, path_str: str) -> None:
         name = Path(path_str).name
