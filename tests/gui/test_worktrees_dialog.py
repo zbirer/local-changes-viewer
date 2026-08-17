@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtGui import QFontMetrics, QGuiApplication
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
 from local_changes_viewer.gui.worktrees_dialog import WorktreesDialog
@@ -110,7 +110,7 @@ def test_dialog_shows_placeholder_when_no_worktrees(qapp, tmp_path: Path) -> Non
     assert dialog._table.item(0, 0).text() == "No linked worktrees"
 
 
-def test_reload_shows_busy_dialog_while_pending_then_populates_table(
+def test_reload_shows_status_message_while_pending_then_populates_table(
     qapp, tmp_path: Path
 ) -> None:
     wt_path = tmp_path / "wt" / "feature-x"
@@ -119,19 +119,24 @@ def test_reload_shows_busy_dialog_while_pending_then_populates_table(
 
     dialog = _make_dialog(tmp_path, fake, thread_pool=pool)
 
-    # Worker hasn't run yet: table not populated, busy dialog up.
+    # Worker hasn't run yet: table not populated, status message up and
+    # disabled so a delete can't be triggered against stale rows.
     assert dialog._table.rowCount() == 0
-    assert dialog._busy_dialog is not None
-    assert dialog._busy_dialog.isVisible()
+    assert dialog._loading is True
+    assert not dialog._status_label.isHidden()
+    assert "reading" in dialog._status_label.text().lower()
+    assert dialog._table.isEnabled() is False
 
     pool.run_pending()
 
     assert dialog._table.rowCount() == 1
     assert dialog._table.item(0, 0).text() == str(wt_path)
-    assert dialog._busy_dialog is None
+    assert dialog._loading is False
+    assert dialog._status_label.isHidden()
+    assert dialog._table.isEnabled() is True
 
 
-def test_reload_error_closes_busy_dialog_and_shows_warning(
+def test_reload_error_hides_status_message_and_shows_warning(
     qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = FakeAdapter(tmp_path)
@@ -149,7 +154,9 @@ def test_reload_error_closes_busy_dialog_and_shows_warning(
     dialog = _make_dialog(tmp_path, fake, thread_pool=pool)
     pool.run_pending()
 
-    assert dialog._busy_dialog is None
+    assert dialog._loading is False
+    assert dialog._status_label.isHidden()
+    assert dialog._table.isEnabled() is True
     assert len(warnings) == 1
     assert "git failed" in warnings[0][2]
     assert dialog._table.rowCount() == 1
@@ -174,12 +181,16 @@ def test_post_delete_reload_also_goes_through_the_worker(
     # The post-delete _reload() started a second worker on the pool rather
     # than calling list_worktree_details() synchronously on the GUI thread.
     assert fake.removed == [(wt_path, False)]
-    assert dialog._busy_dialog is not None
+    assert dialog._loading is True
+    assert not dialog._status_label.isHidden()
+    assert dialog._table.isEnabled() is False
     assert len(pool.pending) == 1
 
     pool.run_pending()
 
-    assert dialog._busy_dialog is None
+    assert dialog._loading is False
+    assert dialog._status_label.isHidden()
+    assert dialog._table.isEnabled() is True
     assert dialog._table.rowCount() == 1
     assert dialog._table.item(0, 0).text() == "No linked worktrees"
 
@@ -353,3 +364,303 @@ def test_context_menu_ignores_click_outside_any_row(qapp, tmp_path: Path) -> Non
 
     # Should not raise even though no row exists at this position.
     dialog._on_context_menu_requested(QPoint(0, 10_000))
+
+
+def test_action_buttons_disabled_with_no_selection_enabled_after_selecting_row(
+    qapp, tmp_path: Path
+) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = _make_dialog(tmp_path, fake)
+
+    # Freshly populated table has no current selection.
+    assert dialog._delete_button.isEnabled() is False
+    assert dialog._show_changes_button.isEnabled() is False
+    assert dialog._copy_path_button.isEnabled() is False
+
+    dialog._table.selectRow(0)
+
+    assert dialog._delete_button.isEnabled() is True
+    assert dialog._show_changes_button.isEnabled() is True
+    assert dialog._copy_path_button.isEnabled() is True
+
+
+def test_action_buttons_stay_disabled_when_placeholder_row_is_selected(
+    qapp, tmp_path: Path
+) -> None:
+    fake = FakeAdapter(tmp_path, details=[])
+    dialog = _make_dialog(tmp_path, fake)
+
+    dialog._table.selectRow(0)  # the "No linked worktrees" placeholder row
+
+    assert dialog._delete_button.isEnabled() is False
+    assert dialog._show_changes_button.isEnabled() is False
+    assert dialog._copy_path_button.isEnabled() is False
+
+
+def test_action_buttons_disabled_while_loading_then_reenabled(qapp, tmp_path: Path) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    pool = DeferredPool()
+
+    dialog = _make_dialog(tmp_path, fake, thread_pool=pool)
+
+    # Still pending: no rows yet, buttons disabled regardless of selection.
+    assert dialog._delete_button.isEnabled() is False
+    assert dialog._show_changes_button.isEnabled() is False
+    assert dialog._copy_path_button.isEnabled() is False
+
+    pool.run_pending()
+    dialog._table.selectRow(0)
+    assert dialog._delete_button.isEnabled() is True
+
+    # A post-delete reload should disable the buttons again while pending.
+    dialog._loading = True
+    dialog._update_action_buttons_enabled()
+    assert dialog._delete_button.isEnabled() is False
+    assert dialog._show_changes_button.isEnabled() is False
+    assert dialog._copy_path_button.isEnabled() is False
+
+
+def test_delete_button_invokes_same_effect_as_context_menu_delete(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+
+    dialog = _make_dialog(tmp_path, fake)
+    dialog._table.selectRow(0)
+
+    dialog._delete_button.click()
+
+    assert fake.removed == [(wt_path, False)]
+    assert dialog.deleted_any is True
+
+
+def test_show_changes_button_invokes_same_effect_as_context_menu_show_changes(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = _make_dialog(tmp_path, fake)
+    dialog._table.selectRow(0)
+
+    opened: list[tuple[Path, object]] = []
+
+    class FakeChangesDialog:
+        def __init__(self, worktree_path, adapter_factory=None, parent=None):
+            opened.append((worktree_path, adapter_factory))
+
+        def exec(self):
+            opened.append(("exec", None))
+
+    monkeypatch.setattr(
+        "local_changes_viewer.gui.worktrees_dialog.WorktreeChangesDialog", FakeChangesDialog
+    )
+
+    dialog._show_changes_button.click()
+
+    assert opened[0] == (wt_path, dialog._adapter_factory)
+    assert opened[1][0] == "exec"
+
+
+def test_copy_path_button_invokes_same_effect_as_context_menu_copy_path(
+    qapp, tmp_path: Path
+) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = _make_dialog(tmp_path, fake)
+    dialog._table.selectRow(0)
+
+    dialog._copy_path_button.click()
+
+    assert QGuiApplication.clipboard().text() == str(wt_path)
+
+
+def test_dialog_width_fits_every_column_header_without_clipping(qapp, tmp_path: Path) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path, has_unpushed_changes=True)])
+
+    dialog = _make_dialog(tmp_path, fake)
+
+    header = dialog._table.horizontalHeader()
+    metrics = QFontMetrics(header.font())
+    for column, title in enumerate(
+        ("Path", "Branch", "Last Commit / Modified", "Unpushed Changes", "Created")
+    ):
+        # Real width check: each column must be at least as wide as its own
+        # header label text, or the label -- e.g. "Unpushed Changes" -- would
+        # be visually clipped.
+        assert dialog._table.columnWidth(column) >= metrics.horizontalAdvance(title)
+
+
+def test_bulk_delete_button_exists_and_is_labeled(qapp, tmp_path: Path) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = _make_dialog(tmp_path, fake)
+
+    assert dialog._bulk_delete_button.text() == "Delete Unmodified…"
+    assert dialog._bulk_delete_button.isEnabled() is True
+
+
+def test_bulk_delete_button_disabled_while_loading(qapp, tmp_path: Path) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    pool = DeferredPool()
+
+    dialog = _make_dialog(tmp_path, fake, thread_pool=pool)
+
+    assert dialog._bulk_delete_button.isEnabled() is False
+
+    pool.run_pending()
+    assert dialog._bulk_delete_button.isEnabled() is True
+
+
+def test_bulk_delete_button_disabled_with_zero_worktrees(qapp, tmp_path: Path) -> None:
+    fake = FakeAdapter(tmp_path, details=[])
+    dialog = _make_dialog(tmp_path, fake)
+
+    assert dialog._bulk_delete_button.isEnabled() is False
+
+
+def test_bulk_delete_button_not_gated_on_row_selection(qapp, tmp_path: Path) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = _make_dialog(tmp_path, fake)
+
+    # No row selected at all, unlike the other three action buttons.
+    assert dialog._table.currentRow() < 0
+    assert dialog._bulk_delete_button.isEnabled() is True
+
+
+def test_bulk_delete_button_with_zero_worktrees_shows_information_and_does_not_open_dialog(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeAdapter(tmp_path, details=[])
+    dialog = _make_dialog(tmp_path, fake)
+    infos: list = []
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(lambda *a, **k: infos.append(a))
+    )
+
+    dialog._on_bulk_delete_button_clicked()
+
+    assert len(infos) == 1
+
+
+def test_bulk_delete_button_opens_bulk_dialog_and_reloads_on_deletions(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = _make_dialog(tmp_path, fake)
+
+    opened: list = []
+
+    class FakeBulkDialog:
+        def __init__(self, repo_path, worktrees, adapter_factory, parent=None, thread_pool=None):
+            opened.append((repo_path, worktrees, adapter_factory, thread_pool))
+            self.deleted_paths = [wt_path]
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        "local_changes_viewer.gui.worktrees_dialog.BulkDeleteWorktreesDialog", FakeBulkDialog
+    )
+    reload_calls: list = []
+    monkeypatch.setattr(dialog, "_reload", lambda: reload_calls.append(True))
+
+    dialog._on_bulk_delete_button_clicked()
+
+    assert opened[0][0] == tmp_path
+    assert [wt.path for wt in opened[0][1]] == [wt_path]
+    assert opened[0][2] == dialog._adapter_factory
+    assert opened[0][3] is dialog._thread_pool
+    assert dialog.deleted_any is True
+    assert reload_calls == [True]
+
+
+def test_bulk_delete_button_does_not_reload_when_nothing_was_deleted(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = _make_dialog(tmp_path, fake)
+
+    class FakeBulkDialog:
+        def __init__(self, repo_path, worktrees, adapter_factory, parent=None, thread_pool=None):
+            self.deleted_paths = []
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        "local_changes_viewer.gui.worktrees_dialog.BulkDeleteWorktreesDialog", FakeBulkDialog
+    )
+    reload_calls: list = []
+    monkeypatch.setattr(dialog, "_reload", lambda: reload_calls.append(True))
+
+    dialog._on_bulk_delete_button_clicked()
+
+    assert dialog.deleted_any is False
+    assert reload_calls == []
+
+
+def test_context_menu_delete_unmodified_routes_to_same_handler(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path)])
+    dialog = _make_dialog(tmp_path, fake)
+
+    calls: list = []
+    monkeypatch.setattr(dialog, "_on_bulk_delete_button_clicked", lambda: calls.append(True))
+
+    created_menus: list = []
+
+    class FakeMenu:
+        def __init__(self, parent=None):
+            self.actions: list[tuple[str, object]] = []
+            created_menus.append(self)
+
+        def addAction(self, text, callback=None):
+            self.actions.append((text, callback))
+
+        def exec(self, position):
+            pass
+
+    monkeypatch.setattr("local_changes_viewer.gui.worktrees_dialog.QMenu", FakeMenu)
+
+    dialog._on_context_menu_requested(QPoint(5, 5))
+
+    assert len(created_menus) == 1
+    action_texts = [text for text, _ in created_menus[0].actions]
+    assert "Delete Unmodified…" in action_texts
+    callback = dict(created_menus[0].actions)["Delete Unmodified…"]
+    callback()
+
+    assert calls == [True]
+
+
+def test_dialog_width_never_exceeds_parent_window_width(qapp, tmp_path: Path) -> None:
+    wt_path = tmp_path / "wt" / "feature-x"
+    fake = FakeAdapter(tmp_path, details=[_info(wt_path, has_unpushed_changes=True)])
+    parent = QWidget()
+    parent.resize(240, 600)
+
+    dialog = WorktreesDialog(
+        tmp_path,
+        adapter_factory=lambda p: fake,
+        parent=parent,
+        thread_pool=ImmediatePool(),
+    )
+
+    assert dialog.width() <= parent.width()

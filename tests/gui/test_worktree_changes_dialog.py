@@ -94,12 +94,26 @@ def test_selecting_a_file_computes_diff(qapp, tmp_path: Path) -> None:
     assert fake.diffed == [change]
 
 
+def test_diff_view_starts_side_by_side(qapp, tmp_path: Path) -> None:
+    change = FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)
+    fake = FakeAdapter(tmp_path, changes=[change])
+
+    dialog = WorktreeChangesDialog(tmp_path, adapter_factory=lambda p: fake)
+
+    assert dialog._diff_stack.currentIndex() == 1
+    assert dialog._diff_toggle_button.isChecked()
+    assert dialog._diff_toggle_button.text() == "Unified"
+
+
 def test_diff_toggle_switches_stack_index(qapp, tmp_path: Path) -> None:
     change = FileChange(path=Path("a.py"), change_type=ChangeType.MODIFIED)
     fake = FakeAdapter(tmp_path, changes=[change])
 
     dialog = WorktreeChangesDialog(tmp_path, adapter_factory=lambda p: fake)
 
+    dialog._diff_toggle_button.setChecked(False)
     assert dialog._diff_stack.currentIndex() == 0
+    assert dialog._diff_toggle_button.text() == "Side-by-side"
+
     dialog._diff_toggle_button.setChecked(True)
     assert dialog._diff_stack.currentIndex() == 1

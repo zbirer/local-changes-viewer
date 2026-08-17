@@ -47,6 +47,10 @@ class WorktreeChangesDialog(QDialog):
         self._diff_toggle_button.setToolTip("Toggle side-by-side / unified diff view")
         self._diff_toggle_button.setCheckable(True)
         self._diff_toggle_button.toggled.connect(self._on_diff_toggled)
+        # Worktree changes open side-by-side by default (one click gets back to
+        # unified). setChecked fires _on_diff_toggled, which is what syncs the
+        # stack index and the button label -- don't set the index directly here.
+        self._diff_toggle_button.setChecked(True)
 
         diff_header = QWidget()
         diff_header_layout = QHBoxLayout(diff_header)
