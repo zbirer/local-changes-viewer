@@ -539,6 +539,27 @@ def test_edit_enabled_with_normal_tooltip_for_working_tree_diff(
 
 
 # ---------------------------------------------------------------------------
+# "PRs" toolbar button emits pull_requests_requested -- MainWindow wires this
+# straight to _on_show_my_pull_requests (main_window.py:285), which is what
+# opens the My Pull Requests panel.
+# ---------------------------------------------------------------------------
+
+
+def test_pull_requests_button_click_emits_pull_requests_requested(qapp) -> None:
+    widget = DiffViewWidget()
+    received: list[None] = []
+    widget.pull_requests_requested.connect(lambda: received.append(None))
+
+    widget._pull_requests_button.click()
+
+    assert received == [None], (
+        "clicking the PRs button must emit pull_requests_requested -- "
+        "MainWindow connects this signal (main_window.py:285) to "
+        "_on_show_my_pull_requests, which opens the My Pull Requests panel"
+    )
+
+
+# ---------------------------------------------------------------------------
 # "Copy Location" context-menu action on the diff panes (unified and both
 # side-by-side panes). Reachability is proven the same way test_main_window.py
 # proves "Create patch" reachable: build the real menu and trigger the real

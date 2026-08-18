@@ -54,6 +54,7 @@ def test_dialog_reflects_current_action_states(qapp, window: MainWindow) -> None
         assert dialog._ignore_md_checkbox.isChecked() is True
         assert dialog._hide_empty_repos_checkbox.isChecked() is False
         assert dialog._show_ignored_checkbox.isChecked() is True
+        assert dialog._hide_changeless_worktrees_checkbox.isChecked() is False
     finally:
         dialog.close()
 
@@ -91,6 +92,36 @@ def test_toggling_watch_file_changes_checkbox_flips_action_and_persists_setting(
         assert window._settings.use_file_watcher() is True
     finally:
         dialog.close()
+
+
+def test_toggling_hide_changeless_worktrees_checkbox_flips_checkbox_and_persists_across_restart(
+    qapp, window: MainWindow
+) -> None:
+    """hide_changeless_worktrees (F88 -- the "Hide empty worktrees" filter
+    row checkbox, not a QAction) follows the same display-filter idiom as
+    ignore_md/hide_empty_repos: it's only written to QSettings in
+    closeEvent, not the instant those settings are toggled. So the
+    round-trip check closes the window (as test_main_window.py's
+    test_hide_empty_worktrees_checkbox_persists_across_restart does) and
+    re-reads the value from a fresh MainWindow over the same settings
+    file, rather than asserting an instant QSettings write."""
+    assert window._hide_changeless_worktrees_checkbox.isChecked() is False  # default
+
+    dialog = SettingsDialog(window)
+    try:
+        assert dialog._hide_changeless_worktrees_checkbox.isChecked() is False
+        dialog._hide_changeless_worktrees_checkbox.setChecked(True)
+        assert window._hide_changeless_worktrees_checkbox.isChecked() is True
+    finally:
+        dialog.close()
+
+    window.close()
+    window2 = MainWindow()
+    try:
+        assert window2._settings.hide_changeless_worktrees() is True
+        assert window2._hide_changeless_worktrees_checkbox.isChecked() is True
+    finally:
+        window2.close()
 
 
 def test_auto_refresh_spinbox_persists_and_applies_interval(qapp, window: MainWindow) -> None:
@@ -312,6 +343,7 @@ def test_every_control_is_reachable_through_its_tab_and_still_functional(
                 [
                     dialog._ignore_md_checkbox,
                     dialog._hide_empty_repos_checkbox,
+                    dialog._hide_changeless_worktrees_checkbox,
                     dialog._ignore_whitespace_checkbox,
                     dialog._always_reload_diff_checkbox,
                     dialog._sync_scroll_checkbox,

@@ -9,24 +9,32 @@ every run and fails the suite when:
 1. a block is malformed (missing `WHAT:`, `WHERE:`, or `TESTS:`),
 2. a `WHERE:` path no longer exists — the implementation was moved or deleted,
 3. a cited test no longer exists — coverage was removed,
-4. the number of features marked `TESTS: NONE` rises above the recorded baseline.
+4. the number of features marked `TESTS: NONE` rises above the recorded baseline,
+5. a `### F<n>.` block's number is missing from the `## Categories` index.
 
 Rule 4 is a ratchet. It does not demand tests for the features that lack them
 today; it only forbids the number growing. Adding a feature without a test, or
 stripping the tests off a covered one, breaks the build.
 
+Rule 5 exists because a block can be appended correctly and still get lost as
+a reference: forgetting to add its number to its category's line in the
+index leaves the block real but unfindable from the table of contents.
+
 ## When you change code
 
 - **Changed behavior?** Update the affected block here in the same commit.
-- **Added a feature?** Add a block, with a test, under the category it best
-  fits, and renumber so numbering stays sequential from F1 in document order.
-  The ratchet will not accept a new `TESTS: NONE`.
+- **Added a feature?** Append a new block at the **end** of the file, with a
+  test cited in `TESTS:`. Never renumber an existing block to keep numbering
+  sequential — record the new number on its actual category's line in the
+  `## Categories` index instead, even though the block itself physically sits
+  at the end. The ratchet will not accept a new `TESTS: NONE`.
 - **Moved a file?** Update its `WHERE:` anchor.
 - **Renamed a test?** Update every block citing it.
-- **Reorganized categories, or moved a block to a different one?** Keep every
-  block's `### F<n>.` heading sequential (F1…F87) in document order — a block
-  that changes position gets renumbered to match, even if nothing else about
-  it changed.
+- **Reorganized categories, or moved a block to a different one?** Update
+  that block's category in the `## Categories` index. Never renumber
+  existing `### F<n>.` headings to match document order or category
+  grouping — a block's number is permanent once assigned, regardless of
+  where it sits in the file or which category it belongs to.
 
 `WHERE:` line numbers drift and are advisory — the gate checks the *file*
 exists, not the line. `TESTS:` entries are checked exactly and must name real
@@ -34,14 +42,14 @@ tests.
 
 ## Categories
 
-- [Workspace Tree & Navigation](#workspace-tree--navigation) — F1–F16, F89, F101–F103
+- [Workspace Tree & Navigation](#workspace-tree--navigation) — F1–F16, F89, F91–F94, F97–F103
 - [Scanning, Refresh & Caching](#scanning-refresh--caching) — F17–F28
 - [Filtering](#filtering) — F29–F36, F95
 - [Profiles](#profiles) — F37–F43
 - [Git Change Detection](#git-change-detection) — F44–F52
-- [GitHub Integration & Pull Requests](#github-integration--pull-requests) — F53–F64
-- [Diff Viewing & Editing](#diff-viewing--editing) — F65–F78, F87, F96
-- [Settings, Persistence & Logging](#settings-persistence--logging) — F79–F86, F88, F90
+- [GitHub Integration & Pull Requests](#github-integration--pull-requests) — F53–F64, F105, F107, F108
+- [Diff Viewing & Editing](#diff-viewing--editing) — F65–F78, F87, F96, F106
+- [Settings, Persistence & Logging](#settings-persistence--logging) — F79–F86, F88, F90, F104
 
 ---
 
@@ -51,7 +59,7 @@ The folder-tree view of scanned repos: how rows render, expand/collapse, and get
 
 ### F1. Open a folder to scan for git repos
 WHAT: Actions > Open Folder… lets the user pick the root directory to scan.
-WHERE: `src/local_changes_viewer/gui/main_window.py:198`
+WHERE: `src/local_changes_viewer/gui/main_window.py:325`
 TESTS: NONE
 
 ### F2. Tree groups each repo's changed files by folder
@@ -460,7 +468,7 @@ TESTS: `tests/gui/test_diff_view.py::test_ctrl_f_shows_find_bar_only_in_edit_mod
 
 ### F78. Ctrl+G jumps to a line number in the edit pane via a popup dialog
 WHAT: While editing (side-by-side view, right pane focused), Ctrl+G opens a simple modal "Go to Line" input dialog ranged 1..blockCount (so out-of-range input is clamped by the dialog itself); accepting moves the cursor to that line's start and centers it, Cancel is a no-op. Inert outside edit mode or when focus is elsewhere.
-WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:252`
+WHERE: `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:314`
 TESTS: `tests/gui/test_diff_view.py::test_ctrl_g_opens_dialog_with_full_line_range_and_jumps_on_accept`, `tests/gui/test_diff_view.py::test_goto_dialog_cancel_leaves_cursor_untouched`
 
 ## Settings, Persistence & Logging
@@ -515,7 +523,7 @@ TESTS: `tests/gui/test_diff_view.py::test_edit_disabled_with_explaining_tooltip_
 ### F88. View > Settings… dialog lists every user-configurable setting with an explanation
 WHAT: A single tabbed dialog, one tab per group -- Scanning / Display / Filters & Profiles / Diagnostics -- shows every user-configurable setting alongside a plain-English explanation and the right control (checkbox, spinbox, dropdown, or button); the tallest tab fits at the dialog's default size with no scrolling. Every control drives the same existing QAction or persist+apply helper the corresponding menu item already uses, so behavior is identical to using the menus; there is no OK/Cancel, changes apply instantly. This belongs to the Settings, Persistence & Logging category (see `## Categories`); it is numbered last because renumbering existing features is not allowed.
 WHERE: `src/local_changes_viewer/gui/settings_dialog.py`
-TESTS: `tests/gui/test_settings_dialog.py::test_dialog_reflects_current_action_states`, `tests/gui/test_settings_dialog.py::test_toggling_ignore_md_checkbox_flips_action_and_refreshes_display`, `tests/gui/test_settings_dialog.py::test_toggling_watch_file_changes_checkbox_flips_action_and_persists_setting`, `tests/gui/test_settings_dialog.py::test_auto_refresh_spinbox_persists_and_applies_interval`, `tests/gui/test_settings_dialog.py::test_tooltip_font_size_spinbox_persists_value`, `tests/gui/test_settings_dialog.py::test_log_level_combo_persists_value`, `tests/gui/test_settings_dialog.py::test_constructing_dialog_does_not_mutate_any_setting`, `tests/gui/test_settings_dialog.py::test_folder_filter_summary_reflects_current_rules`, `tests/gui/test_settings_dialog.py::test_manage_folder_filters_button_refreshes_summary_after_dialog_closes`, `tests/gui/test_settings_dialog.py::test_profiles_summary_reflects_current_profiles_and_active_profile`, `tests/gui/test_settings_dialog.py::test_manage_profiles_button_refreshes_summary_after_dialog_closes`, `tests/gui/test_settings_dialog.py::test_view_menu_has_settings_action_that_opens_dialog`
+TESTS: `tests/gui/test_settings_dialog.py::test_dialog_reflects_current_action_states`, `tests/gui/test_settings_dialog.py::test_toggling_ignore_md_checkbox_flips_action_and_refreshes_display`, `tests/gui/test_settings_dialog.py::test_toggling_watch_file_changes_checkbox_flips_action_and_persists_setting`, `tests/gui/test_settings_dialog.py::test_auto_refresh_spinbox_persists_and_applies_interval`, `tests/gui/test_settings_dialog.py::test_tooltip_font_size_spinbox_persists_value`, `tests/gui/test_settings_dialog.py::test_log_level_combo_persists_value`, `tests/gui/test_settings_dialog.py::test_constructing_dialog_does_not_mutate_any_setting`, `tests/gui/test_settings_dialog.py::test_folder_filter_summary_reflects_current_rules`, `tests/gui/test_settings_dialog.py::test_manage_folder_filters_button_refreshes_summary_after_dialog_closes`, `tests/gui/test_settings_dialog.py::test_profiles_summary_reflects_current_profiles_and_active_profile`, `tests/gui/test_settings_dialog.py::test_manage_profiles_button_refreshes_summary_after_dialog_closes`, `tests/gui/test_settings_dialog.py::test_view_menu_has_settings_action_that_opens_dialog`, `tests/gui/test_settings_dialog.py::test_toggling_hide_changeless_worktrees_checkbox_flips_checkbox_and_persists_across_restart`
 
 ### F89. Repo-root context menu: "List Worktrees" dialog with per-worktree delete and change viewer
 WHAT: A repo-root context action opens a dialog table of that repo's linked worktrees, each row showing its path, branch, last commit-or-modification time, whether it has unpushed changes (uncommitted or committed-but-unpushed; ignored paths such as the worktree's own `node_modules` never count, since they can never be pushed and the change viewer hides them), and a best-effort creation time. Clicking a column header sorts the table by that column, text-ascending on first click and toggling to descending on each repeat click of the same header. Double-clicking a row opens its "Show Changes" dialog. Right-clicking a row opens a context menu with "Delete" (removes the worktree from disk, with a force-delete fallback if it has uncommitted/unpushed changes), "Show Changes" (opens a second dialog listing that worktree's modified files, each tagged "Committed" or "Not committed" per file, with a tooltip showing the file's full entry when hovered, where selecting a file renders its diff in a toggleable unified/side-by-side view that opens side-by-side by default — unlike the main window's diff pane, whose default is governed by the `diff_view_mode` setting), and "Copy Path" (copies the worktree's full filesystem path to the clipboard). Selecting a collapsed untracked-directory entry (e.g. `node_modules`, which `git status` reports as one path rather than one per file) shows a bounded file-count summary instead of erroring; selecting an untracked binary file or one that vanished from disk since the scan shows a one-line placeholder instead of a crash. This belongs to the Workspace Tree & Navigation category (see `## Categories`); it is numbered last because renumbering existing features is not allowed.
@@ -578,7 +586,7 @@ WHERE: `src/local_changes_viewer/gui/stashes_dialog.py`, `src/local_changes_view
 TESTS: `tests/gui/test_stashes_dialog.py::test_file_list_context_menu_offers_restore_file`, `tests/gui/test_stashes_dialog.py::test_file_list_context_menu_on_empty_space_shows_no_menu`, `tests/gui/test_stashes_dialog.py::test_restore_file_declined_does_not_call_git`, `tests/gui/test_stashes_dialog.py::test_restore_file_accepted_calls_adapter_with_ref_and_path`, `tests/gui/test_stashes_dialog.py::test_restore_file_failure_shows_critical_instead_of_raising`, `tests/gui/test_stashes_dialog.py::test_restore_file_runs_off_the_gui_thread`, `tests/core/infra/test_git_repo_adapter.py::test_restore_file_from_stash_overwrites_only_that_file`
 
 ### F101. Worktrees dialog action-button row: "Delete" / "Show Changes" / "Copy Path"
-WHAT: The Worktrees dialog (F92) has a button row below the table with exactly "Delete", "Show Changes", and "Copy Path", each acting on the currently selected row via the same handlers the right-click context menu already uses (`_on_delete`/`_on_show_changes`/`_on_copy_path`) -- there is no second implementation of what these actions do. All three are disabled whenever nothing is selected, the selected row is the "No linked worktrees" placeholder (which carries no worktree data), or a background reload is in flight, and are re-evaluated on every selection change and after every reload completes. The context menu and double-click-to-show-changes behaviors are unchanged. This belongs to the Workspace Tree & Navigation category (see `## Categories`); it is numbered last because renumbering existing features is not allowed.
+WHAT: The Worktrees dialog (F92) has a button row below the table with "Delete", "Show Changes", and "Copy Path", each acting on the currently selected row via the same handlers the right-click context menu already uses (`_on_delete`/`_on_show_changes`/`_on_copy_path`) -- there is no second implementation of what these actions do. All three are disabled whenever nothing is selected, the selected row is the "No linked worktrees" placeholder (which carries no worktree data), or a background reload is in flight, and are re-evaluated on every selection change and after every reload completes. A fourth button, "Delete Unmodified…", sits in the same row but is not row-selection-gated -- it opens a bulk-delete picker over every loaded worktree instead; see F103 for its own gating and behavior. The context menu and double-click-to-show-changes behaviors are unchanged. This belongs to the Workspace Tree & Navigation category (see `## Categories`); it is numbered last because renumbering existing features is not allowed.
 WHERE: `src/local_changes_viewer/gui/worktrees_dialog.py`
 TESTS: `tests/gui/test_worktrees_dialog.py::test_action_buttons_disabled_with_no_selection_enabled_after_selecting_row`, `tests/gui/test_worktrees_dialog.py::test_action_buttons_stay_disabled_when_placeholder_row_is_selected`, `tests/gui/test_worktrees_dialog.py::test_action_buttons_disabled_while_loading_then_reenabled`, `tests/gui/test_worktrees_dialog.py::test_delete_button_invokes_same_effect_as_context_menu_delete`, `tests/gui/test_worktrees_dialog.py::test_show_changes_button_invokes_same_effect_as_context_menu_show_changes`, `tests/gui/test_worktrees_dialog.py::test_copy_path_button_invokes_same_effect_as_context_menu_copy_path`
 
@@ -596,3 +604,23 @@ TESTS: `tests/gui/test_bulk_delete_worktrees_dialog.py::test_default_check_state
 WHAT: Every user-facing error (diff failures, worktree "Start" failures, repo-refresh failures, scan failures) is now funneled through `MainWindow._report_error`, which logs it at `applog.LogLevel.ERROR` (still showing the same 5000ms status-bar toast as before), so it also lands in a bounded 200-entry ERROR-only store (`applog.recent_errors()` / `error_count()` / `clear_errors()`) that survives after the toast fades. A fifth permanent status-bar widget -- a flat, red-tinted `QToolButton` reading e.g. "⚠ 3 errors" -- is hidden while that store is empty and otherwise shows the count, with a tooltip naming the most recent error. A dedicated 2000ms `MainWindow._error_indicator_timer` keeps it current even for an error logged from a worker thread, since the indicator (a QWidget) must only ever be touched on the GUI thread. Clicking the indicator, or Actions > Error Log, opens `ErrorLogDialog`: every recorded error listed newest-first, plus Copy (clipboard) and Clear (empties the store and hides the indicator) buttons.
 WHERE: `src/local_changes_viewer/gui/main_window.py`
 TESTS: `tests/gui/test_applog.py::test_error_log_lands_in_recent_errors_and_bumps_count`, `tests/gui/test_applog.py::test_non_error_log_does_not_land_in_recent_errors`, `tests/gui/test_applog.py::test_clear_errors_empties_the_store`, `tests/gui/test_applog.py::test_recent_errors_is_bounded_and_newest_first`, `tests/gui/test_applog.py::test_error_entries_are_recorded_even_at_the_most_restrictive_level`, `tests/gui/test_main_window.py::test_error_indicator_hidden_on_a_fresh_window`, `tests/gui/test_main_window.py::test_report_error_shows_indicator_toast_and_tooltip`, `tests/gui/test_main_window.py::test_report_error_logs_exactly_once_per_call`, `tests/gui/test_main_window.py::test_show_error_log_dialog_lists_errors_and_clear_hides_indicator`
+
+### F105. "PRs" button in the diff-view toolbar
+WHAT: The diff view's toolbar row opens with a "PRs" button (tooltip "Show your open pull requests"), added ahead of the unified/side-by-side toggle, which simply emits `pull_requests_requested`; `MainWindow` connects that signal straight to `_on_show_my_pull_requests`, the exact same handler the GitHub menu's "My Open Pull Requests…" action already uses, so it opens the same `MyPullRequestsDialog` rather than a second fetch/dialog implementation. That makes the diff pane a third place in the UI to reach a view of your own open PRs (F59): the View menu's "Open PRs Panel" (docks the `PullRequestsPanel`), the GitHub menu (which itself offers both "My Open Pull Requests…" -- this same dialog -- and its own "Open PRs Panel" duplicate), and now this toolbar button. The point of adding it here rather than relying on the existing menu entries is reachability while reviewing: it puts the shortcut directly next to the file you're looking at, instead of requiring a trip to the menu bar. This belongs to the GitHub Integration & Pull Requests category (see `## Categories`); it is numbered last because renumbering existing features is not allowed.
+WHERE: `src/local_changes_viewer/gui/diff_view/diff_view_widget.py:49`, `src/local_changes_viewer/gui/main_window.py:285`
+TESTS: `tests/gui/test_diff_view.py::test_pull_requests_button_click_emits_pull_requests_requested`
+
+### F106. Save-time "file changed on disk" conflict prompt
+WHAT: `DiffViewWidget._on_save_clicked` calls `SideBySideView.disk_changed_since_edit()` before writing anything. This exists because `save_edits()` itself does an unconditional `write_bytes()` with no mtime/size comparison -- a `git pull`, another editor, or a background refresh that rewrote the file while Edit mode was open would otherwise be silently clobbered with no warning at all. `disk_changed_since_edit()` compares the file's current `(mtime_ns, size)` against the fingerprint taken the last time edit mode read or wrote it; when they differ, a Yes/No `QMessageBox` asks "This file has changed on disk since you started editing. Overwrite it with your edits anyway?", and declining aborts the save, leaving both the on-disk file and the in-editor buffer exactly as they were. The confirmation modal lives in `DiffViewWidget`, not in `side_by_side_view.py` -- that module is kept read-only-of-QMessageBox (the same split the find bar and other confirmations already follow), and only exposes the `disk_changed_since_edit()` query for the widget layer to act on. This is a different situation from F71's navigate-away/close discard prompt: F71 fires when leaving edit mode or closing with unsaved edits still sitting in the buffer, comparing the in-editor buffer against what was last saved to disk; F106 fires at the moment of Save itself, comparing what's currently on disk against what edit mode last saw there, and only matters because a save is genuinely about to overwrite something that changed underneath it.
+WHERE: `src/local_changes_viewer/gui/diff_view/diff_view_widget.py:296`, `src/local_changes_viewer/gui/diff_view/side_by_side_view.py:557`
+TESTS: `tests/gui/test_diff_view.py::test_save_with_externally_changed_file_prompts_and_declining_preserves_disk_and_buffer`
+
+### F107. "Copy branch name" (⧉) button in the PR Info dialog
+WHAT: `PullRequestInfoDialog`'s `_branch_row` helper builds a flat 20x20 "⧉" button (tooltip "Copy branch name to clipboard", pointing-hand cursor, no focus policy so Tab skips it) that copies that row's own branch name to the clipboard via `QApplication.clipboard().setText(...)`. `_branch_row` is called twice in the dialog's form layout -- once for the "From branch:" row (`details.head_ref`) and once for the "To branch:" row (`details.base_ref`) -- so both directions of the PR get their own independent copy button rather than sharing one control, and each button copies only the branch name shown on its own row. This belongs to the GitHub Integration & Pull Requests category (see `## Categories`); it is numbered last because renumbering existing features is not allowed.
+WHERE: `src/local_changes_viewer/gui/pull_request_info_dialog.py:32`
+TESTS: `tests/gui/test_pull_request_info_dialog.py::test_copy_from_branch_button_copies_head_ref`, `tests/gui/test_pull_request_info_dialog.py::test_copy_to_branch_button_copies_base_ref`
+
+### F108. PR Open Issues dialog: hover popup and click-to-open
+WHAT: `PullRequestIssuesDialog` lists each open review thread with Date/Writer/Title/Comment Type columns. Both the hover popup and the click-to-open behavior are gated on the same `_TITLE_COLUMN` -- the "Title" column -- never the date column. `_on_item_clicked` returns immediately unless `column == _TITLE_COLUMN`, then opens that row's `item.data(0, _URL_ROLE)` via `QDesktopServices.openUrl(QUrl(url))` in the system browser; clicking any other column, including the Date cell (whose own inline link already opens the same URL independently), does nothing. `_on_item_entered` -- wired to `QTreeWidget.itemEntered`, which requires `setMouseTracking(True)` to fire on plain hover with no click -- shows `CommentPopup` (`gui/hover_popup.py`, `_TITLE_COLUMN`'s `_BODY_ROLE` payload) near the cursor only when `column == _TITLE_COLUMN` and that item actually carries a non-empty body, positioned and height-clamped against the current screen's available geometry so it never renders under the macOS menu bar or camera notch; hovering any other column, or a title cell with no body, hides the popup instead of showing one. An `eventFilter` installed on the tree's viewport additionally hides the popup on the viewport's Leave event, so it doesn't linger on screen once the mouse leaves the table entirely rather than only when it lands on a different row. This belongs to the GitHub Integration & Pull Requests category (see `## Categories`); it is numbered last because renumbering existing features is not allowed.
+WHERE: `src/local_changes_viewer/gui/hover_popup.py`, `src/local_changes_viewer/gui/pull_request_issues_dialog.py`
+TESTS: `tests/gui/test_pull_request_issues_dialog.py::test_hovering_a_row_surfaces_popup_with_that_rows_full_comment_body`, `tests/gui/test_pull_request_issues_dialog.py::test_hovering_a_non_title_column_hides_the_popup`, `tests/gui/test_pull_request_issues_dialog.py::test_clicking_the_title_column_opens_that_rows_comment_url`, `tests/gui/test_pull_request_issues_dialog.py::test_clicking_a_non_date_column_does_not_open_a_url`

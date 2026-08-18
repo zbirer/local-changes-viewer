@@ -236,3 +236,43 @@ def test_untested_feature_count_does_not_exceed_ratchet() -> None:
         "lost coverage: restore the test. Do not raise "
         "MAX_UNTESTED_FEATURES to make this pass -- it may only be lowered."
     )
+
+
+# ---------------------------------------------------------------------------
+# Rule 5 -- every ### F<n>. block number appears somewhere in the ## Categories
+# index, so a block can never go missing from the table of contents even
+# though renumbering existing blocks is not allowed. The index uses an EN
+# DASH (–) for compact ranges like `F1–F16`, not a hyphen.
+# ---------------------------------------------------------------------------
+
+_CATEGORIES_SECTION_RE = re.compile(r"^## Categories\n(.*?)\n---", re.M | re.S)
+_CATEGORY_NUMBER_TOKEN_RE = re.compile(r"F(\d+)(?:–F(\d+))?")
+
+
+def _numbers_in_categories_index() -> set[int]:
+    text = FEATURES_PATH.read_text()
+    match = _CATEGORIES_SECTION_RE.search(text)
+    assert match is not None, (
+        "FEATURES.md has no `## Categories` section terminated by a "
+        "following `---` -- the gate can't verify every feature number is "
+        "indexed there."
+    )
+    numbers: set[int] = set()
+    for token in _CATEGORY_NUMBER_TOKEN_RE.finditer(match.group(1)):
+        start = int(token.group(1))
+        end = int(token.group(2)) if token.group(2) else start
+        numbers.update(range(start, end + 1))
+    return numbers
+
+
+def test_every_feature_number_is_listed_in_the_categories_index() -> None:
+    indexed = _numbers_in_categories_index()
+    missing = [f.number for f in FEATURES if f.number not in indexed]
+    assert not missing, (
+        "FEATURES.md's `## Categories` index does not mention "
+        + ", ".join(f"F{n}" for n in missing)
+        + ". Every ### F<n>. block must appear somewhere in the index -- as "
+        "a bare F<n> or inside a compact F<n>–F<m> range (en dash, not "
+        "a hyphen) -- so the table of contents stays complete. Add the new "
+        "number(s) to their category's line in FEATURES.md."
+    )

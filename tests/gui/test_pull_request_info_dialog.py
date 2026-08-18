@@ -4,7 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from local_changes_viewer.core.domain.pull_request import PullRequestDetails
 from local_changes_viewer.gui.pull_request_info_dialog import PullRequestInfoDialog
@@ -61,3 +61,38 @@ def test_url_is_html_escaped_in_anchor(qapp) -> None:
 
     assert "<script>" not in url_value.text()
     assert "&quot;" in url_value.text()
+
+
+# ---------------------------------------------------------------------------
+# "Copy branch name" (⧉) buttons on the From-branch and To-branch rows must
+# each copy their OWN branch name -- a copy/paste bug wiring both buttons to
+# the same branch would pass a test that only checks one row.
+# ---------------------------------------------------------------------------
+
+
+def _branch_row_copy_button(dialog: PullRequestInfoDialog, row_index: int) -> QPushButton:
+    # "From branch:" is row 3 and "To branch:" is row 4 in
+    # PullRequestInfoDialog.__init__ (after Title, Number, URL).
+    form = dialog.layout().itemAt(0).layout()
+    row_widget = form.itemAt(row_index, form.ItemRole.FieldRole).widget()
+    button = row_widget.findChild(QPushButton)
+    assert button is not None
+    return button
+
+
+def test_copy_from_branch_button_copies_head_ref(qapp) -> None:
+    dialog = PullRequestInfoDialog(_details(head_ref="feature-branch", base_ref="main"))
+    QApplication.clipboard().setText("untouched")
+
+    _branch_row_copy_button(dialog, 3).click()
+
+    assert QApplication.clipboard().text() == "feature-branch"
+
+
+def test_copy_to_branch_button_copies_base_ref(qapp) -> None:
+    dialog = PullRequestInfoDialog(_details(head_ref="feature-branch", base_ref="main"))
+    QApplication.clipboard().setText("untouched")
+
+    _branch_row_copy_button(dialog, 4).click()
+
+    assert QApplication.clipboard().text() == "main"

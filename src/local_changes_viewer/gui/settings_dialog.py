@@ -73,7 +73,7 @@ class SettingsDialog(QDialog):
     open workspace -- e.g. in tests.
 
     Tabs, not a scroll area: each tab is sized to fit its own controls at
-    the dialog's default size, so the tallest tab (Display, with 6
+    the dialog's default size, so the tallest tab (Display, with 7
     controls) needs no internal scrolling -- see the dialog's fixed
     resize() height below, picked by rendering the Display tab and
     reading back its required height.
@@ -214,6 +214,15 @@ class SettingsDialog(QDialog):
         )
         layout.addWidget(row)
 
+        self._hide_changeless_worktrees_checkbox, row = self._checkbox_row(
+            "Hide empty worktrees",
+            "Worktrees with no changed files are hidden from the folder "
+            "tree; unchecked (default), every worktree is always shown, "
+            'regardless of changes -- matching "List Worktrees".',
+            self._on_hide_changeless_worktrees_toggled,
+        )
+        layout.addWidget(row)
+
         self._ignore_whitespace_checkbox, row = self._checkbox_row(
             "Ignore whitespace",
             "Diffs are computed ignoring whitespace-only changes, so a line "
@@ -328,6 +337,9 @@ class SettingsDialog(QDialog):
 
         self._ignore_md_checkbox.setChecked(mw._ignore_md_action.isChecked())
         self._hide_empty_repos_checkbox.setChecked(mw._hide_empty_repos_action.isChecked())
+        self._hide_changeless_worktrees_checkbox.setChecked(
+            mw._hide_changeless_worktrees_checkbox.isChecked()
+        )
         self._ignore_whitespace_checkbox.setChecked(mw._ignore_whitespace_action.isChecked())
         self._always_reload_diff_checkbox.setChecked(mw._always_reload_diff_action.isChecked())
         self._sync_scroll_checkbox.setChecked(mw._sync_scroll_action.isChecked())
@@ -387,6 +399,11 @@ class SettingsDialog(QDialog):
         if self._loading:
             return
         self._main_window._hide_empty_repos_action.setChecked(checked)
+
+    def _on_hide_changeless_worktrees_toggled(self, checked: bool) -> None:
+        if self._loading:
+            return
+        self._main_window._hide_changeless_worktrees_checkbox.setChecked(checked)
 
     def _on_ignore_whitespace_toggled(self, checked: bool) -> None:
         if self._loading:
