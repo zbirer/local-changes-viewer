@@ -1524,3 +1524,315 @@ def test_stash_operations_reject_a_malformed_ref_without_invoking_git(
         adapter.drop_stash(bad_ref)
     with pytest.raises(ValueError):
         adapter.restore_file_from_stash(bad_ref, Path("committed.txt"))
+
+
+# --- File History: list_tracked_files ---------------------------------------
+
+
+def test_list_tracked_files_returns_sorted_subtree_listing(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "zeta.txt").write_text("z\n")
+    (tmp_path / "alpha.txt").write_text("a\n")
+    repo.index.add(["zeta.txt", "alpha.txt"])
+    repo.index.commit("add files")
+
+    result = GitRepoAdapter(tmp_path).list_tracked_files(Path("."))
+
+    assert [f.path for f in result.files] == [
+        Path("alpha.txt"),
+        Path("committed.txt"),
+        Path("zeta.txt"),
+    ]
+    assert result.too_large is False
+
+
+def test_list_tracked_files_excludes_binary_files_via_nul_sniff(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "binary.dat").write_bytes(b"\x00\x01binary")
+    repo.index.add(["binary.dat"])
+    repo.index.commit("add binary")
+
+    result = GitRepoAdapter(tmp_path).list_tracked_files(Path("."))
+
+    paths = [f.path for f in result.files]
+    assert Path("binary.dat") not in paths
+    assert Path("committed.txt") in paths
+
+
+def test_list_tracked_files_flags_local_changes(tmp_path: Path, repo: git.Repo):
+    (tmp_path / "committed.txt").write_text("edited but not committed\n")
+
+    result = GitRepoAdapter(tmp_path).list_tracked_files(Path("."))
+
+    match = next(f for f in result.files if f.path == Path("committed.txt"))
+    assert match.has_local_changes is True
+
+
+def test_list_tracked_files_too_large_past_the_cap(
+    tmp_path: Path, repo: git.Repo, monkeypatch: pytest.MonkeyPatch
+):
+    # No per-file work at all past the cap -- monkeypatching it down to zero
+    # is enough to prove the short-circuit fires without needing 5,000 files.
+    monkeypatch.setattr(git_repo_adapter, "_FILE_HISTORY_SUBTREE_FILE_CAP", 0)
+
+    result = GitRepoAdapter(tmp_path).list_tracked_files(Path("."))
+
+    assert result.too_large is True
+    assert result.files == []
+
+
+def test_list_tracked_files_survives_submodule_gitlink_symlink_and_deleted_file(
+    tmp_path: Path, repo: git.Repo, tmp_path_factory: pytest.TempPathFactory
+):
+    submodule_source = tmp_path_factory.mktemp("file_history_submodule_source")
+    _init_repo_with_commit(submodule_source)
+    # `git submodule add` refuses a local file:// clone by default on modern
+    # git (CVE-2022-39253's fix) -- explicit opt-in is required here purely
+    # because this test builds its own local submodule fixture, not because
+    # the feature itself does anything with remotes.
+    repo.git(c="protocol.file.allow=always").submodule("add", str(submodule_source), "sub")
+    repo.git.commit("-m", "add submodule")
+
+    (tmp_path / "linked.txt").symlink_to("committed.txt")
+    repo.index.add(["linked.txt"])
+    repo.index.commit("add symlink")
+
+    (tmp_path / "gone.txt").write_text("will vanish\n")
+    repo.index.add(["gone.txt"])
+    repo.index.commit("add file that will be deleted from disk")
+    (tmp_path / "gone.txt").unlink()
+
+    result = GitRepoAdapter(tmp_path).list_tracked_files(Path("."))
+
+    paths = [f.path for f in result.files]
+    # Submodule gitlink: open() raises IsADirectoryError -- skipped, not listed.
+    assert Path("sub") not in paths
+    # Symlink: sniffed as text without reading through the link.
+    assert Path("linked.txt") in paths
+    # Tracked but deleted from disk: kept, treated as "not binary" rather
+    # than as an error -- this is exactly what mode B's full-deletion branch
+    # and the local-changes dot exist to surface.
+    assert Path("gone.txt") in paths
+    assert result.too_large is False
+
+
+# --- File History: get_recent_commits (author) -------------------------------
+
+
+def test_get_recent_commits_populates_author(tmp_path: Path, repo: git.Repo):
+    commits = GitRepoAdapter(tmp_path).get_recent_commits(limit=1)
+
+    assert commits[0].author == "Test User"
+
+
+# --- File History: get_file_history -------------------------------------------
+
+
+def test_get_file_history_returns_newest_first_honouring_limit(tmp_path: Path, repo: git.Repo):
+    for i in range(3):
+        (tmp_path / "committed.txt").write_text(f"content {i}\n")
+        repo.index.add(["committed.txt"])
+        repo.index.commit(f"commit {i}")
+
+    result = GitRepoAdapter(tmp_path).get_file_history(Path("committed.txt"), limit=2)
+
+    assert [e.commit.message for e in result.entries] == ["commit 2", "commit 1"]
+
+
+def test_get_file_history_reports_rename_and_pre_rename_path(tmp_path: Path, repo: git.Repo):
+    # This repo's own history contains zero renames -- build one by hand.
+    repo.git.mv("committed.txt", "renamed.txt")
+    repo.index.commit("rename committed to renamed")
+    (tmp_path / "renamed.txt").write_text("edited after rename\n")
+    repo.index.add(["renamed.txt"])
+    repo.index.commit("edit after rename")
+
+    result = GitRepoAdapter(tmp_path).get_file_history(Path("renamed.txt"), limit=10)
+
+    assert result.entries[0].change_type == ChangeType.MODIFIED
+    assert result.entries[0].path_at_commit == Path("renamed.txt")
+    assert result.entries[0].renamed_from is None
+
+    assert result.entries[1].change_type == ChangeType.RENAMED
+    assert result.entries[1].path_at_commit == Path("renamed.txt")
+    assert result.entries[1].renamed_from == Path("committed.txt")
+
+    # The commit before the rename must carry the file's *old* path.
+    assert result.entries[2].path_at_commit == Path("committed.txt")
+
+    assert result.current_path == Path("renamed.txt")
+
+
+def test_get_file_history_excludes_merge_commits(tmp_path: Path, repo: git.Repo):
+    repo.git.checkout("-b", "feature")
+    (tmp_path / "committed.txt").write_text("feature change\n")
+    repo.index.add(["committed.txt"])
+    repo.index.commit("feature commit")
+    repo.git.checkout("main")
+    (tmp_path / "other.txt").write_text("main change\n")
+    repo.index.add(["other.txt"])
+    repo.index.commit("main-only commit")
+    repo.git.merge("feature", "--no-ff", "-m", "merge feature into main")
+
+    result = GitRepoAdapter(tmp_path).get_file_history(Path("committed.txt"), limit=10)
+
+    assert "merge feature into main" not in [e.commit.message for e in result.entries]
+    assert "feature commit" in [e.commit.message for e in result.entries]
+
+
+def test_get_file_history_current_path_none_when_file_deleted(tmp_path: Path, repo: git.Repo):
+    repo.index.remove(["committed.txt"], working_tree=True)
+    repo.index.commit("delete committed.txt")
+
+    result = GitRepoAdapter(tmp_path).get_file_history(Path("committed.txt"), limit=10)
+
+    assert result.entries[0].change_type == ChangeType.DELETED
+    assert result.current_path is None
+
+
+def test_get_file_history_zero_commit_repo_returns_empty_result_instead_of_raising(
+    tmp_path: Path,
+):
+    # `git log` on a zero-commit repo exits 128 ("does not have any commits
+    # yet") -- but list_tracked_files works fine before the first commit, so
+    # a user can genuinely pick a staged-but-never-committed file here. That
+    # must render as "no commits yet", never as a raised fatal error.
+    git.Repo.init(tmp_path, initial_branch="main")
+    (tmp_path / "staged.txt").write_text("x\n")
+
+    result = GitRepoAdapter(tmp_path).get_file_history(Path("staged.txt"), limit=10)
+
+    assert result.entries == []
+    assert result.current_path == Path("staged.txt")
+
+
+def test_get_file_history_parses_commit_with_control_bytes_in_message(
+    tmp_path: Path, repo: git.Repo
+):
+    # A commit subject/body is untrusted free text and can legally contain
+    # \x01/\x1f -- the NUL-separator guarantee means these must not misalign
+    # the parse the way a \x01 or \x1f delimiter would have.
+    (tmp_path / "committed.txt").write_text("more\n")
+    repo.index.add(["committed.txt"])
+    repo.git.commit("-m", "subject\x01with\x1fcontrol bytes")
+
+    result = GitRepoAdapter(tmp_path).get_file_history(Path("committed.txt"), limit=10)
+
+    assert result.entries[0].commit.message == "subject\x01with\x1fcontrol bytes"
+
+
+# --- File History: get_commit_file_diff (unchanged -- regression guard) ------
+
+
+def test_get_commit_file_diff_unchanged_for_renamed_file(tmp_path: Path, repo: git.Repo):
+    repo.git.mv("committed.txt", "renamed.txt")
+    commit = repo.index.commit("rename committed to renamed")
+
+    diff = GitRepoAdapter(tmp_path).get_commit_file_diff(
+        commit.hexsha, Path("renamed.txt"), Path("committed.txt")
+    )
+
+    removed = [
+        line.text for hunk in diff.hunks for line in hunk.lines if line.kind == DiffLineKind.REMOVED
+    ]
+    assert diff.new_ref == commit.hexsha[:8]
+    assert removed == []  # a pure rename with no content change has no removed lines
+
+
+# --- File History: get_file_diff_against_disk (mode B) -----------------------
+
+
+def test_get_file_diff_against_disk_shows_drift_against_current_disk_content(
+    tmp_path: Path, repo: git.Repo
+):
+    commit = repo.head.commit
+    (tmp_path / "committed.txt").write_text("changed on disk\n")
+
+    diff = GitRepoAdapter(tmp_path).get_file_diff_against_disk(
+        commit.hexsha, Path("committed.txt"), Path("committed.txt")
+    )
+
+    removed = [
+        line.text for hunk in diff.hunks for line in hunk.lines if line.kind == DiffLineKind.REMOVED
+    ]
+    added = [
+        line.text for hunk in diff.hunks for line in hunk.lines if line.kind == DiffLineKind.ADDED
+    ]
+    assert "original content" in removed
+    assert "changed on disk" in added
+    assert diff.new_ref == "working tree"
+
+
+def test_get_file_diff_against_disk_across_a_rename(tmp_path: Path, repo: git.Repo):
+    old_commit = repo.head.commit
+    repo.git.mv("committed.txt", "renamed.txt")
+    repo.index.commit("rename committed to renamed")
+    (tmp_path / "renamed.txt").write_text("edited after rename\n")
+
+    # Exact object addressing (cat-file <sha>:<path_at_commit>) is what makes
+    # this correct across the rename: path_at_commit is the file's *old*
+    # name, current_path is its new one.
+    diff = GitRepoAdapter(tmp_path).get_file_diff_against_disk(
+        old_commit.hexsha, Path("committed.txt"), Path("renamed.txt")
+    )
+
+    removed = [
+        line.text for hunk in diff.hunks for line in hunk.lines if line.kind == DiffLineKind.REMOVED
+    ]
+    added = [
+        line.text for hunk in diff.hunks for line in hunk.lines if line.kind == DiffLineKind.ADDED
+    ]
+    assert "original content" in removed
+    assert "edited after rename" in added
+
+
+def test_get_file_diff_against_disk_renders_full_deletion_when_path_gone(
+    tmp_path: Path, repo: git.Repo
+):
+    commit = repo.head.commit
+
+    diff = GitRepoAdapter(tmp_path).get_file_diff_against_disk(
+        commit.hexsha, Path("committed.txt"), None
+    )
+
+    removed = [
+        line.text for hunk in diff.hunks for line in hunk.lines if line.kind == DiffLineKind.REMOVED
+    ]
+    assert "original content" in removed
+    assert diff.new_ref == "(deleted)"
+
+
+def test_get_file_diff_against_disk_on_unmodified_file_returns_empty_diff_not_error(
+    tmp_path: Path, repo: git.Repo
+):
+    # --no-index exits 0 (not 1) when the two sides are identical -- this is
+    # the *ordinary* result of opening mode B on the newest commit with no
+    # local edits, not an edge case, and it must render as an empty diff
+    # rather than as an error.
+    commit = repo.head.commit
+
+    diff = GitRepoAdapter(tmp_path).get_file_diff_against_disk(
+        commit.hexsha, Path("committed.txt"), Path("committed.txt")
+    )
+
+    assert diff.hunks == []
+
+
+def test_get_file_diff_against_disk_reports_binary_as_placeholder_not_empty_hunks(
+    tmp_path: Path, repo: git.Repo
+):
+    (tmp_path / "binary.dat").write_bytes(b"\x00\x01binary")
+    repo.index.add(["binary.dat"])
+    commit = repo.index.commit("add binary")
+
+    diff = GitRepoAdapter(tmp_path).get_file_diff_against_disk(
+        commit.hexsha, Path("binary.dat"), Path("binary.dat")
+    )
+
+    assert len(diff.hunks) == 1
+    assert "Binary file" in diff.hunks[0].lines[0].text
+
+
+def test_get_file_diff_against_disk_raises_on_git_failure(tmp_path: Path, repo: git.Repo):
+    with pytest.raises(git.GitCommandError):
+        GitRepoAdapter(tmp_path).get_file_diff_against_disk(
+            "0" * 40, Path("committed.txt"), Path("committed.txt")
+        )

@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import tempfile
 from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
@@ -11,9 +12,16 @@ import git
 from local_changes_viewer.core.domain.commit_log_entry import CommitLogEntry
 from local_changes_viewer.core.domain.diff import DiffHunk, DiffLine, DiffLineKind, DiffResult
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
+from local_changes_viewer.core.domain.file_history import (
+    FileHistoryCommit,
+    FileHistoryResult,
+    TrackedFile,
+    TrackedFilesResult,
+)
 from local_changes_viewer.core.domain.repository import BranchStatus
 from local_changes_viewer.core.domain.stash_entry import StashEntry
 from local_changes_viewer.core.domain.worktree_info import WorktreeInfo
+from local_changes_viewer.core.infra.cancel_token import CancelToken
 from local_changes_viewer.core.services import workspace_cache
 
 _BRANCH_LINE_RE = re.compile(
@@ -74,6 +82,29 @@ _UNTRACKED_DIR_SUMMARY_MAX_NAMES = 20
 # of thousands of entries would make every double-click on it walk the whole
 # tree just to print a count nobody needs exactly.
 _UNTRACKED_DIR_SUMMARY_SCAN_LIMIT = 5000
+
+# File History's folder-scoped file search: above this many tracked files
+# under the searched subtree, list_tracked_files gives up on a per-file
+# listing entirely (no sniffing, no local-changes lookup) and reports
+# `too_large=True` instead -- the search box's own live-filtering promise
+# ("type 2 characters") is meaningless against a subtree this size anyway.
+_FILE_HISTORY_SUBTREE_FILE_CAP = 5000
+
+# How many bytes of each tracked file list_tracked_files sniffs for a NUL
+# byte before deciding "binary, exclude it" -- a bound on the same idiom
+# already used at `_diff_untracked` (see the `b"\x00" in raw_bytes` check
+# below), just capped rather than reading the whole file: this runs once per
+# file in the subtree, not once for a single clicked file.
+_FILE_HISTORY_SNIFF_BYTES = 8192
+
+# `git log --follow`'s sentinel-delimited format for File History's commit
+# list (get_file_history). NUL, not \x01/\x1f/\x02: a commit subject or body
+# is untrusted free text and can legally contain those other control bytes,
+# which would silently misalign every field after them -- NUL is the one
+# byte git itself refuses to let into a commit message ("a NUL byte in
+# commit log message not allowed"), so it's the only separator guaranteed
+# never to appear inside a field it's supposed to be delimiting.
+_FILE_HISTORY_LOG_FORMAT = "%x00%H%x00%an%x00%cI%x00%s%x00%B%x00"
 
 # Hard cap on how many bytes _diff_untracked will read into memory before
 # giving up and reporting "too large" instead of the real content — the
@@ -313,6 +344,7 @@ class GitRepoAdapter:
                 committed_datetime=commit.committed_datetime,
                 branch_name=self._get_branch_for_commit(commit.hexsha),
                 full_message=commit.message.strip(),
+                author=commit.author.name,
             )
             for commit in commits
         ]
@@ -382,6 +414,290 @@ class GitRepoAdapter:
         return self.parse_unified_diff(
             raw, old_ref=f"{commit_hexsha[:8]}~1", new_ref=commit_hexsha[:8]
         )
+
+    def list_tracked_files(self, subtree: Path) -> TrackedFilesResult:
+        """Lists tracked, non-binary files under `subtree` (repo-relative;
+        `Path(".")` scans the whole repo), each flagged with whether it has
+        uncommitted local changes -- the source list File History's folder
+        search filters and ranks.
+        """
+        output = self._repo.git(c="core.quotePath=false").ls_files("-z", "--", str(subtree))
+        paths = [Path(token) for token in output.split("\0") if token]
+        if len(paths) > _FILE_HISTORY_SUBTREE_FILE_CAP:
+            # No per-file work at all past the cap -- not even the
+            # local-changes lookup below -- since the result is thrown away
+            # regardless of what it would have said.
+            return TrackedFilesResult(too_large=True)
+
+        # Reuses list_changes()'s existing `--porcelain=v1 -z --ignored`
+        # parser rather than hand-rolling a second one: it already solves
+        # the `-z` rename-token reversal and non-ASCII quoting this would
+        # otherwise have to re-solve from scratch.
+        changed_paths = {
+            change.path
+            for change in self.list_changes()
+            if change.change_type != ChangeType.IGNORED and change.path.is_relative_to(subtree)
+        }
+
+        files: list[TrackedFile] = []
+        for path in sorted(paths, key=str):
+            if self._is_binary_tracked_file(path):
+                continue
+            files.append(TrackedFile(path=path, has_local_changes=path in changed_paths))
+        return TrackedFilesResult(files=files)
+
+    def _is_binary_tracked_file(self, path: Path) -> bool:
+        """True if `path` should be excluded from a File History listing as
+        binary -- but a `git ls-files` entry isn't always a plain readable
+        file, and an uncaught exception here would fail the *whole* subtree
+        listing over one bad entry rather than just skipping it:
+
+        - a submodule gitlink is a directory on disk, so `open()` raises
+          `IsADirectoryError` -- caller treats that the same as binary
+          (excluded), since a submodule has no file history of its own here.
+        - a tracked-but-deleted-from-disk file (not yet staged) makes
+          `open()` raise `FileNotFoundError` -- this is kept, not excluded,
+          because it's exactly what mode B's full-deletion branch and the
+          local-changes dot exist to surface, so it's treated as "not
+          binary" rather than as an error.
+        - a symlink's `open()` follows the link and sniffs the *target*
+          (wrong -- git stores the link text itself as the blob) and raises
+          on a dangling link -- sniffed as text without reading through.
+        """
+        if os.path.islink(self._repo_path / path):
+            return False
+        try:
+            with open(self._repo_path / path, "rb") as file:
+                chunk = file.read(_FILE_HISTORY_SNIFF_BYTES)
+        except IsADirectoryError:
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            # Any other unreadable entry (permissions, etc.) -- never let
+            # one bad path take down the whole listing.
+            return True
+        return b"\x00" in chunk
+
+    def get_file_history(
+        self, path: Path, limit: int = 10, cancel_token: CancelToken | None = None
+    ) -> FileHistoryResult:
+        """Last `limit` commits that touched `path` (repo-relative), newest
+        first, following renames. Merges are excluded deliberately (see the
+        module-level docstring on `_FILE_HISTORY_LOG_FORMAT`) -- accepted
+        consequence: a merge that resolved a conflict does change the file
+        and won't appear here, so the newest listed commit is not always the
+        one that produced the file's current committed content.
+        """
+        if not self._has_any_commit():
+            # `git log` on a zero-commit repo exits 128 with a message naming
+            # the branch ("your current branch 'main' does not have any
+            # commits yet") -- but list_tracked_files works fine before the
+            # first commit, so a user can genuinely reach this by picking a
+            # staged-but-never-committed file. That must render as "no
+            # commits yet", not as a fatal error, so it's checked up front
+            # via `git rev-parse --verify -q HEAD` rather than by pattern-
+            # matching a message that embeds the branch name and is subject
+            # to git-version/translation drift. current_path falls back to
+            # the queried path here too -- same "no entries at all" rule the
+            # general derivation below applies.
+            return FileHistoryResult(current_path=path)
+
+        args = [
+            git.Git.GIT_PYTHON_GIT_EXECUTABLE,
+            "-c",
+            "core.quotePath=false",
+            "log",
+            "--follow",
+            "--no-merges",
+            "-n",
+            str(limit),
+            "--name-status",
+            "-M",
+            f"--format={_FILE_HISTORY_LOG_FORMAT}",
+            "--",
+            str(path),
+        ]
+        result = self._run_git_cancellable(args, cancel_token)
+        if result.returncode != 0:
+            raise git.GitCommandError(args, result.returncode, result.stderr)
+
+        entries = self._parse_file_history_log(result.stdout.decode("utf-8", errors="replace"))
+
+        if not entries:
+            current_path = path
+        elif entries[0].change_type == ChangeType.DELETED:
+            current_path = None
+        else:
+            current_path = entries[0].path_at_commit
+
+        return FileHistoryResult(entries=entries, current_path=current_path)
+
+    @staticmethod
+    def _parse_file_history_log(output: str) -> list[FileHistoryCommit]:
+        """Parses `_FILE_HISTORY_LOG_FORMAT` + `--name-status` output.
+
+        Deliberately NOT `-z`, and deliberately not `_parse_name_status_z` --
+        this is the one place the repo's `-z` convention makes things worse.
+        `--name-status -z` NUL-terminates *its own* fields with the same byte
+        the format sentinels use, making record width variable (a 1-file
+        commit yields 9 tokens, a rename 10) and forcing a parser to
+        recognise a 40-hex SHA just to find a record boundary.
+
+        Without `-z`, the whole stdout splits on NUL into `1 + 6*N` tokens --
+        a leading empty one (the format string starts with `%x00`), then
+        groups of exactly six, regardless of multi-line bodies, blank lines
+        in a body, or rename lines: (hexsha, author, committed_iso, subject,
+        body, name_status_block). The sixth token holds
+        `"\\n\\n<tab-separated status line>\\n"` -- parsed directly below.
+        """
+        tokens = output.split("\0")
+        entries: list[FileHistoryCommit] = []
+        # tokens[0] is the leading empty token; records start at index 1.
+        for i in range(1, len(tokens) - 5, 6):
+            hexsha, author, committed_iso, subject, _body, name_status_block = tokens[i : i + 6]
+            status_lines = [line for line in name_status_block.splitlines() if line.strip()]
+            if not status_lines:
+                # A record with no status line and a silently-defaulted
+                # "reuse the previous entry's path" would hand back a wrong
+                # path_at_commit with no exception -- raising here is what
+                # makes that failure mode loud instead.
+                raise ValueError(
+                    f"git log --name-status produced no status line for commit {hexsha}"
+                )
+            # This call always filters by a single pathspec (--follow -- <path>),
+            # so exactly one status line is expected per commit.
+            columns = status_lines[0].split("\t")
+            code = columns[0]
+            if code.startswith("R"):
+                renamed_from = Path(columns[1])
+                path_at_commit = Path(columns[2])
+                change_type = ChangeType.RENAMED
+            else:
+                renamed_from = None
+                path_at_commit = Path(columns[1])
+                change_type = {
+                    "A": ChangeType.ADDED,
+                    "D": ChangeType.DELETED,
+                }.get(code[0], ChangeType.MODIFIED)
+
+            entries.append(
+                FileHistoryCommit(
+                    commit=CommitLogEntry(
+                        hexsha=hexsha,
+                        short_hexsha=hexsha[:8],
+                        message=subject,
+                        committed_datetime=datetime.fromisoformat(committed_iso),
+                        full_message=_body.strip(),
+                        author=author,
+                    ),
+                    path_at_commit=path_at_commit,
+                    change_type=change_type,
+                    renamed_from=renamed_from,
+                )
+            )
+        return entries
+
+    def get_file_diff_against_disk(
+        self,
+        commit_hexsha: str,
+        path_at_commit: Path,
+        current_path: Path | None,
+        cancel_token: CancelToken | None = None,
+    ) -> DiffResult:
+        """Mode B: `path_at_commit`'s content at `commit_hexsha` versus
+        `current_path`'s content on disk *now* (unsaved editor buffers are
+        never consulted). `current_path` is `None`, or names a path that no
+        longer exists on disk, when the file has been deleted since --
+        rendered as a full deletion (diffed against `/dev/null`) rather than
+        as an error.
+        """
+        historical_args = [
+            git.Git.GIT_PYTHON_GIT_EXECUTABLE,
+            "cat-file",
+            "-p",
+            f"{commit_hexsha}:{path_at_commit.as_posix()}",
+        ]
+        historical_result = self._run_git_cancellable(historical_args, cancel_token)
+        if historical_result.returncode != 0:
+            raise git.GitCommandError(
+                historical_args, historical_result.returncode, historical_result.stderr
+            )
+        historical_bytes: bytes = historical_result.stdout
+
+        current_abs_path = self._repo_path / current_path if current_path is not None else None
+        current_exists = current_abs_path is not None and current_abs_path.exists()
+        current_bytes = current_abs_path.read_bytes() if current_exists else b""
+
+        # `--no-index` on a binary pair emits "Binary files ... differ" with
+        # zero hunks, which parses into a valid *empty* DiffResult -- a
+        # silent blank pane rather than an error. Sniffing the full content
+        # (already in memory either way) heads that off with a placeholder.
+        if b"\x00" in historical_bytes or b"\x00" in current_bytes:
+            return self._text_summary_result(["Binary file -- content not shown."])
+
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+                tmp_file.write(historical_bytes)
+                tmp_path = Path(tmp_file.name)
+
+            target = str(current_abs_path) if current_exists else "/dev/null"
+            diff_args = [
+                git.Git.GIT_PYTHON_GIT_EXECUTABLE,
+                "diff",
+                "--no-color",
+                "--no-index",
+                "--unified=100000",
+                "--",
+                str(tmp_path),
+                target,
+            ]
+            diff_result = self._run_git_cancellable(diff_args, cancel_token)
+            # --no-index returns 0 for identical content, 1 for any
+            # difference -- both are success, and 0 is the *ordinary* result
+            # here (mode B on a file's newest commit with no local edits),
+            # not an edge case, so it must render as an empty diff rather
+            # than as an error. Only >1 means diff itself couldn't run. This
+            # is the opposite of _diff_new_file's check just below in this
+            # file: a "new file" diff always has content, so that path never
+            # sees 0 -- don't copy its ">0 means failure" comment here.
+            if diff_result.returncode > 1:
+                raise git.GitCommandError(diff_args, diff_result.returncode, diff_result.stderr)
+            raw = diff_result.stdout.decode("utf-8", errors="replace")
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+        return self.parse_unified_diff(
+            raw,
+            old_ref=f"{commit_hexsha[:8]}:{path_at_commit}",
+            new_ref="working tree" if current_exists else "(deleted)",
+        )
+
+    def _has_any_commit(self) -> bool:
+        try:
+            self._repo.git.rev_parse("--verify", "-q", "HEAD")
+        except git.GitCommandError:
+            return False
+        return True
+
+    def _run_git_cancellable(
+        self, args: list[str], cancel_token: CancelToken | None
+    ) -> subprocess.CompletedProcess:
+        """Runs `args` (binary-mode, matching `CancelToken.run`'s own
+        capture) via `cancel_token` when one is given, or directly when not
+        -- same output shape either way, so callers never need two code
+        paths depending on whether cancellation is wired up.
+
+        The most likely silent failure this guards against: routing a git
+        call through `self._repo.git.*` instead of through this, which would
+        make `cancel()` a no-op that still looks like it worked while the
+        operation runs to completion.
+        """
+        if cancel_token is not None:
+            return cancel_token.run(args, cwd=self._repo_path)
+        return subprocess.run(args, cwd=self._repo_path, capture_output=True)
 
     def get_remote_url(self, name: str = "origin") -> str | None:
         try:
