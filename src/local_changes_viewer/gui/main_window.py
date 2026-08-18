@@ -63,6 +63,7 @@ from local_changes_viewer.gui import applog, github_auth
 from local_changes_viewer.gui.commit_log_dialog import CommitLogDialog
 from local_changes_viewer.gui.diff_view.diff_view_widget import DiffViewWidget
 from local_changes_viewer.gui.error_log_dialog import ErrorLogDialog
+from local_changes_viewer.gui.file_history_dialog import FileHistoryDialog
 from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
 from local_changes_viewer.gui.github_connect_dialog import GitHubConnectDialog
 from local_changes_viewer.gui.help_dialog import (
@@ -132,6 +133,13 @@ class MainWindow(QMainWindow):
         self._active_profile_name: str | None = self._settings.active_profile_name()
         self._selected_change: FileChange | None = None
         self._selected_repo_path: Path | None = None
+        # (repo_path, folder_scope) from the last scope_changed the tree
+        # emitted -- folder_scope is repo-relative (or None for "the whole
+        # repo"), same shape AggregateChangeList.set_scope already consumes
+        # from this signal. Drives the View menu's File History action,
+        # which _on_file_selected's tracking above cannot: it only fires for
+        # a file selection, never a folder-only one.
+        self._selected_folder_scope: tuple[Path, Path | None] | None = None
         self._patch_service = PatchService()
         # Guards _restore_previous_selection() (Bug 4) against re-entering
         # _on_file_selected: programmatically restoring the tree/list's
@@ -287,6 +295,7 @@ class MainWindow(QMainWindow):
         self._aggregate_list = AggregateChangeList()
         self._aggregate_list.file_selected.connect(self._on_file_selected)
         self._tree_view.scope_changed.connect(self._aggregate_list.set_scope)
+        self._tree_view.scope_changed.connect(self._on_folder_scope_changed)
 
         left_tabs = QTabWidget()
         left_tabs.addTab(self._tree_view, "Folder Tree")
@@ -359,6 +368,18 @@ class MainWindow(QMainWindow):
         open_pr_panel_view_action = QAction("Open PRs Panel", self)
         open_pr_panel_view_action.triggered.connect(self._on_open_pull_requests_panel)
         view_menu.addAction(open_pr_panel_view_action)
+
+        view_menu.addSeparator()
+
+        self._file_history_action = QAction("File History…", self)
+        # Starts disabled: nothing is selected yet. This is the app's first
+        # tree-selection-driven QAction enablement -- every other setEnabled
+        # call (:600, 1206, 1216, 1644, 1647) keys off GitHub-connection or
+        # worktree-running state instead. _on_folder_scope_changed flips it
+        # on the moment scope_changed reports anything selected.
+        self._file_history_action.setEnabled(False)
+        self._file_history_action.triggered.connect(self._on_file_history_from_menu)
+        view_menu.addAction(self._file_history_action)
 
         view_menu.addSeparator()
 
@@ -1594,6 +1615,7 @@ class MainWindow(QMainWindow):
             menu.addAction("Copy Name", self._on_copy_file_name)
             menu.addAction("Refresh Diff", self._on_refresh_diff)
             menu.addAction("Create patch", self._on_create_patch_for_file)
+            menu.addAction("File History…", self._on_file_history_for_file)
             menu.addSeparator()
             menu.addAction("Filter Out This File", self._on_filter_out_file)
             menu.exec(self._tree_view.viewport().mapToGlobal(pos))
@@ -1610,6 +1632,12 @@ class MainWindow(QMainWindow):
             )
             menu.addAction(
                 "Create patch", lambda: self._on_create_patch_for_folder(folder_path)
+            )
+            # Unlike "Show Log" below, which only ever runs on a repo root,
+            # File History is deliberately offered on any folder -- so this
+            # sits outside the `if is_repo_root:` block below, not inside it.
+            menu.addAction(
+                "File History…", lambda: self._on_file_history(Path(folder_path))
             )
             menu.addSeparator()
             menu.addAction(
@@ -1704,6 +1732,64 @@ class MainWindow(QMainWindow):
         applog.log(f"Show Log: {repo_path}", level=applog.LogLevel.INFO)
         dialog = CommitLogDialog(repo_path, parent=self)
         dialog.exec()
+
+    def _on_file_history(self, folder_path: Path) -> None:
+        # Folder right-click entry point. Unlike _on_show_log above, this can
+        # run on *any* folder, not only a repo root, so folder_path may be a
+        # subfolder or a nested worktree -- GitRepoAdapter.__init__ calls
+        # git.Repo(repo_path) with no search_parent_directories
+        # (git_repo_adapter.py:90), so handing it folder_path directly raises
+        # InvalidGitRepositoryError. _find_owning_repository resolves the
+        # deepest containing repository first, which is also what correctly
+        # picks a nested worktree over its parent -- exactly the worktree
+        # scoping this feature needs. None means folder_path sits outside
+        # every scanned repo, which does nothing.
+        repo = self._find_owning_repository(folder_path)
+        if repo is None:
+            return
+        applog.log(f"File History: {folder_path}", level=applog.LogLevel.INFO)
+        FileHistoryDialog(repo.path, folder_path, parent=self).exec()
+
+    def _on_file_history_for_file(self) -> None:
+        # Changed-file right-click entry point: passing initial_file kicks
+        # off the commits worker immediately -- "pre-filled" alone would
+        # still leave the user clicking to load history.
+        if self._selected_change is None or self._selected_repo_path is None:
+            self.statusBar().showMessage("No file selected", 3000)
+            return
+        # See _on_create_patch_for_file's comment: _selected_repo_path is a
+        # str at runtime, so Path equality (used inside _find_repository)
+        # needs normalizing first.
+        repo_path = Path(self._selected_repo_path)
+        repo = self._find_repository(repo_path)
+        if repo is None:
+            self.statusBar().showMessage("Could not find repository for file history", 3000)
+            return
+        file_path = self._selected_change.path
+        applog.log(f"File History: {repo_path / file_path}", level=applog.LogLevel.INFO)
+        FileHistoryDialog(
+            repo.path, repo.path / file_path.parent, parent=self, initial_file=file_path
+        ).exec()
+
+    def _on_file_history_from_menu(self) -> None:
+        # View-menu entry point. _selected_folder_scope is populated by
+        # _on_folder_scope_changed and this action is only enabled once it
+        # holds a value, so by the time this can fire there is always a
+        # concrete (repo, folder) scope to open.
+        if self._selected_folder_scope is None:
+            return
+        repo_path, folder_scope = self._selected_folder_scope
+        folder_path = repo_path / folder_scope if folder_scope is not None else repo_path
+        applog.log(f"File History: {folder_path}", level=applog.LogLevel.INFO)
+        FileHistoryDialog(repo_path, folder_path, parent=self).exec()
+
+    def _on_folder_scope_changed(self, repo_path: Path, folder_scope: Path | None) -> None:
+        # scope_changed (RepoTreeView) fires for a folder selection AND a
+        # file selection alike (tree_view.py's _on_current_changed emits it
+        # either way), so this is the app's first tree-selection-driven
+        # QAction enablement -- see _file_history_action's own comment.
+        self._selected_folder_scope = (repo_path, folder_scope)
+        self._file_history_action.setEnabled(True)
 
     def _on_list_worktrees(self, repo_path: Path) -> None:
         applog.log(f"List Worktrees: {repo_path}", level=applog.LogLevel.INFO)

@@ -45,7 +45,8 @@ them.</li>
 (also adjustable via the slider in the diff view toolbar).</li>
 </ul>
 <p>The folder tree and file rows also have their own right-click menus (copy name/path, refresh
-diff, and — on a repository row — add/remove it from a profile).</p>
+diff, <b>File History…</b> — browse a file's or folder's commit history and diff past versions
+against disk — and — on a repository row — add/remove it from a profile).</p>
 """
 
 _PR_HELP = """

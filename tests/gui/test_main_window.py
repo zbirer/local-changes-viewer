@@ -1970,6 +1970,188 @@ def test_report_error_logs_exactly_once_per_call(
         window.close()
 
 
+# ---------------------------------------------------------------------------
+# "File History…" entry points: folder right-click, changed-file
+# right-click, and the View-menu action driven by tree selection.
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_file_history_dialog(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Stands in for the real FileHistoryDialog -- a real one kicks off a
+    background commits worker from __init__, and .exec() would block in a
+    modal event loop forever under the offscreen platform (same reasoning as
+    _install_fake_selection_dialog above). Capturing the constructor
+    arguments MainWindow passes proves the *wiring* -- which repo/folder/
+    initial_file each entry point resolves -- without re-testing the dialog's
+    own behavior, already covered by tests/gui/test_file_history_dialog.py.
+    """
+    constructed: list = []
+
+    class _FakeFileHistoryDialog:
+        def __init__(
+            self, repo_path, folder_path, parent=None, initial_file=None, **_kwargs
+        ) -> None:
+            self.repo_path = repo_path
+            self.folder_path = folder_path
+            self.parent = parent
+            self.initial_file = initial_file
+            constructed.append(self)
+
+        def exec(self) -> int:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(main_window_module, "FileHistoryDialog", _FakeFileHistoryDialog)
+    return constructed
+
+
+def test_file_history_action_on_non_root_folder_menu_resolves_owning_repo(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proves both that File History is offered on a plain (non-root) folder
+    -- unlike "Show Log", which is repo-root-only -- and that the handler
+    passes the *repo root* to FileHistoryDialog, not the clicked subfolder:
+    GitRepoAdapter.__init__ has no search_parent_directories, so a subfolder
+    would raise InvalidGitRepositoryError if it ever reached the adapter."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: None)
+    window = MainWindow()
+    try:
+        repo_path = tmp_path / "repo"
+        repo = _init_real_repo(repo_path)
+        (repo_path / "sub").mkdir()
+        (repo_path / "sub" / "tracked.txt").write_text("tracked\n")
+        repo.index.add(["sub/tracked.txt"])
+        repo.index.commit("add sub/tracked.txt")
+        (repo_path / "sub" / "new_file.txt").write_text("brand new\n")
+
+        changes = GitRepoAdapter(repo_path).list_changes()
+        repository = Repository(
+            path=repo_path, name="repo", branch_status=_BRANCH, changes=changes
+        )
+        window._on_workspace_ready(Workspace(root_path=tmp_path, repositories=[repository]))
+
+        folder_index = _find_folder_index(window._tree_view.model(), repo_path / "sub")
+        assert folder_index.isValid()
+
+        window.show()
+        QTest.qWaitForWindowExposed(window)
+        captured_menus = _capture_menu(monkeypatch)
+        window._on_tree_context_menu(window._tree_view.visualRect(folder_index).center())
+        assert len(captured_menus) == 1
+        assert any(a.text() == "File History…" for a in captured_menus[0].actions())
+
+        constructed = _install_fake_file_history_dialog(monkeypatch)
+        action = next(a for a in captured_menus[0].actions() if a.text() == "File History…")
+        action.trigger()
+
+        assert len(constructed) == 1
+        assert constructed[0].repo_path == repo_path
+        assert constructed[0].folder_path == repo_path / "sub"
+        assert constructed[0].initial_file is None
+    finally:
+        window.close()
+
+
+def test_file_history_action_on_changed_file_menu_passes_initial_file(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: None)
+    window = MainWindow()
+    try:
+        repo_path = tmp_path / "repo"
+        repo = _init_real_repo(repo_path)
+        (repo_path / "sub").mkdir()
+        (repo_path / "sub" / "tracked.txt").write_text("original\n")
+        repo.index.add(["sub/tracked.txt"])
+        repo.index.commit("initial commit")
+        (repo_path / "sub" / "tracked.txt").write_text("changed\n")
+
+        changes = GitRepoAdapter(repo_path).list_changes()
+        repository = Repository(
+            path=repo_path, name="repo", branch_status=_BRANCH, changes=changes
+        )
+        window._on_workspace_ready(Workspace(root_path=tmp_path, repositories=[repository]))
+
+        change = next(c for c in changes if c.path == Path("sub/tracked.txt"))
+        file_index = MainWindow._find_tree_index(window._tree_view.model(), repo_path, change)
+        assert file_index.isValid()
+
+        window.show()
+        QTest.qWaitForWindowExposed(window)
+        captured_menus = _capture_menu(monkeypatch)
+        window._on_tree_context_menu(window._tree_view.visualRect(file_index).center())
+        assert len(captured_menus) == 1
+        assert any(a.text() == "File History…" for a in captured_menus[0].actions())
+
+        constructed = _install_fake_file_history_dialog(monkeypatch)
+        action = next(a for a in captured_menus[0].actions() if a.text() == "File History…")
+        action.trigger()
+
+        assert len(constructed) == 1
+        assert constructed[0].repo_path == repo_path
+        assert constructed[0].folder_path == repo_path / "sub"
+        assert constructed[0].initial_file == Path("sub/tracked.txt")
+    finally:
+        window.close()
+
+
+def test_file_history_view_menu_action_disabled_with_nothing_selected(
+    qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    window = MainWindow()
+    try:
+        assert window._file_history_action.isEnabled() is False
+    finally:
+        window.close()
+
+
+def test_file_history_view_menu_action_enabled_once_folder_selected(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The existing selection tracking (_selected_change/_selected_repo_path)
+    never fires for a folder-only selection, so this action's enablement
+    must come from scope_changed instead -- proven here by selecting a
+    folder row with no file ever selected."""
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: None)
+    window = MainWindow()
+    try:
+        repo_path = tmp_path / "repo"
+        repo = _init_real_repo(repo_path)
+        (repo_path / "sub").mkdir()
+        (repo_path / "sub" / "tracked.txt").write_text("tracked\n")
+        repo.index.add(["sub/tracked.txt"])
+        repo.index.commit("add sub/tracked.txt")
+        (repo_path / "sub" / "new_file.txt").write_text("brand new\n")
+
+        changes = GitRepoAdapter(repo_path).list_changes()
+        repository = Repository(
+            path=repo_path, name="repo", branch_status=_BRANCH, changes=changes
+        )
+        window._on_workspace_ready(Workspace(root_path=tmp_path, repositories=[repository]))
+
+        folder_index = _find_folder_index(window._tree_view.model(), repo_path / "sub")
+        assert folder_index.isValid()
+
+        window.show()
+        QTest.qWaitForWindowExposed(window)
+        assert window._file_history_action.isEnabled() is False
+
+        window._tree_view.setCurrentIndex(folder_index)
+        assert window._file_history_action.isEnabled() is True
+
+        constructed = _install_fake_file_history_dialog(monkeypatch)
+        window._file_history_action.trigger()
+
+        assert len(constructed) == 1
+        assert constructed[0].repo_path == repo_path
+        assert constructed[0].folder_path == repo_path / "sub"
+    finally:
+        window.close()
+
+
 def test_show_error_log_dialog_lists_errors_and_clear_hides_indicator(
     qapp, isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
