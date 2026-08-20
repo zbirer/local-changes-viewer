@@ -33,6 +33,7 @@ from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -56,7 +57,7 @@ from local_changes_viewer.gui.diff_view.side_by_side_view import SideBySideView
 from local_changes_viewer.gui.workers.stash_action_worker import StashActionWorker
 from local_changes_viewer.gui.workers.worker_keeper import start_worker
 
-_COLUMNS = ("Ref", "Message", "Date")
+_COLUMNS = ("Ref", "Date", "Message")
 _STASH_ROLE = Qt.ItemDataRole.UserRole
 _FILE_PATH_ROLE = Qt.ItemDataRole.UserRole
 
@@ -120,6 +121,20 @@ class StashesDialog(QDialog):
         self._table.itemSelectionChanged.connect(self._on_stash_selection_changed)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._on_table_context_menu)
+        # Fixed per-column resize modes, set once here rather than calling
+        # `resizeColumnsToContents()` on every reload -- that call used to
+        # size Message to the full length of the longest stash subject (real
+        # subjects run 150-200 chars), which blew the table 400+px past the
+        # dialog's viewport and pushed Date entirely off-screen with no
+        # visible scrollbar hint. Ref and Date are short and bounded, so they
+        # can safely size to their own contents; only Message stretches to
+        # fill whatever room is left, so it can never push a later column out
+        # of view. Mirrors `my_pull_requests_dialog.py`'s mixed
+        # Interactive/Stretch/ResizeToContents header setup.
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
 
         self._file_list = QListWidget()
         self._file_list.setAlternatingRowColors(True)
@@ -194,14 +209,13 @@ class StashesDialog(QDialog):
         self._table.setRowCount(len(stashes))
         for row, entry in enumerate(stashes):
             date_text = entry.created_at.strftime("%Y-%m-%d %H:%M") if entry.created_at else "—"
-            values = (entry.ref, entry.message, date_text)
+            values = (entry.ref, date_text, entry.message)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
                 if column == 0:
                     item.setData(_STASH_ROLE, entry)
                 self._table.setItem(row, column, item)
-        self._table.resizeColumnsToContents()
 
         is_empty = not stashes
         self._empty_label.setVisible(is_empty)

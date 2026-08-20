@@ -5,17 +5,14 @@ from pathlib import Path
 
 import git
 
-from PySide6.QtCore import QModelIndex, QProcess, Qt, QThreadPool, QTimer, QUrl
+from PySide6.QtCore import QProcess, Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
-    QActionGroup,
     QCloseEvent,
     QDesktopServices,
     QGuiApplication,
-    QKeySequence,
 )
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QDialog,
     QFileDialog,
@@ -24,7 +21,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QSplitter,
     QStyle,
@@ -66,13 +62,17 @@ from local_changes_viewer.gui.error_log_dialog import ErrorLogDialog
 from local_changes_viewer.gui.file_history_dialog import FileHistoryDialog
 from local_changes_viewer.gui.folder_filter_dialog import FolderFilterDialog
 from local_changes_viewer.gui.github_connect_dialog import GitHubConnectDialog
-from local_changes_viewer.gui.help_dialog import (
-    HelpDialog,
-    show_actions_help,
-    show_pull_requests_help,
-    show_settings_help,
-    show_toolbar_help,
+from local_changes_viewer.gui.help_dialog import HelpDialog
+from local_changes_viewer.gui.main_window_context_menu import show_tree_context_menu
+from local_changes_viewer.gui.main_window_helpers import (
+    apply_tooltip_font_size,
+    edit_target,
+    find_owning_repository,
+    find_repository,
+    find_tree_index,
+    github_log,
 )
+from local_changes_viewer.gui.main_window_menus import build_menus
 from local_changes_viewer.gui.my_pull_requests_dialog import MyPullRequestsDialog
 from local_changes_viewer.gui.patch_file_selection_dialog import PatchFileSelectionDialog
 from local_changes_viewer.gui.patch_text_input_dialog import PatchTextInputDialog
@@ -95,12 +95,6 @@ from local_changes_viewer.gui.workers.worker_keeper import start_worker
 from local_changes_viewer.gui.worktrees_dialog import WorktreesDialog
 from local_changes_viewer.gui.workspace_watcher import WorkspaceFileWatcher
 from local_changes_viewer.gui.workspace_tree.aggregate_list import AggregateChangeList
-from local_changes_viewer.gui.workspace_tree.tree_model import (
-    FILE_CHANGE_ROLE,
-    FOLDER_PATH_ROLE,
-    NODE_KEY_ROLE,
-    REPO_PATH_ROLE,
-)
 from local_changes_viewer.gui.workspace_tree.tree_view import RepoTreeView
 
 # A busy workspace (many repos + a fast file watcher) can fire an auto-refresh
@@ -329,233 +323,7 @@ class MainWindow(QMainWindow):
         self._splitter.setStretchFactor(1, 2)
         self.setCentralWidget(self._splitter)
 
-        actions_menu = self.menuBar().addMenu("Actions")
-
-        open_action = QAction("Open Folder…", self)
-        open_action.triggered.connect(self._on_open_folder)
-        actions_menu.addAction(open_action)
-
-        verify_changes_action = QAction("Verify Changes Against Git…", self)
-        verify_changes_action.triggered.connect(self._on_verify_changes)
-        actions_menu.addAction(verify_changes_action)
-
-        view_menu = self.menuBar().addMenu("View")
-
-        collapse_all_action = QAction("Collapse All", self)
-        collapse_all_action.triggered.connect(self._tree_view.collapse_all)
-        view_menu.addAction(collapse_all_action)
-
-        expand_all_action = QAction("Expand All", self)
-        expand_all_action.triggered.connect(self._tree_view.expand_all)
-        view_menu.addAction(expand_all_action)
-
-        expand_changed_repos_action = QAction("Expand Changed Repos", self)
-        expand_changed_repos_action.triggered.connect(self._tree_view.expand_changed_repos)
-        view_menu.addAction(expand_changed_repos_action)
-
-        view_menu.addSeparator()
-
-        expand_current_repo_action = QAction("Expand Current Repository", self)
-        expand_current_repo_action.triggered.connect(self._tree_view.expand_current_repo)
-        view_menu.addAction(expand_current_repo_action)
-
-        collapse_current_repo_action = QAction("Collapse Current Repository", self)
-        collapse_current_repo_action.triggered.connect(self._tree_view.collapse_current_repo)
-        view_menu.addAction(collapse_current_repo_action)
-
-        view_menu.addSeparator()
-
-        open_pr_panel_view_action = QAction("Open PRs Panel", self)
-        open_pr_panel_view_action.triggered.connect(self._on_open_pull_requests_panel)
-        view_menu.addAction(open_pr_panel_view_action)
-
-        view_menu.addSeparator()
-
-        self._file_history_action = QAction("File History…", self)
-        # Starts disabled: nothing is selected yet. This is the app's first
-        # tree-selection-driven QAction enablement -- every other setEnabled
-        # call (:600, 1206, 1216, 1644, 1647) keys off GitHub-connection or
-        # worktree-running state instead. _on_folder_scope_changed flips it
-        # on the moment scope_changed reports anything selected.
-        self._file_history_action.setEnabled(False)
-        self._file_history_action.triggered.connect(self._on_file_history_from_menu)
-        view_menu.addAction(self._file_history_action)
-
-        view_menu.addSeparator()
-
-        increase_font_action = QAction("Increase Font Size", self)
-        increase_font_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
-        increase_font_action.triggered.connect(self._diff_view.increase_font_size)
-        view_menu.addAction(increase_font_action)
-
-        decrease_font_action = QAction("Decrease Font Size", self)
-        decrease_font_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
-        decrease_font_action.triggered.connect(self._diff_view.decrease_font_size)
-        view_menu.addAction(decrease_font_action)
-
-        view_menu.addSeparator()
-
-        settings_dialog_action = QAction("Settings…", self)
-        # On macOS, Qt sniffs an action's text and moves anything looking like
-        # "settings"/"preferences"/"options" into the application menu. NoRole
-        # keeps this item where the user is looking for it: the View menu.
-        settings_dialog_action.setMenuRole(QAction.MenuRole.NoRole)
-        settings_dialog_action.triggered.connect(self._on_open_settings_dialog)
-        view_menu.addAction(settings_dialog_action)
-        self._settings_dialog_action = settings_dialog_action
-
-        view_menu.addSeparator()
-
-        self._profile_menu = view_menu.addMenu("Profile")
-        self._profile_action_group = QActionGroup(self)
-        self._profile_action_group.setExclusive(True)
-        self._rebuild_profile_menu()
-
-        settings_menu = self.menuBar().addMenu("Settings")
-
-        self._include_ignored_action = QAction("Show ignored files", self, checkable=True)
-        self._include_ignored_action.toggled.connect(self._on_include_ignored_toggled)
-        settings_menu.addAction(self._include_ignored_action)
-
-        self._include_unpushed_commits_action = QAction(
-            "Show committed but not pushed files", self, checkable=True
-        )
-        self._include_unpushed_commits_action.toggled.connect(
-            self._on_include_unpushed_commits_toggled
-        )
-        settings_menu.addAction(self._include_unpushed_commits_action)
-
-        self._ignore_whitespace_action = QAction("Ignore whitespace", self, checkable=True)
-        self._ignore_whitespace_action.toggled.connect(self._on_ignore_whitespace_toggled)
-        settings_menu.addAction(self._ignore_whitespace_action)
-
-        self._ignore_md_action = QAction("Ignore MD files", self, checkable=True)
-        self._ignore_md_action.toggled.connect(self._on_display_filter_toggled)
-        settings_menu.addAction(self._ignore_md_action)
-
-        self._hide_empty_repos_action = QAction(
-            "Hide repos without changes", self, checkable=True
-        )
-        self._hide_empty_repos_action.toggled.connect(self._on_display_filter_toggled)
-        settings_menu.addAction(self._hide_empty_repos_action)
-
-        self._sync_scroll_action = QAction(
-            "Sync side-by-side scroll", self, checkable=True
-        )
-        self._sync_scroll_action.toggled.connect(self._on_sync_scroll_toggled)
-        settings_menu.addAction(self._sync_scroll_action)
-
-        self._always_reload_diff_action = QAction(
-            "Always reload fresh diff", self, checkable=True
-        )
-        self._always_reload_diff_action.toggled.connect(self._on_always_reload_diff_toggled)
-        settings_menu.addAction(self._always_reload_diff_action)
-
-        auto_refresh_action = QAction("Auto Refresh…", self)
-        auto_refresh_action.triggered.connect(self._on_configure_auto_refresh)
-        settings_menu.addAction(auto_refresh_action)
-
-        self._use_file_watcher_action = QAction(
-            "Watch for File Changes", self, checkable=True
-        )
-        self._use_file_watcher_action.toggled.connect(self._on_use_file_watcher_toggled)
-        settings_menu.addAction(self._use_file_watcher_action)
-
-        log_level_action = QAction("Log Level…", self)
-        log_level_action.triggered.connect(self._on_configure_log_level)
-        settings_menu.addAction(log_level_action)
-
-        tooltip_font_size_action = QAction("Tooltip Font Size…", self)
-        tooltip_font_size_action.triggered.connect(self._on_configure_tooltip_font_size)
-        settings_menu.addAction(tooltip_font_size_action)
-
-        manage_folder_filters_action = QAction("Filtered Folders…", self)
-        manage_folder_filters_action.triggered.connect(self._on_manage_folder_filters)
-        settings_menu.addAction(manage_folder_filters_action)
-
-        manage_profiles_action = QAction("Profiles…", self)
-        manage_profiles_action.triggered.connect(self._on_manage_profiles)
-        settings_menu.addAction(manage_profiles_action)
-
-        github_menu = self.menuBar().addMenu("GitHub")
-
-        my_pull_requests_action = QAction("My Open Pull Requests…", self)
-        my_pull_requests_action.triggered.connect(self._on_show_my_pull_requests)
-        github_menu.addAction(my_pull_requests_action)
-
-        open_pr_panel_action = QAction("Open PRs Panel", self)
-        open_pr_panel_action.triggered.connect(self._on_open_pull_requests_panel)
-        github_menu.addAction(open_pr_panel_action)
-
-        github_menu.addSeparator()
-
-        connect_github_action = QAction("Connect to GitHub…", self)
-        connect_github_action.triggered.connect(self._on_connect_github)
-        github_menu.addAction(connect_github_action)
-
-        self._disconnect_github_action = QAction("Disconnect GitHub", self)
-        self._disconnect_github_action.triggered.connect(self._on_disconnect_github)
-        github_menu.addAction(self._disconnect_github_action)
-
-        help_menu = self.menuBar().addMenu("Help")
-
-        help_settings_action = QAction("Help on Settings", self)
-        help_settings_action.triggered.connect(lambda: show_settings_help(self))
-        help_menu.addAction(help_settings_action)
-
-        help_actions_action = QAction("Help on Actions", self)
-        help_actions_action.triggered.connect(lambda: show_actions_help(self))
-        help_menu.addAction(help_actions_action)
-
-        help_pr_action = QAction("Help on PR Panel / Dialog", self)
-        help_pr_action.triggered.connect(lambda: show_pull_requests_help(self))
-        help_menu.addAction(help_pr_action)
-
-        help_toolbar_action = QAction("Help on Toolbar Buttons", self)
-        help_toolbar_action.triggered.connect(lambda: show_toolbar_help(self))
-        help_menu.addAction(help_toolbar_action)
-
-        actions_menu.addSeparator()
-
-        app_log_action = QAction("App Log", self)
-        app_log_action.triggered.connect(self._on_copy_app_log)
-        actions_menu.addAction(app_log_action)
-
-        error_log_action = QAction("Error Log", self)
-        error_log_action.triggered.connect(self._on_show_error_log)
-        actions_menu.addAction(error_log_action)
-
-        copy_diff_action = QAction("Copy Diff", self)
-        copy_diff_action.triggered.connect(self._on_copy_diff)
-        actions_menu.addAction(copy_diff_action)
-
-        copy_path_action = QAction("Copy File Path", self)
-        copy_path_action.triggered.connect(self._on_copy_file_path)
-        actions_menu.addAction(copy_path_action)
-
-        copy_name_action = QAction("Copy File Name", self)
-        copy_name_action.triggered.connect(self._on_copy_file_name)
-        actions_menu.addAction(copy_name_action)
-
-        open_editor_action = QAction("Open in Default Editor", self)
-        open_editor_action.triggered.connect(self._on_open_in_editor)
-        actions_menu.addAction(open_editor_action)
-
-        reveal_action = QAction("Reveal in Finder", self)
-        reveal_action.triggered.connect(self._on_reveal_in_finder)
-        actions_menu.addAction(reveal_action)
-
-        actions_menu.addSeparator()
-
-        refresh_action = QAction("Refresh", self)
-        refresh_action.setShortcut(QKeySequence("Ctrl+R"))
-        refresh_action.triggered.connect(self._on_refresh)
-        actions_menu.addAction(refresh_action)
-
-        toggle_time_filter_action = QAction("Toggle Last Commit Time Filter", self)
-        toggle_time_filter_action.setShortcut(QKeySequence("Ctrl+D"))
-        toggle_time_filter_action.triggered.connect(self._on_toggle_time_filter)
-        actions_menu.addAction(toggle_time_filter_action)
+        build_menus(self)
 
         self._folder_status_label = QLabel("No folder open")
         self.statusBar().addPermanentWidget(self._folder_status_label)
@@ -619,7 +387,7 @@ class MainWindow(QMainWindow):
         self._apply_auto_refresh_interval(self._settings.auto_refresh_minutes())
         self._use_file_watcher_action.setChecked(self._settings.use_file_watcher())
         self._disconnect_github_action.setEnabled(self._settings.github_username() is not None)
-        self._apply_tooltip_font_size(self._settings.tooltip_font_size())
+        apply_tooltip_font_size(self._settings.tooltip_font_size())
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._diff_view.has_unsaved_edits():
@@ -869,7 +637,7 @@ class MainWindow(QMainWindow):
         self._selected_repo_path = repo_path
         self._update_file_info_label(repo_path, change)
         if change.diff is not None and not self._always_reload_diff_action.isChecked():
-            abs_path, not_editable_reason = self._edit_target(repo_path, change)
+            abs_path, not_editable_reason = edit_target(repo_path, change)
             self._diff_view.set_diff(change.diff, str(change.path), abs_path, not_editable_reason)
             return
         self._load_diff(repo_path, change)
@@ -912,51 +680,7 @@ class MainWindow(QMainWindow):
         finally:
             self._restoring_selection = False
 
-    @staticmethod
-    def _find_tree_index(
-        model, repo_path: Path, change: FileChange, parent: QModelIndex = QModelIndex()
-    ) -> QModelIndex:
-        """Recursively searches the folder tree's (proxied) model for the
-        row carrying `change`, using the same FILE_CHANGE_ROLE/REPO_PATH_ROLE
-        the tree model already exposes -- plain public QAbstractItemModel
-        API (rowCount/index/data), not a reach into tree_view.py's private
-        attributes.
-        """
-        for row in range(model.rowCount(parent)):
-            index = model.index(row, 0, parent)
-            if index.data(FILE_CHANGE_ROLE) is change and index.data(REPO_PATH_ROLE) == str(
-                repo_path
-            ):
-                return index
-            found = MainWindow._find_tree_index(model, repo_path, change, index)
-            if found.isValid():
-                return found
-        return QModelIndex()
-
-    def _edit_target(self, repo_path: Path, change: FileChange) -> tuple[Path | None, str | None]:
-        """Whether `change` can be edited in place, and if not, why -- as a
-        single (path, reason) pair so the two can never drift apart.
-        Exactly one of the two is None.
-
-        `is_unpushed_commit` is checked first: that diff is old_ref=<upstream>,
-        new_ref=HEAD (see git_repo_adapter.compute_diff), so the file on disk
-        is the CURRENT working tree, not either side of the displayed diff --
-        loading it into the edit pane would show content that matches
-        neither ref, and Save would silently overwrite it with something
-        unrelated to what the diff shown. This must be checked before
-        DELETED/directory, but the current change types can't overlap
-        (only a real file's own commits carry is_unpushed_commit).
-        """
-        if change.is_unpushed_commit:
-            return None, (
-                "This is an already-committed (not yet pushed) change, so the file "
-                "on disk no longer matches this diff."
-            )
-        if change.change_type == ChangeType.DELETED:
-            return None, "The file no longer exists."
-        if change.is_directory:
-            return None, "This is a folder, not a file."
-        return repo_path / change.path, None
+    _find_tree_index = staticmethod(find_tree_index)
 
     def _update_file_info_label(self, repo_path: Path, change: FileChange) -> None:
         if change.change_type == ChangeType.DELETED:
@@ -996,7 +720,7 @@ class MainWindow(QMainWindow):
     def _on_diff_ready(self, change: FileChange, diff) -> None:
         change.diff = diff
         if change is self._selected_change and self._selected_repo_path is not None:
-            abs_path, not_editable_reason = self._edit_target(self._selected_repo_path, change)
+            abs_path, not_editable_reason = edit_target(self._selected_repo_path, change)
             self._diff_view.set_diff(diff, str(change.path), abs_path, not_editable_reason)
 
     def _on_diff_error(self, message: str, file_path: Path) -> None:
@@ -1171,16 +895,7 @@ class MainWindow(QMainWindow):
         Tooltip Font Size… dialog and SettingsDialog's spinbox (D1)."""
         applog.log(f"Set tooltip font size: {size}", level=applog.LogLevel.INFO)
         self._settings.set_tooltip_font_size(size)
-        self._apply_tooltip_font_size(size)
-
-    def _apply_tooltip_font_size(self, size: int) -> None:
-        app = QApplication.instance()
-        if app is None:
-            return
-        app.setStyleSheet(f"QToolTip {{ font-size: {size}pt; }}" if size > 0 else "")
-
-    def _github_log(self, message: str) -> None:
-        applog.log(f"GitHub: {message}", level=applog.LogLevel.INFO)
+        apply_tooltip_font_size(size)
 
     def _auto_connect_github(self) -> None:
         username = self._settings.github_username()
@@ -1208,7 +923,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            authenticated_login = GitHubClient(token, on_log=self._github_log).get_authenticated_login()
+            authenticated_login = GitHubClient(token, on_log=github_log).get_authenticated_login()
         except GitHubError as exc:
             applog.log(f"GitHub connection failed: {exc}", level=applog.LogLevel.ERROR)
             QMessageBox.warning(self, "Connect to GitHub", f"Could not authenticate: {exc}")
@@ -1245,7 +960,7 @@ class MainWindow(QMainWindow):
         token = github_auth.get_token(username)
         if token is None:
             return None
-        return GitHubClient(token, on_log=self._github_log)
+        return GitHubClient(token, on_log=github_log)
 
     def _on_show_my_pull_requests(self) -> None:
         self._diff_view.set_pull_requests_button_enabled(False)
@@ -1604,97 +1319,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("File name copied to clipboard", 3000)
 
     def _on_tree_context_menu(self, pos) -> None:
-        index = self._tree_view.indexAt(pos)
-        if not index.isValid():
-            return
-
-        if index.data(FILE_CHANGE_ROLE) is not None:
-            self._tree_view.setCurrentIndex(index)
-            menu = QMenu(self._tree_view)
-            menu.addAction("Copy Path", self._on_copy_file_path)
-            menu.addAction("Copy Name", self._on_copy_file_name)
-            menu.addAction("Refresh Diff", self._on_refresh_diff)
-            menu.addAction("Create patch", self._on_create_patch_for_file)
-            menu.addAction("File History…", self._on_file_history_for_file)
-            menu.addSeparator()
-            menu.addAction("Filter Out This File", self._on_filter_out_file)
-            menu.exec(self._tree_view.viewport().mapToGlobal(pos))
-            return
-
-        folder_path = index.data(FOLDER_PATH_ROLE)
-        if folder_path is not None:
-            is_repo_root = index.data(NODE_KEY_ROLE) == folder_path
-            menu = QMenu(self._tree_view)
-            menu.addAction("Copy Name", lambda: self._on_copy_folder_name(folder_path))
-            menu.addAction("Copy Path", lambda: self._on_copy_folder_path(folder_path))
-            menu.addAction(
-                "Filter Out This Folder", lambda: self._on_filter_out_folder(folder_path)
-            )
-            menu.addAction(
-                "Create patch", lambda: self._on_create_patch_for_folder(folder_path)
-            )
-            # Unlike "Show Log" below, which only ever runs on a repo root,
-            # File History is deliberately offered on any folder -- so this
-            # sits outside the `if is_repo_root:` block below, not inside it.
-            menu.addAction(
-                "File History…", lambda: self._on_file_history(Path(folder_path))
-            )
-            menu.addSeparator()
-            menu.addAction(
-                "Expand All", lambda: self._tree_view.expand_index_recursive(index)
-            )
-            menu.addAction(
-                "Collapse All", lambda: self._tree_view.collapse_index_recursive(index)
-            )
-            if is_repo_root:
-                menu.addSeparator()
-                menu.addAction(
-                    "Refresh Repo", lambda: self._on_refresh_repo(Path(folder_path))
-                )
-                menu.addAction(
-                    "Show Log", lambda: self._on_show_log(Path(folder_path))
-                )
-                menu.addAction(
-                    "Show stashes...", lambda: self._on_show_stashes_for_repo(folder_path)
-                )
-                menu.addAction(
-                    "List Worktrees", lambda: self._on_list_worktrees(Path(folder_path))
-                )
-                menu.addAction(
-                    "Apply patch...", lambda: self._on_apply_patch_for_repo(folder_path)
-                )
-                repo = self._find_repository(Path(folder_path))
-                if repo is not None and repo.logical_parent_path is not None:
-                    menu.addSeparator()
-                    running = Path(folder_path) in self._worktree_terminal_windows
-                    menu.addAction(
-                        "Start", lambda: self._on_start_worktree(Path(folder_path))
-                    ).setEnabled(not running)
-                    menu.addAction(
-                        "Stop", lambda: self._on_stop_worktree(Path(folder_path))
-                    ).setEnabled(running)
-            if not index.parent().isValid():
-                repo_name = Path(folder_path).name
-                menu.addSeparator()
-                self._add_profile_submenu(menu, repo_name)
-            menu.exec(self._tree_view.viewport().mapToGlobal(pos))
-
-    def _add_profile_submenu(self, menu: QMenu, repo_name: str) -> None:
-        submenu = menu.addMenu("Add to Profile")
-        for profile in self._profiles:
-            action = submenu.addAction(profile.name)
-            action.setCheckable(True)
-            action.setChecked(repo_name in profile.repo_names)
-            action.toggled.connect(
-                lambda checked, name=profile.name: (
-                    self._on_add_repo_to_profile(repo_name, name)
-                    if checked
-                    else self._on_remove_repo_from_profile(repo_name, name)
-                )
-            )
-        if self._profiles:
-            submenu.addSeparator()
-        submenu.addAction("New Profile…", lambda: self._on_new_profile_with_repo(repo_name))
+        show_tree_context_menu(self, pos)
 
     def _on_copy_folder_name(self, folder_path: str) -> None:
         QGuiApplication.clipboard().setText(Path(folder_path).name)
@@ -1744,7 +1369,7 @@ class MainWindow(QMainWindow):
         # picks a nested worktree over its parent -- exactly the worktree
         # scoping this feature needs. None means folder_path sits outside
         # every scanned repo, which does nothing.
-        repo = self._find_owning_repository(folder_path)
+        repo = find_owning_repository(self._workspace, folder_path)
         if repo is None:
             return
         applog.log(f"File History: {folder_path}", level=applog.LogLevel.INFO)
@@ -1761,7 +1386,7 @@ class MainWindow(QMainWindow):
         # str at runtime, so Path equality (used inside _find_repository)
         # needs normalizing first.
         repo_path = Path(self._selected_repo_path)
-        repo = self._find_repository(repo_path)
+        repo = find_repository(self._workspace, repo_path)
         if repo is None:
             self.statusBar().showMessage("Could not find repository for file history", 3000)
             return
@@ -1806,27 +1431,6 @@ class MainWindow(QMainWindow):
         if dialog.restored:
             self._on_refresh_repo(repo_path)
 
-    def _find_repository(self, repo_path: Path) -> Repository | None:
-        if self._workspace is None:
-            return None
-        return next(
-            (r for r in self._workspace.repositories if r.path == repo_path), None
-        )
-
-    def _find_owning_repository(self, folder_path: Path) -> Repository | None:
-        # A folder can sit inside more than one repo's path when a nested repo
-        # (e.g. a worktree) lives under its parent -- the deepest (longest
-        # path) match is the one that actually owns the folder's files, so a
-        # nested repo's own changes never get attributed to its parent's patch.
-        if self._workspace is None:
-            return None
-        candidates = [
-            r for r in self._workspace.repositories if folder_path.is_relative_to(r.path)
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda r: len(r.path.parts))
-
     def _on_create_patch_for_file(self) -> None:
         if self._selected_change is None or self._selected_repo_path is None:
             self.statusBar().showMessage("No file selected", 3000)
@@ -1839,7 +1443,7 @@ class MainWindow(QMainWindow):
         # against a str is unconditionally False, so _find_repository would
         # never match here without normalizing first.
         repo_path = Path(self._selected_repo_path)
-        repo = self._find_repository(repo_path)
+        repo = find_repository(self._workspace, repo_path)
         if repo is None:
             self.statusBar().showMessage("Could not find repository for patch", 3000)
             return
@@ -1852,7 +1456,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_create_patch_for_folder(self, folder_path: str) -> None:
-        repo = self._find_owning_repository(Path(folder_path))
+        repo = find_owning_repository(self._workspace, Path(folder_path))
         if repo is None:
             self.statusBar().showMessage("Could not find repository for patch", 3000)
             return
@@ -1931,7 +1535,7 @@ class MainWindow(QMainWindow):
         of the files it touches (reusing PatchFileSelectionDialog exactly as
         "Create patch" does), then apply just that subset.
         """
-        repo = self._find_owning_repository(Path(folder_path))
+        repo = find_owning_repository(self._workspace, Path(folder_path))
         if repo is None:
             self.statusBar().showMessage("Could not find repository to apply patch to", 3000)
             return

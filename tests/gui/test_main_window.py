@@ -7,12 +7,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import git
 import pytest
-from PySide6.QtCore import QModelIndex, QSettings
+from PySide6.QtCore import QModelIndex, QSettings, Qt
 from PySide6.QtGui import QGuiApplication, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
 
 import local_changes_viewer.gui.main_window as main_window_module
+import local_changes_viewer.gui.main_window_context_menu as main_window_context_menu_module
 import local_changes_viewer.gui.settings as settings_module
 from local_changes_viewer.core.domain.diff import DiffResult
 from local_changes_viewer.core.domain.file_change import ChangeType, FileChange
@@ -849,7 +850,7 @@ def _capture_menu(monkeypatch: pytest.MonkeyPatch) -> list:
         def exec(self, *args, **kwargs) -> None:
             captured.append(self)
 
-    monkeypatch.setattr(main_window_module, "QMenu", _NonBlockingMenu)
+    monkeypatch.setattr(main_window_context_menu_module, "QMenu", _NonBlockingMenu)
     return captured
 
 
@@ -2148,6 +2149,65 @@ def test_file_history_view_menu_action_enabled_once_folder_selected(
         assert len(constructed) == 1
         assert constructed[0].repo_path == repo_path
         assert constructed[0].folder_path == repo_path / "sub"
+    finally:
+        window.close()
+
+
+def test_ctrl_f_on_the_folder_tree_opens_file_history_and_spares_the_find_bar(
+    qapp, isolated_settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl+F is not a free key: SideBySideView already binds it to the
+    inline find bar, scoped to the right diff pane. This action's shortcut is
+    scoped the same way to the tree, so both survive -- proven by pressing
+    the real key in each widget and checking that only the focused one
+    responds. A window-scoped shortcut would make Qt report an ambiguous
+    activation and break the find bar instead.
+    """
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(main_window_module, "save_workspace", lambda workspace: None)
+    window = MainWindow()
+    try:
+        repo_path = tmp_path / "repo"
+        repo = _init_real_repo(repo_path)
+        (repo_path / "sub").mkdir()
+        (repo_path / "sub" / "tracked.txt").write_text("tracked\n")
+        repo.index.add(["sub/tracked.txt"])
+        repo.index.commit("add sub/tracked.txt")
+        # The tree only renders folders that hold a change, so `sub` needs one
+        # to be selectable at all.
+        (repo_path / "sub" / "new_file.txt").write_text("brand new\n")
+
+        changes = GitRepoAdapter(repo_path).list_changes()
+        repository = Repository(
+            path=repo_path, name="repo", branch_status=_BRANCH, changes=changes
+        )
+        window._on_workspace_ready(Workspace(root_path=tmp_path, repositories=[repository]))
+
+        folder_index = _find_folder_index(window._tree_view.model(), repo_path / "sub")
+        assert folder_index.isValid()
+
+        window.show()
+        QTest.qWaitForWindowExposed(window)
+
+        constructed = _install_fake_file_history_dialog(monkeypatch)
+
+        window._tree_view.setCurrentIndex(folder_index)
+        window._tree_view.setFocus()
+        QTest.keyClick(
+            window._tree_view, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier
+        )
+
+        assert len(constructed) == 1
+        assert constructed[0].repo_path == repo_path
+        assert constructed[0].folder_path == repo_path / "sub"
+
+        # Same key, focus in the diff pane: File History must not fire, or it
+        # has stolen Ctrl+F from the find bar this pane owns.
+        right_pane = window._diff_view._side_by_side._right
+        right_pane.setFocus()
+        QTest.keyClick(right_pane, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+
+        assert len(constructed) == 1
     finally:
         window.close()
 

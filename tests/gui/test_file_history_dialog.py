@@ -6,7 +6,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QGuiApplication, QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -411,11 +411,48 @@ def test_mode_b_on_unmodified_file_renders_empty_diff_not_error(qapp, tmp_path: 
     assert dialog._unified_view.toPlainText() == "(no changes)"
 
 
+def test_window_title_carries_the_full_path_while_a_diff_is_shown(
+    qapp, tmp_path: Path
+) -> None:
+    """The results list clips long paths and the diff pane never names its
+    file, so the title is the only place the whole path is readable. It must
+    also go back to the folder-scoped title once no diff is on screen, or a
+    stale path outlives the diff it described."""
+    entry = _commit_entry("h1", "Subject", path="pkg/a.py")
+    result = FileHistoryResult(entries=[entry], current_path=Path("pkg/a.py"))
+    fake = FakeAdapter(
+        files_result=TrackedFilesResult(files=[_tf("pkg/a.py")]),
+        history_by_path={Path("pkg/a.py"): result},
+    )
+    dialog = _make_dialog(tmp_path, fake)
+
+    assert dialog.windowTitle() == f"File History — {tmp_path.name}"
+
+    dialog._select_file(Path("pkg/a.py"))
+
+    assert dialog._diff_area_stack.currentWidget() is dialog._diff_panel_widget
+    assert dialog.windowTitle() == f"File History — {tmp_path / 'pkg' / 'a.py'}"
+
+    dialog._clear_diff_pane_to_empty()
+
+    assert dialog.windowTitle() == f"File History — {tmp_path.name}"
+
+
 def test_view_toggle_switches_between_unified_and_side_by_side(qapp, tmp_path: Path) -> None:
+    """Side-by-side is the default view, and the toggle still round-trips
+    both ways from there. The button's label names what the *next* click
+    switches to, so it reads "Unified" while side-by-side is showing."""
     fake = FakeAdapter()
     dialog = _make_dialog(tmp_path, fake)
 
+    assert dialog._diff_stack.currentWidget() is dialog._side_by_side_view
+    assert dialog._view_toggle_button.isChecked() is True
+    assert dialog._view_toggle_button.text() == "Unified"
+
+    dialog._view_toggle_button.setChecked(False)
+
     assert dialog._diff_stack.currentWidget() is dialog._unified_view
+    assert dialog._view_toggle_button.text() == "Side-by-side"
 
     dialog._view_toggle_button.setChecked(True)
 
@@ -692,3 +729,35 @@ def test_closing_dialog_mid_fetch_cancels_worker_and_still_emits_finished(qapp, 
     worker.run()
 
     assert finished_calls == [True]
+
+
+# ---------------------------------------------------------------------------
+# Layout: the status line and the panels stay at the top of the dialog.
+# ---------------------------------------------------------------------------
+
+
+def test_status_line_and_panels_sit_directly_under_the_search_box(qapp, tmp_path: Path) -> None:
+    """A horizontal QSplitter is vertically Preferred, not Expanding -- the
+    same policy the status QLabel has -- so without an explicit stretch the
+    QVBoxLayout hands each of them half the spare height, stranding the
+    status line mid-air and pushing the Results/Commits panels into the
+    bottom half of the window.
+    """
+    files = [_tf(f"file{i}.py") for i in range(15)]
+    fake = FakeAdapter(files_result=TrackedFilesResult(files=files))
+    dialog = _make_dialog(tmp_path, fake)
+    dialog.resize(1000, 800)
+    dialog.show()
+    qapp.processEvents()
+    try:
+        search_bottom = dialog._search_box.mapTo(
+            dialog, QPoint(0, dialog._search_box.height())
+        ).y()
+        status_top = dialog._status_label.mapTo(dialog, QPoint(0, 0)).y()
+        results_top = dialog._results_list.mapTo(dialog, QPoint(0, 0)).y()
+
+        assert 0 <= status_top - search_bottom < 30
+        assert 0 < results_top - status_top < 80
+        assert dialog._results_list.height() > dialog.height() * 0.3
+    finally:
+        dialog.close()

@@ -140,10 +140,46 @@ def test_rows_render_with_ref_message_and_date(qapp) -> None:
         Path("/repo"), adapter_factory=_make_factory(adapter), thread_pool=ImmediatePool()
     )
 
+    header_labels = [
+        dialog._table.horizontalHeaderItem(i).text() for i in range(dialog._table.columnCount())
+    ]
+    assert header_labels == ["Ref", "Date", "Message"]
+
     assert dialog._table.rowCount() == 2
     assert dialog._table.item(0, 0).text() == "stash@{0}"
-    assert dialog._table.item(0, 1).text() == "On main: second"
+    assert dialog._table.item(0, 1).text() == "2026-01-02 00:00"
+    assert dialog._table.item(0, 2).text() == "On main: second"
     assert dialog._table.item(1, 0).text() == "stash@{1}"
+
+
+def test_message_column_stretches_instead_of_pushing_date_off_screen(qapp) -> None:
+    # Regression test for the real bug: a plain `resizeColumnsToContents()`
+    # used to size Message to the full length of the longest stash subject
+    # (real subjects run 150-200 chars), blowing the table hundreds of
+    # pixels past the dialog's viewport and pushing Date entirely off-screen
+    # with no visible hint that horizontal scrolling would reveal it. A
+    # header-label-order assertion alone would not have caught this -- it
+    # needs an actual long message and an actual rendered width check.
+    long_message = "On main: " + "x" * 190
+    entries = [
+        StashEntry(
+            ref="stash@{0}",
+            message=long_message,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            author="Ziv",
+        )
+    ]
+    adapter = _FakeAdapter(Path("/repo"), entries=entries)
+    dialog = StashesDialog(Path("/repo"), adapter_factory=_make_factory(adapter))
+    dialog.resize(1000, 700)
+    dialog.show()
+    qapp.processEvents()
+
+    table = dialog._table
+    total_width = sum(table.columnWidth(c) for c in range(table.columnCount()))
+    assert total_width <= table.viewport().width()
+
+    dialog.close()
 
 
 def test_buttons_disabled_with_no_selection(qapp) -> None:

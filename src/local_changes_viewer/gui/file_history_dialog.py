@@ -134,7 +134,11 @@ class FileHistoryDialog(QDialog):
 
         self._dot_icon_cache: QIcon | None = None
 
-        self.setWindowTitle(f"File History — {folder_path.name}")
+        # The folder-scoped title is what shows whenever no diff is on screen;
+        # _update_window_title swaps in the rendered file's full path while one
+        # is, and restores this when the pane goes back to a status message.
+        self._base_title = f"File History — {folder_path.name}"
+        self.setWindowTitle(self._base_title)
         parent_width = parent.width() if parent is not None else 1200
         parent_height = parent.height() if parent is not None else 700
         self.resize(int(parent_width * 0.85), int(parent_height * 0.85))
@@ -218,7 +222,13 @@ class FileHistoryDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(search_row)
         layout.addWidget(self._status_label)
-        layout.addWidget(main_splitter)
+        # A horizontal QSplitter is only Expanding along its own orientation
+        # -- vertically it is Preferred, exactly like the status QLabel above
+        # it, so without an explicit stretch the layout splits the spare
+        # height evenly between the two and the panels sink to the bottom
+        # half of the dialog. The stretch pins the status line directly under
+        # the search row and gives every remaining pixel to the panels.
+        layout.addWidget(main_splitter, 1)
 
     def _build_diff_panel(self) -> None:
         self._view_toggle_button = QPushButton("Side-by-side")
@@ -252,6 +262,13 @@ class FileHistoryDialog(QDialog):
         self._diff_stack = QStackedWidget()
         self._diff_stack.addWidget(self._unified_view)
         self._diff_stack.addWidget(self._side_by_side_view)
+        # Side-by-side is the default view. Driving it through setChecked
+        # rather than a bare setCurrentIndex(1) keeps the stack page and the
+        # button's own label ("Unified" = what the next click switches to) in
+        # one place -- _on_view_toggled owns both. It has to run here and not
+        # beside the toggled.connect above, because that slot dereferences
+        # _diff_stack, which does not exist until these two lines.
+        self._view_toggle_button.setChecked(True)
 
         self._diff_panel_widget = QWidget()
         panel_layout = QVBoxLayout(self._diff_panel_widget)
@@ -610,6 +627,22 @@ class FileHistoryDialog(QDialog):
         self._unified_view.set_diff(diff, highlight_path)
         self._side_by_side_view.set_diff(diff, highlight_path)
         self._update_now_at_label(entry)
+        self._update_window_title(Path(highlight_path))
+
+    def _update_window_title(self, diff_path: Path | None) -> None:
+        """Carries the full path of the file whose diff is on screen. The
+        results list clips long paths and the diff pane itself never names the
+        file, so the title is the only place the whole path is readable.
+
+        `diff_path` is the repo-relative path the diff pane actually rendered,
+        which in disk mode across a rename is the file's *current* name rather
+        than the name it carried at the selected commit -- deliberately, since
+        that is the content being shown.
+        """
+        if diff_path is None:
+            self.setWindowTitle(self._base_title)
+        else:
+            self.setWindowTitle(f"File History — {self._repo_path / diff_path}")
 
     def _update_now_at_label(self, entry: FileHistoryCommit) -> None:
         if (
@@ -627,6 +660,11 @@ class FileHistoryDialog(QDialog):
     def _show_diff_status(self, text: str) -> None:
         self._diff_status_label.setText(text)
         self._diff_area_stack.setCurrentWidget(self._diff_status_label)
+        # Every route back to "no diff on screen" -- clearing the pane, a
+        # failed load, the pre-selection empty state -- funnels through here,
+        # so resetting the title here rather than at each call site is what
+        # keeps a stale file path out of the title bar.
+        self._update_window_title(None)
 
     def _clear_diff_pane_to_empty(self) -> None:
         self._unified_view.clear_diff()
